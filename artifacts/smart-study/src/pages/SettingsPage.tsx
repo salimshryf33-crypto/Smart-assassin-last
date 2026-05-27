@@ -1,0 +1,234 @@
+import { motion } from 'framer-motion';
+import { ChevronLeft, Globe, BookOpen, Type, Bell, Info, Moon, ChevronRight, Check } from 'lucide-react';
+import { useAppStore } from '../store/useAppStore';
+import PageWrapper from '../components/layout/PageWrapper';
+import GlassCard from '../components/ui/GlassCard';
+
+function ToggleSwitch({ enabled, onChange }: { enabled: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <motion.button
+      whileTap={{ scale: 0.95 }}
+      onClick={() => onChange(!enabled)}
+      className="relative flex h-7 w-12 items-center rounded-full transition-colors duration-300 flex-shrink-0"
+      style={{
+        background: enabled
+          ? 'linear-gradient(135deg, #0090ff, #00c6ff)'
+          : 'rgba(255,255,255,0.1)',
+        boxShadow: enabled ? '0 0 12px rgba(0,198,255,0.3)' : 'none',
+      }}
+    >
+      <motion.div
+        animate={{ x: enabled ? 22 : 2 }}
+        transition={{ type: 'spring', stiffness: 400, damping: 25 }}
+        className="h-5 w-5 rounded-full bg-white"
+        style={{ boxShadow: '0 1px 4px rgba(0,0,0,0.3)' }}
+      />
+    </motion.button>
+  );
+}
+
+function SettingRow({
+  icon: Icon,
+  iconColor,
+  iconBg,
+  label,
+  description,
+  right,
+}: {
+  icon: typeof Globe;
+  iconColor: string;
+  iconBg: string;
+  label: string;
+  description?: string;
+  right: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-3 py-3.5 px-4">
+      <div
+        className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
+        style={{ background: iconBg }}
+      >
+        <Icon size={16} style={{ color: iconColor }} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-white">{label}</p>
+        {description && <p className="text-[11px] text-slate-500 mt-0.5 truncate">{description}</p>}
+      </div>
+      <div className="flex-shrink-0">{right}</div>
+    </div>
+  );
+}
+
+const LANGUAGES = ['English', 'Spanish', 'French', 'German', 'Japanese', 'Arabic'];
+const FONT_SIZES = ['small', 'medium', 'large'] as const;
+
+export default function SettingsPage() {
+  const { settings, updateSettings, setPage } = useAppStore();
+
+  return (
+    <PageWrapper>
+      <div className="px-5 pt-14 pb-32">
+        <div className="mb-6 flex items-center gap-3">
+          <motion.button
+            whileTap={{ scale: 0.9 }}
+            onClick={() => setPage('home')}
+            className="flex h-9 w-9 items-center justify-center rounded-xl"
+            style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)' }}
+          >
+            <ChevronLeft size={18} className="text-slate-400" />
+          </motion.button>
+          <div>
+            <p className="text-xs font-medium uppercase tracking-widest text-slate-500">Preferences</p>
+            <h1 className="text-2xl font-bold text-white">Settings</h1>
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Appearance</p>
+            <GlassCard className="overflow-hidden divide-y divide-white/[0.04]">
+              <SettingRow
+                icon={Moon}
+                iconColor="#38bdf8"
+                iconBg="rgba(56,189,248,0.1)"
+                label="Dark Mode"
+                description="Futuristic dark theme"
+                right={
+                  <ToggleSwitch
+                    enabled={settings.darkMode}
+                    onChange={(v) => updateSettings({ darkMode: v })}
+                  />
+                }
+              />
+              <div className="px-4 py-3.5">
+                <div className="flex items-center gap-3 mb-3">
+                  <div
+                    className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
+                    style={{ background: 'rgba(245,158,11,0.1)' }}
+                  >
+                    <Type size={16} style={{ color: '#f59e0b' }} />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-white">Font Size</p>
+                    <p className="text-[11px] text-slate-500">{settings.fontSize}</p>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  {FONT_SIZES.map((size) => (
+                    <motion.button
+                      key={size}
+                      whileTap={{ scale: 0.93 }}
+                      onClick={() => updateSettings({ fontSize: size })}
+                      className="flex flex-1 items-center justify-center gap-1.5 rounded-xl py-2 text-xs font-medium capitalize transition-all"
+                      style={{
+                        background: settings.fontSize === size ? 'rgba(245,158,11,0.15)' : 'rgba(255,255,255,0.04)',
+                        border: settings.fontSize === size ? '1px solid rgba(245,158,11,0.35)' : '1px solid rgba(255,255,255,0.07)',
+                        color: settings.fontSize === size ? '#f59e0b' : '#64748b',
+                      }}
+                    >
+                      {settings.fontSize === size && <Check size={11} />}
+                      {size}
+                    </motion.button>
+                  ))}
+                </div>
+              </div>
+            </GlassCard>
+          </div>
+
+          <div>
+            <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Study</p>
+            <GlassCard className="overflow-hidden divide-y divide-white/[0.04]">
+              <div className="px-4 py-3.5">
+                <div className="flex items-center gap-3 mb-3">
+                  <div
+                    className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
+                    style={{ background: 'rgba(0,198,255,0.1)' }}
+                  >
+                    <BookOpen size={16} style={{ color: '#00c6ff' }} />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-white">Curriculum</p>
+                    <p className="text-[11px] text-slate-500">{settings.curriculum}</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {['STEM', 'Arts & Humanities', 'Business', 'Medicine'].map((cur) => (
+                    <motion.button
+                      key={cur}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => updateSettings({ curriculum: cur })}
+                      className="rounded-xl px-3 py-2 text-xs font-medium transition-all text-left"
+                      style={{
+                        background: settings.curriculum === cur ? 'rgba(0,198,255,0.12)' : 'rgba(255,255,255,0.04)',
+                        border: settings.curriculum === cur ? '1px solid rgba(0,198,255,0.3)' : '1px solid rgba(255,255,255,0.06)',
+                        color: settings.curriculum === cur ? '#00c6ff' : '#64748b',
+                      }}
+                    >
+                      {cur}
+                    </motion.button>
+                  ))}
+                </div>
+              </div>
+            </GlassCard>
+          </div>
+
+          <div>
+            <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Language</p>
+            <GlassCard className="overflow-hidden divide-y divide-white/[0.04]">
+              {LANGUAGES.map((lang) => (
+                <motion.button
+                  key={lang}
+                  whileTap={{ scale: 0.99 }}
+                  onClick={() => updateSettings({ language: lang })}
+                  className="flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors duration-200"
+                  style={{ background: settings.language === lang ? 'rgba(0,198,255,0.04)' : 'transparent' }}
+                >
+                  <Globe size={14} className="text-slate-500 flex-shrink-0" />
+                  <span className={`flex-1 text-sm ${settings.language === lang ? 'text-white font-medium' : 'text-slate-400'}`}>
+                    {lang}
+                  </span>
+                  {settings.language === lang && (
+                    <Check size={14} className="text-[#00c6ff]" />
+                  )}
+                </motion.button>
+              ))}
+            </GlassCard>
+          </div>
+
+          <div>
+            <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Notifications</p>
+            <GlassCard className="overflow-hidden divide-y divide-white/[0.04]">
+              <SettingRow
+                icon={Bell}
+                iconColor="#f59e0b"
+                iconBg="rgba(245,158,11,0.1)"
+                label="Push Notifications"
+                description="Study reminders and alerts"
+                right={
+                  <ToggleSwitch
+                    enabled={settings.notifications}
+                    onChange={(v) => updateSettings({ notifications: v })}
+                  />
+                }
+              />
+            </GlassCard>
+          </div>
+
+          <div>
+            <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-slate-500">About</p>
+            <GlassCard className="overflow-hidden divide-y divide-white/[0.04]">
+              <SettingRow
+                icon={Info}
+                iconColor="#64748b"
+                iconBg="rgba(100,116,139,0.1)"
+                label="Smart Study Assistant"
+                description="Version 1.0.0 · Phase 1 MVP"
+                right={<ChevronRight size={14} className="text-slate-600" />}
+              />
+            </GlassCard>
+          </div>
+        </div>
+      </div>
+    </PageWrapper>
+  );
+}
