@@ -29,27 +29,20 @@ Do not answer questions outside this subject.
 `;
 
   const countryLabel =
-    curriculum.country === 'egypt'
-      ? 'مصر (المنهج المصري)'
-      : curriculum.country === 'sudan'
-      ? 'السودان (المنهج السوداني)'
-      : curriculum.country;
+    curriculum.country === 'egypt' ? 'مصر (المنهج المصري)' :
+    curriculum.country === 'sudan' ? 'السودان (المنهج السوداني)' :
+    curriculum.country;
 
   const levelLabel =
-    curriculum.level === 'primary'
-      ? 'المرحلة الابتدائية'
-      : curriculum.level === 'preparatory'
-      ? 'المرحلة الإعدادية'
-      : curriculum.level === 'secondary'
-      ? 'المرحلة الثانوية'
-      : curriculum.level;
+    curriculum.level === 'primary' ? 'المرحلة الابتدائية' :
+    curriculum.level === 'preparatory' ? 'المرحلة الإعدادية' :
+    curriculum.level === 'secondary' ? 'المرحلة الثانوية' :
+    curriculum.level;
 
   const trackLabel =
-    curriculum.track === 'scientific'
-      ? 'العلمي'
-      : curriculum.track === 'literary'
-      ? 'الأدبي'
-      : curriculum.track || 'غير محدد';
+    curriculum.track === 'scientific' ? 'العلمي' :
+    curriculum.track === 'literary' ? 'الأدبي' :
+    curriculum.track || 'غير محدد';
 
   const referenceBlock = curriculumReference
     ? `${curriculumReference}
@@ -73,7 +66,6 @@ ROLE
 You are NOT a generic chatbot.
 You are a precise, exam-focused private tutor.
 You ONLY operate within the curriculum object provided below.
-You did NOT choose this curriculum — it was assigned by the system.
 
 ==================================================
 ACTIVE CURRICULUM OBJECT
@@ -133,7 +125,6 @@ let cachedModel: string | null = null;
 
 async function discoverModel(apiKey: string): Promise<string> {
   if (cachedModel) return cachedModel;
-
   try {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
@@ -150,22 +141,12 @@ async function discoverModel(apiKey: string): Promise<string> {
           !m.name.includes('aqa')
       );
       if (match) {
-        const modelId = match.name.replace(/^models\//, '');
-        cachedModel = modelId;
-        return modelId;
+        cachedModel = match.name.replace(/^models\//, '');
+        return cachedModel;
       }
     }
-  } catch {
-    // fall through
-  }
-
-  const fallbacks = [
-    'gemini-1.5-flash-latest',
-    'gemini-1.5-flash',
-    'gemini-1.5-pro',
-    'gemini-2.0-flash',
-  ];
-  cachedModel = fallbacks[0];
+  } catch { /* fall through */ }
+  cachedModel = 'gemini-1.5-flash-latest';
   return cachedModel;
 }
 
@@ -178,19 +159,20 @@ export async function generateAIResponse(
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
 
   const modelId = await discoverModel(apiKey);
-
   const ctx = curriculum ?? { country: '', level: '', track: '', subject: null };
 
+  // Retrieve curriculum reference from backend (async RAG)
   let curriculumReference: string | undefined;
   if (ctx.country && ctx.level && ctx.subject) {
-    const chunks = searchCurriculum(ctx.country, ctx.level, ctx.subject, userMessage);
-    if (chunks.length > 0) {
-      curriculumReference = formatCurriculumContext(chunks);
-    }
+    try {
+      const chunks = await searchCurriculum(ctx.country, ctx.level, ctx.subject, userMessage);
+      if (chunks.length > 0) {
+        curriculumReference = formatCurriculumContext(chunks);
+      }
+    } catch { /* proceed without reference */ }
   }
 
   const systemPrompt = buildSystemPrompt(ctx, curriculumReference);
-
   const contents: ConversationMessage[] = [
     ...history,
     { role: 'user', parts: [{ text: userMessage }] },
@@ -209,10 +191,7 @@ export async function generateAIResponse(
       body: {
         contents: [
           { role: 'user', parts: [{ text: systemPrompt }] },
-          {
-            role: 'model',
-            parts: [{ text: 'مفهوم. أنا Sage، مدرسك الخاص. كيف يمكنني مساعدتك؟' }],
-          },
+          { role: 'model', parts: [{ text: 'مفهوم. أنا Sage، مدرسك الخاص. كيف يمكنني مساعدتك؟' }] },
           ...history,
           { role: 'user', parts: [{ text: userMessage }] },
         ],
@@ -232,30 +211,18 @@ export async function generateAIResponse(
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(attempt.body),
       });
-
       const data = await res.json();
-
       if (!res.ok) {
         const errMsg: string = data?.error?.message ?? `HTTP ${res.status}`;
         lastError = errMsg;
-        if (
-          res.status === 429 ||
-          errMsg.toLowerCase().includes('quota') ||
-          errMsg.toLowerCase().includes('resource_exhausted')
-        ) {
+        if (res.status === 429 || errMsg.toLowerCase().includes('quota') || errMsg.toLowerCase().includes('resource_exhausted')) {
           throw new Error('quota_exceeded');
         }
-        if (errMsg.toLowerCase().includes('not found')) {
-          cachedModel = null;
-        }
+        if (errMsg.toLowerCase().includes('not found')) cachedModel = null;
         continue;
       }
-
       const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-      if (!text) {
-        lastError = 'Empty response';
-        continue;
-      }
+      if (!text) { lastError = 'Empty response'; continue; }
       return text;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

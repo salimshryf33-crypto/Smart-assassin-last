@@ -79,7 +79,6 @@
   "dependencies": {
     "firebase": "^12.13.0",
     "katex": "^0.17.0",
-    "pdfjs-dist": "^5.7.284",
     "react-markdown": "^10.1.0",
     "rehype-katex": "^7.0.1",
     "remark-math": "^6.0.0"

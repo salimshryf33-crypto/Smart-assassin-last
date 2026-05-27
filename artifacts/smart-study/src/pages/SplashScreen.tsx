@@ -42,7 +42,7 @@ const particles = Array.from({ length: 30 }, (_, i) => ({
 export default function SplashScreen() {
   const setPage = useAppStore((s) => s.setPage);
   const profileComplete = useAppStore((s) => s.studentProfile?.profileComplete ?? false);
-  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const profileCompleteRef = useRef(profileComplete);
   profileCompleteRef.current = profileComplete;
 
