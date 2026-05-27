@@ -1,3 +1,5 @@
+import { searchCurriculum, formatCurriculumContext } from './curriculumSearch';
+
 export interface CurriculumContext {
   country: string;
   level: string;
@@ -5,38 +7,63 @@ export interface CurriculumContext {
   subject: string | null;
 }
 
-export function buildSystemPrompt(curriculum: CurriculumContext): string {
+export function buildSystemPrompt(
+  curriculum: CurriculumContext,
+  curriculumReference?: string
+): string {
   const curriculumBlock = JSON.stringify(curriculum, null, 2);
 
-  const noSubjectBlock = curriculum.subject === null
-    ? `
+  const noSubjectBlock =
+    curriculum.subject === null
+      ? `
 IMPORTANT — Subject not selected:
 The student has not chosen a subject yet.
 Do NOT start teaching.
 Politely ask them in Arabic to select a subject from the available list first.
 Do not answer any academic question until a subject is provided.
 `
-    : `
+      : `
 ACTIVE SUBJECT: ${curriculum.subject}
 You are now teaching this subject ONLY.
 Do not answer questions outside this subject.
 `;
 
   const countryLabel =
-    curriculum.country === 'egypt' ? 'مصر (المنهج المصري)' :
-    curriculum.country === 'sudan' ? 'السودان (المنهج السوداني)' :
-    curriculum.country;
+    curriculum.country === 'egypt'
+      ? 'مصر (المنهج المصري)'
+      : curriculum.country === 'sudan'
+      ? 'السودان (المنهج السوداني)'
+      : curriculum.country;
 
   const levelLabel =
-    curriculum.level === 'primary' ? 'المرحلة الابتدائية' :
-    curriculum.level === 'preparatory' ? 'المرحلة الإعدادية' :
-    curriculum.level === 'secondary' ? 'المرحلة الثانوية' :
-    curriculum.level;
+    curriculum.level === 'primary'
+      ? 'المرحلة الابتدائية'
+      : curriculum.level === 'preparatory'
+      ? 'المرحلة الإعدادية'
+      : curriculum.level === 'secondary'
+      ? 'المرحلة الثانوية'
+      : curriculum.level;
 
   const trackLabel =
-    curriculum.track === 'scientific' ? 'العلمي' :
-    curriculum.track === 'literary' ? 'الأدبي' :
-    curriculum.track || 'غير محدد';
+    curriculum.track === 'scientific'
+      ? 'العلمي'
+      : curriculum.track === 'literary'
+      ? 'الأدبي'
+      : curriculum.track || 'غير محدد';
+
+  const referenceBlock = curriculumReference
+    ? `${curriculumReference}
+
+==================================================
+GROUNDING RULES (CURRICULUM REFERENCE)
+==================================================
+- The CURRICULUM REFERENCE MATERIAL above is extracted from the official textbook.
+- Base your explanation on this material as your primary source.
+- You may expand with examples but NEVER contradict the reference.
+- Cite the chapter name when relevant (e.g., "كما هو مذكور في فصل ...").
+- If the reference does not cover the question, say so honestly and answer from general knowledge within the curriculum scope.
+`
+    : '';
 
   return `You are Sage — a Curriculum Engine AI Tutor built for a premium educational app.
 
@@ -57,7 +84,7 @@ Country: ${countryLabel}
 Level: ${levelLabel}
 Track: ${trackLabel}
 ${noSubjectBlock}
-
+${referenceBlock}
 ==================================================
 STRICT RULES
 ==================================================
@@ -125,7 +152,6 @@ async function discoverModel(apiKey: string): Promise<string> {
       if (match) {
         const modelId = match.name.replace(/^models\//, '');
         cachedModel = modelId;
-        console.log('[Sage] Using model:', modelId);
         return modelId;
       }
     }
@@ -153,9 +179,17 @@ export async function generateAIResponse(
 
   const modelId = await discoverModel(apiKey);
 
-  const systemPrompt = buildSystemPrompt(
-    curriculum ?? { country: '', level: '', track: '', subject: null }
-  );
+  const ctx = curriculum ?? { country: '', level: '', track: '', subject: null };
+
+  let curriculumReference: string | undefined;
+  if (ctx.country && ctx.level && ctx.subject) {
+    const chunks = searchCurriculum(ctx.country, ctx.level, ctx.subject, userMessage);
+    if (chunks.length > 0) {
+      curriculumReference = formatCurriculumContext(chunks);
+    }
+  }
+
+  const systemPrompt = buildSystemPrompt(ctx, curriculumReference);
 
   const contents: ConversationMessage[] = [
     ...history,
@@ -175,7 +209,10 @@ export async function generateAIResponse(
       body: {
         contents: [
           { role: 'user', parts: [{ text: systemPrompt }] },
-          { role: 'model', parts: [{ text: 'مفهوم. أنا Sage، مدرسك الخاص. كيف يمكنني مساعدتك؟' }] },
+          {
+            role: 'model',
+            parts: [{ text: 'مفهوم. أنا Sage، مدرسك الخاص. كيف يمكنني مساعدتك؟' }],
+          },
           ...history,
           { role: 'user', parts: [{ text: userMessage }] },
         ],
@@ -201,7 +238,11 @@ export async function generateAIResponse(
       if (!res.ok) {
         const errMsg: string = data?.error?.message ?? `HTTP ${res.status}`;
         lastError = errMsg;
-        if (res.status === 429 || errMsg.toLowerCase().includes('quota') || errMsg.toLowerCase().includes('resource_exhausted')) {
+        if (
+          res.status === 429 ||
+          errMsg.toLowerCase().includes('quota') ||
+          errMsg.toLowerCase().includes('resource_exhausted')
+        ) {
           throw new Error('quota_exceeded');
         }
         if (errMsg.toLowerCase().includes('not found')) {

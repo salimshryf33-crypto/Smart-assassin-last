@@ -12,9 +12,10 @@ import AIChat from './pages/AIChat';
 import SearchPage from './pages/SearchPage';
 import ProfilePage from './pages/ProfilePage';
 import SettingsPage from './pages/SettingsPage';
+import CurriculumManager from './pages/CurriculumManager';
 import { Brain } from 'lucide-react';
 
-const NO_NAV_PAGES = new Set(['splash', 'profile-setup', 'login']);
+const NO_NAV_PAGES = new Set(['splash', 'profile-setup', 'login', 'curriculum-manager']);
 
 function LoadingScreen() {
   return (
@@ -61,6 +62,7 @@ function AppContent() {
       case 'search': return <SearchPage key="search" />;
       case 'profile': return <ProfilePage key="profile" />;
       case 'settings': return <SettingsPage key="settings" />;
+      case 'curriculum-manager': return <CurriculumManager key="curriculum-manager" />;
       default: return <HomeDashboard key="home" />;
     }
   };

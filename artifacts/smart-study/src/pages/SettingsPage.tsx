@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { ChevronLeft, Globe, BookOpen, Type, Bell, Info, Moon, ChevronRight, Check } from 'lucide-react';
+import { ChevronLeft, Globe, BookOpen, Type, Bell, Info, Moon, ChevronRight, Check, Database } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import PageWrapper from '../components/layout/PageWrapper';
 import GlassCard from '../components/ui/GlassCard';
@@ -211,6 +211,29 @@ export default function SettingsPage() {
                   />
                 }
               />
+            </GlassCard>
+          </div>
+
+          <div>
+            <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-slate-500">المنهج الدراسي</p>
+            <GlassCard className="overflow-hidden divide-y divide-white/[0.04]">
+              <motion.button
+                whileTap={{ scale: 0.99 }}
+                onClick={() => setPage('curriculum-manager')}
+                className="flex w-full items-center gap-3 px-4 py-3.5 text-left"
+              >
+                <div
+                  className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
+                  style={{ background: 'rgba(0,198,255,0.1)' }}
+                >
+                  <Database size={16} style={{ color: '#00c6ff' }} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-white">إدارة كتب المنهج</p>
+                  <p className="text-[11px] text-slate-500">ارفع PDF الكتب لتفعيل التدريس المبني على المنهج</p>
+                </div>
+                <ChevronRight size={14} className="text-slate-600 flex-shrink-0" />
+              </motion.button>
             </GlassCard>
           </div>
 
