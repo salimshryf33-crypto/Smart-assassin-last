@@ -102,7 +102,7 @@ router.get('/search', (req, res) => {
     res.status(400).json({ error: 'country, grade, and subject are required' });
     return;
   }
-  const chunks = searchChunks(country, grade, subject, query, topK ? parseInt(topK) : 3);
+  const chunks = searchChunks(country, grade, subject, query, topK ? parseInt(topK) : 5);
   res.json({ chunks, count: chunks.length });
 });
 

@@ -165,7 +165,7 @@ export async function generateAIResponse(
   let curriculumReference: string | undefined;
   if (ctx.country && ctx.level && ctx.subject) {
     try {
-      const chunks = await searchCurriculum(ctx.country, ctx.level, ctx.subject, userMessage);
+      const chunks = await searchCurriculum(ctx.country, ctx.level, ctx.subject, userMessage, 5);
       if (chunks.length > 0) {
         curriculumReference = formatCurriculumContext(chunks);
       }

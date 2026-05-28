@@ -7,7 +7,7 @@ export async function searchCurriculum(
   level: string,
   subject: string,
   query: string,
-  topK = 3
+  topK = 5
 ): Promise<CurriculumChunk[]> {
   try {
     return await searchCurriculumApi(country, level, subject, query, topK);
@@ -19,7 +19,8 @@ export async function searchCurriculum(
 export function formatCurriculumContext(chunks: CurriculumChunk[]): string {
   if (chunks.length === 0) return '';
   const sections = chunks.map(
-    (c) => `--- [${c.chapter} | Pages ${c.pageRange}] ---\n${c.content.slice(0, 1500)}`
+    (c, i) =>
+      `--- [قسم ${i + 1}: ${c.chapter} | صفحات ${c.pageRange}] ---\n${c.content.slice(0, 2500)}`
   );
-  return `\n\n==================================================\nCURRICULUM REFERENCE MATERIAL\n==================================================\nThe following is extracted directly from the official textbook. Use it as your primary source:\n\n${sections.join('\n\n')}\n==================================================`;
+  return `\n\n==================================================\nCURRICULUM REFERENCE MATERIAL\n==================================================\nThe following is extracted directly from the official textbook. Use it as your primary teaching source:\n\n${sections.join('\n\n')}\n==================================================`;
 }
