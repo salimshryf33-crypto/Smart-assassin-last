@@ -12,6 +12,7 @@ export interface CurriculumChunk {
   pageRange: string;
   chunkIndex: number;
   content: string;
+  contentNormalized: string; // pre-computed for fast Arabic search
   keywords: string[];
   embedding?: number[];
 }
@@ -85,65 +86,98 @@ export function loadChunks(docId: string): CurriculumChunk[] {
   }
 }
 
-// ─────────────────────────────────────────────
-// Arabic text normalization
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Arabic normalization
+//
+// This PDF has two known extraction artifacts:
+//   1. U+FFFD (replacement char) inserted INSIDE Arabic words where pdfjs
+//      could not decode a glyph — e.g. "أ?سبابها" instead of "أسبابها"
+//   2. Tashkeel/diacritics separated by spaces from their base letters,
+//      producing single-char tokens that break word boundaries
+//
+// Fix: strip ALL problematic characters so that "?أ?سبابها" → "اسبابها"
+// and matching against query "اسباب" succeeds via substring.
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function normalizeArabic(text: string): string {
   return (
     text
-      // Remove all diacritics / tashkeel
+      // Step 1: Unicode compatibility normalization (merge composed chars)
+      .normalize('NFKC')
+      // Step 2: Remove BOM
+      .replace(/\uFEFF/g, '')
+      // Step 3: Remove zero-width and directional Unicode marks
+      .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F]/g, '')
+      // Step 4: *** Remove U+FFFD replacement chars (KEY FIX) ***
+      // These appear inside Arabic words when pdfjs cannot decode a glyph
+      .replace(/\uFFFD/g, '')
+      // Step 5: Remove all Arabic tashkeel / diacritics
       .replace(/[\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED]/g, '')
-      // Normalize alef + hamza variants → bare alef
-      .replace(/[أإآٱ]/g, 'ا')
-      // Normalize hamza on waw/ya
+      // Step 6: Normalize Alef variants → bare Alef
+      .replace(/[أإآٱ\u0671\u0672\u0673]/g, 'ا')
+      // Step 7: Normalize Hamza on Waw and Ya
       .replace(/ؤ/g, 'و')
       .replace(/ئ/g, 'ي')
-      // Normalize teh marbuta → ha (helps with morphological variants)
+      // Step 8: Alef Maqsura → Ya (for morphological matching)
+      .replace(/ى/g, 'ي')
+      // Step 9: Teh Marbuta → Ha
       .replace(/ة/g, 'ه')
+      // Step 10: Remove Arabic Tatweel (kashida)
+      .replace(/\u0640/g, '')
+      // Step 11: Replace any remaining non-Arabic/Latin/digit/space with space
+      .replace(/[^\u0600-\u06FF\w\s]/g, ' ')
+      // Step 12: Collapse whitespace
+      .replace(/\s{2,}/g, ' ')
       .toLowerCase()
       .trim()
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Tokenizer — splits normalized text into searchable tokens
+// ─────────────────────────────────────────────────────────────────────────────
+
 const STOP_WORDS = new Set([
   'في', 'من', 'إلى', 'على', 'أن', 'هذا', 'هذه', 'التي', 'الذي', 'كان',
   'بين', 'ما', 'هو', 'هي', 'لا', 'عن', 'مع', 'بعد', 'قبل', 'كل', 'عند',
   'كانت', 'يكون', 'وهو', 'وهي', 'ذلك', 'تلك', 'هناك', 'حيث', 'وقد', 'قد',
+  'ان', 'هذا', 'هذه', 'الذي', 'التي', 'كان', 'كانت', 'ليس', 'لكن', 'اذا',
   'the', 'and', 'of', 'to', 'a', 'in', 'is', 'are', 'was', 'for', 'with',
-  'as', 'by', 'at', 'an', 'or', 'it', 'be',
+  'as', 'by', 'at', 'an', 'or', 'it', 'be', 'has', 'had',
 ]);
 
-function tokenize(raw: string): string[] {
-  return normalizeArabic(raw)
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+export function tokenize(text: string): string[] {
+  return normalizeArabic(text)
     .split(/\s+/)
     .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
 }
 
-// Character trigram set for semantic similarity fallback
-function buildTrigrams(text: string): Set<string> {
+// ─────────────────────────────────────────────────────────────────────────────
+// Character trigrams for semantic fallback
+// ─────────────────────────────────────────────────────────────────────────────
+
+function buildTrigrams(normalizedText: string): Set<string> {
+  const s = normalizedText.replace(/\s+/g, '');
   const result = new Set<string>();
-  const t = normalizeArabic(text).replace(/\s+/g, '');
-  for (let i = 0; i + 2 < t.length; i++) {
-    result.add(t.slice(i, i + 3));
+  for (let i = 0; i + 2 < s.length; i++) {
+    result.add(s.slice(i, i + 3));
   }
   return result;
 }
 
-function trigramSimilarity(queryTrigrams: Set<string>, targetText: string): number {
+function trigramScore(queryTrigrams: Set<string>, chunkNormalized: string): number {
   if (queryTrigrams.size === 0) return 0;
-  const targetTrigrams = buildTrigrams(targetText);
+  const target = buildTrigrams(chunkNormalized);
   let hits = 0;
-  for (const tri of queryTrigrams) {
-    if (targetTrigrams.has(tri)) hits++;
+  for (const t of queryTrigrams) {
+    if (target.has(t)) hits++;
   }
   return hits / queryTrigrams.size;
 }
 
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // Grade / level mapping
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 
 const LEVEL_GRADE_MAP: Record<string, string[]> = {
   primary: ['grade1', 'grade2', 'grade3', 'grade4', 'grade5', 'grade6'],
@@ -151,9 +185,9 @@ const LEVEL_GRADE_MAP: Record<string, string[]> = {
   secondary: ['grade10', 'grade11', 'grade12'],
 };
 
-// ─────────────────────────────────────────────
-// Main search function
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Main search
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function searchChunks(
   country: string,
@@ -162,10 +196,7 @@ export function searchChunks(
   query: string,
   topK = 5
 ): CurriculumChunk[] {
-  // Support both exact grade ('grade12') and level ('secondary')
-  const validGrades = new Set<string>(
-    LEVEL_GRADE_MAP[gradeOrLevel] ?? [gradeOrLevel]
-  );
+  const validGrades = new Set<string>(LEVEL_GRADE_MAP[gradeOrLevel] ?? [gradeOrLevel]);
 
   const docs = readIndex().filter(
     (d) =>
@@ -176,96 +207,76 @@ export function searchChunks(
   );
 
   if (docs.length === 0) {
-    console.log(`[curriculum-search] No docs found for country=${country} grade/level=${gradeOrLevel} subject=${subject}`);
+    console.log(`[search] No docs — country=${country} grade/level=${gradeOrLevel} subject=${subject}`);
     return [];
   }
 
   const allChunks = docs.flatMap((d) => loadChunks(d.id));
-  console.log(`[curriculum-search] Loaded ${allChunks.length} chunks from ${docs.length} doc(s) for query="${query}"`);
-
+  console.log(`[search] ${allChunks.length} chunks from ${docs.length} doc(s). Query="${query}"`);
   if (allChunks.length === 0) return [];
-
   if (!query.trim()) return allChunks.slice(0, topK);
 
-  const normalizedQuery = normalizeArabic(query);
-  const queryTokens = tokenize(query);
-  const queryTrigrams = buildTrigrams(query);
+  // Normalize query
+  const qNorm = normalizeArabic(query);
+  const qTokens = tokenize(query);
+  const qTrigrams = buildTrigrams(qNorm);
 
-  // ── Scoring ─────────────────────────────────
+  console.log(`[search] Normalized query="${qNorm}" tokens=[${qTokens.join(', ')}]`);
+
+  // Score every chunk
   const scored = allChunks.map((chunk) => {
-    const normalizedContent = normalizeArabic(chunk.content);
-    const contentTokens = new Set(tokenize(chunk.content));
-    const normalizedChapter = normalizeArabic(chunk.chapter);
+    // Use pre-computed normalized content if available, else compute on-the-fly
+    const cNorm = chunk.contentNormalized ?? normalizeArabic(chunk.content);
+    const cTokenSet = new Set(tokenize(chunk.content));
+    const chapterNorm = normalizeArabic(chunk.chapter);
 
     let score = 0;
 
-    for (const qt of queryTokens) {
-      // 1. Exact normalized token match in content
-      if (contentTokens.has(qt)) score += 3;
+    for (const qt of qTokens) {
+      // A: exact token match
+      if (cTokenSet.has(qt)) score += 4;
 
-      // 2. Substring match — query token appears inside content token or vice versa
-      for (const ct of contentTokens) {
-        if (ct.includes(qt) || qt.includes(ct)) { score += 1; break; }
+      // B: direct substring in full normalized content (handles partial/compound words
+      //    AND words where U+FFFD stripped the alef prefix, e.g. "لطفرات" ⊃ "طفرات")
+      if (cNorm.includes(qt)) score += 5;
+
+      // C: query token is substring of any content token (morphological suffix)
+      for (const ct of cTokenSet) {
+        if (ct.includes(qt)) { score += 2; break; }
       }
 
-      // 3. Direct substring in raw normalized content (catches compound words)
-      if (normalizedContent.includes(qt)) score += 2;
+      // D: keyword match (normalized stored keywords)
+      if (chunk.keywords.some((k) => normalizeArabic(k).includes(qt))) score += 3;
 
-      // 4. Match in stored (normalized) keywords
-      if (chunk.keywords.some((k) => normalizeArabic(k) === qt || normalizeArabic(k).includes(qt))) {
-        score += 4;
-      }
-
-      // 5. Chapter name match (strong signal)
-      if (normalizedChapter.includes(qt)) score += 8;
+      // E: chapter name match
+      if (chapterNorm.includes(qt)) score += 10;
     }
 
-    // 6. Full query phrase as substring (strongest direct match)
-    if (normalizedContent.includes(normalizedQuery)) score += 15;
-    if (normalizedChapter.includes(normalizedQuery)) score += 20;
+    // F: full normalized query as substring (phrase match — highest signal)
+    if (cNorm.includes(qNorm)) score += 20;
+    if (chapterNorm.includes(qNorm)) score += 30;
 
-    return { chunk, score };
+    // G: trigram similarity (always computed — gives partial credit for corrupted text)
+    const tSim = trigramScore(qTrigrams, cNorm);
+    score += tSim * 15;
+
+    return { chunk, score, tSim };
   });
 
-  // ── Pass 1: keyword/phrase matches ──────────
-  const keywordMatches = scored
-    .filter((r) => r.score > 0)
+  // Sort and take topK — no minimum score threshold (let all chunks compete)
+  const result = scored
     .sort((a, b) => b.score - a.score)
-    .slice(0, topK);
-
-  if (keywordMatches.length >= Math.min(3, topK)) {
-    const result = keywordMatches.map((r) => r.chunk);
-    console.log(
-      `[curriculum-search] keyword pass — found ${result.length} chunks:`,
-      result.map((c) => `chunk#${c.chunkIndex} pages ${c.pageRange} score=${scored.find(s=>s.chunk.id===c.id)?.score}`)
-    );
-    return result;
-  }
-
-  // ── Pass 2: semantic trigram fallback ────────
-  console.log(`[curriculum-search] keyword pass found only ${keywordMatches.length} — falling back to trigram similarity`);
-
-  const semanticScored = allChunks.map((chunk) => ({
-    chunk,
-    sim: trigramSimilarity(queryTrigrams, chunk.content),
-  }));
-
-  const semanticResult = semanticScored
-    .sort((a, b) => b.sim - a.sim)
     .slice(0, topK)
-    .filter((r) => r.sim > 0.05)
+    .filter((r) => r.score > 0.5) // only require minimal signal
     .map((r) => r.chunk);
 
-  // Merge keyword partial matches + semantic results (deduplicated)
-  const merged = [
-    ...keywordMatches.map((r) => r.chunk),
-    ...semanticResult.filter((c) => !keywordMatches.some((k) => k.chunk.id === c.id)),
-  ].slice(0, topK);
-
   console.log(
-    `[curriculum-search] trigram fallback — returning ${merged.length} chunks:`,
-    merged.map((c) => `chunk#${c.chunkIndex} pages ${c.pageRange}`)
+    `[search] Top results:`,
+    scored
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.min(5, topK))
+      .map((r) => `chunk#${r.chunk.chunkIndex} pages=${r.chunk.pageRange} score=${r.score.toFixed(2)} tSim=${r.tSim.toFixed(3)}`)
   );
 
-  return merged;
+  return result;
 }

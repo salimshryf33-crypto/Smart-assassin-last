@@ -138,7 +138,7 @@ function MessageBubble({ message }: { message: { id: string; role: 'user' | 'ass
               <div className="sage-md">
                 <ReactMarkdown
                   remarkPlugins={[remarkMath]}
-                  rehypePlugins={[rehypeKatex]}
+                  rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false, errorColor: '#cc0000' }]]}
                 >
                   {message.content}
                 </ReactMarkdown>

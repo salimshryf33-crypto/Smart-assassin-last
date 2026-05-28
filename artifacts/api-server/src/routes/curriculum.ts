@@ -4,7 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { v4 as uuidv4 } from 'uuid';
 import { enqueueJob, getJob, getAllJobs } from '../lib/curriculumQueue';
-import { readIndex, deleteDoc, searchChunks, loadChunks } from '../lib/curriculumStorage';
+import { readIndex, deleteDoc, searchChunks, loadChunks, normalizeArabic, tokenize } from '../lib/curriculumStorage';
 
 const TMP_DIR = path.join(process.cwd(), 'data', 'tmp');
 fs.mkdirSync(TMP_DIR, { recursive: true });
@@ -110,6 +110,48 @@ router.get('/search', (req, res) => {
 router.get('/chunks/:docId', (req, res) => {
   const chunks = loadChunks(req.params.docId);
   res.json({ chunks, count: chunks.length });
+});
+
+// GET /api/curriculum/debug/:docId?chunkIndex=N
+// Shows raw + normalized content of a chunk with hex codes for invisible chars
+router.get('/debug/:docId', (req, res) => {
+  const { chunkIndex = '0', query = '' } = req.query as Record<string, string>;
+  const chunks = loadChunks(req.params.docId);
+  if (chunks.length === 0) {
+    res.status(404).json({ error: 'No chunks found' });
+    return;
+  }
+  const idx = Math.min(parseInt(chunkIndex), chunks.length - 1);
+  const chunk = chunks[idx];
+
+  const raw200 = chunk.content.slice(0, 200);
+  const hexCodes = Array.from(raw200).map((ch) => {
+    const cp = ch.codePointAt(0)!;
+    return cp > 0x007e || cp < 0x0020 ? `[U+${cp.toString(16).padStart(4, '0')}]` : ch;
+  }).join('');
+
+  const normalized = normalizeArabic(chunk.content);
+  const tokens = tokenize(chunk.content).slice(0, 20);
+
+  const queryInfo = query ? {
+    queryNorm: normalizeArabic(query),
+    queryTokens: tokenize(query),
+    substringMatch: normalized.includes(normalizeArabic(query)),
+  } : undefined;
+
+  res.json({
+    chunkIndex: idx,
+    totalChunks: chunks.length,
+    pageRange: chunk.pageRange,
+    chapter: chunk.chapter,
+    rawPreview: raw200,
+    hexCodes,
+    normalizedPreview: normalized.slice(0, 300),
+    hasContentNormalized: 'contentNormalized' in chunk,
+    keywords: chunk.keywords.slice(0, 15),
+    tokens,
+    queryInfo,
+  });
 });
 
 export default router;
