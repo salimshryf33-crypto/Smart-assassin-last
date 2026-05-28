@@ -1,27 +1,20 @@
+import { createRequire } from 'node:module';
 import fs from 'node:fs';
 
-type PdfPageData = {
-  pageIndex: number;
-  getTextContent: () => Promise<{ items: Array<{ str: string }> }>;
+const require = createRequire(import.meta.url);
+
+type PdfParseResult = {
+  text: string;
+  numpages: number;
 };
 
-type PdfParseResult = { text: string; numpages: number };
-
-type PdfParseFn = (
+// pdf-parse@1.x is CJS — loads correctly at runtime via createRequire.
+// It must stay externalized from esbuild (see build.mjs) to prevent
+// pdfjs-dist browser APIs (DOMMatrix, etc.) from being bundled.
+const pdfParse = require('pdf-parse') as (
   buffer: Buffer,
-  options?: {
-    pagerender?: (page: PdfPageData) => Promise<string>;
-    max?: number;
-  }
+  options?: { max?: number }
 ) => Promise<PdfParseResult>;
-
-async function getPdfParse(): Promise<PdfParseFn> {
-  // pdf-parse is CJS — handle both .default and direct export
-  const mod = await import('pdf-parse');
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const m = mod as any;
-  return (m.default ?? m) as PdfParseFn;
-}
 
 export interface ExtractionResult {
   pageTexts: string[];
@@ -33,31 +26,20 @@ export async function extractPdf(
   onProgress?: (current: number, total: number) => void
 ): Promise<ExtractionResult> {
   const buffer = fs.readFileSync(filePath);
-  const pdfParse = await getPdfParse();
 
-  const pageTexts: string[] = [];
-  let resolvedTotal = 0;
+  onProgress?.(0, 0);
 
-  await pdfParse(buffer, {
-    pagerender(pageData: PdfPageData) {
-      return pageData.getTextContent().then((content) => {
-        const text = content.items
-          .map((item) => item.str)
-          .join(' ')
-          .replace(/\s{2,}/g, ' ')
-          .trim();
-        pageTexts[pageData.pageIndex] = text;
-        onProgress?.(pageData.pageIndex + 1, Math.max(resolvedTotal, pageTexts.length));
-        return text;
-      });
-    },
-    max: 0,
-  }).then((data) => {
-    resolvedTotal = data.numpages;
-  });
+  const result = await pdfParse(buffer, { max: 0 });
 
-  const total = resolvedTotal || pageTexts.length;
-  onProgress?.(total, total);
+  const totalPages = result.numpages;
+  onProgress?.(totalPages, totalPages);
 
-  return { pageTexts: pageTexts.filter(Boolean), totalPages: total };
+  // Split text by form-feed characters (pdf-parse uses \f as page separator)
+  const rawPages = result.text.split('\f');
+
+  const pageTexts = rawPages
+    .map((p) => p.replace(/\s{3,}/g, '\n').replace(/[ \t]{2,}/g, ' ').trim())
+    .filter(Boolean);
+
+  return { pageTexts, totalPages };
 }
