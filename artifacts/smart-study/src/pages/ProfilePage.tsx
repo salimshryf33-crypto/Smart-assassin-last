@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { User, Flame, BookOpen, Timer, Edit3, Check, Target, GraduationCap, X, Settings, LogOut } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import { useAuth } from '../contexts/AuthContext';
+import { saveUserProfile } from '../lib/firestore';
 import PageWrapper from '../components/layout/PageWrapper';
 import GlassCard from '../components/ui/GlassCard';
 
@@ -36,7 +37,13 @@ export default function ProfilePage() {
   const [editAvatar, setEditAvatar] = useState(userProfile.avatar || '🧠');
 
   const handleSave = () => {
-    updateProfile({ name: editName, studyGoal: editGoal, curriculum: editCurriculum, avatar: editAvatar });
+    const updates = { name: editName, studyGoal: editGoal, curriculum: editCurriculum, avatar: editAvatar };
+    updateProfile(updates);
+    if (user?.uid) {
+      saveUserProfile(user.uid, updates).catch((err) =>
+        console.error('[Firestore] Failed to save user profile:', err)
+      );
+    }
     setEditing(false);
   };
 

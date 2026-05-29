@@ -58,6 +58,31 @@ export interface Settings {
   notifications: boolean;
 }
 
+const DEFAULT_SETTINGS: Settings = {
+  language: 'Arabic',
+  curriculum: '',
+  fontSize: 'medium',
+  darkMode: true,
+  notifications: true,
+};
+
+const DEFAULT_USER_PROFILE: UserProfile = {
+  name: '',
+  avatar: '',
+  studyGoal: '',
+  curriculum: '',
+  streak: 0,
+  totalSessions: 0,
+  lastStudyDate: new Date().toDateString(),
+};
+
+const DEFAULT_STUDENT_PROFILE: StudentProfile = {
+  country: '',
+  level: '',
+  track: '',
+  profileComplete: false,
+};
+
 interface AppState {
   currentPage: Page;
   flashcards: Flashcard[];
@@ -82,11 +107,17 @@ interface AppState {
   hydrateChat: (messages: ChatMessage[]) => void;
   hydrateFlashcards: (cards: Flashcard[]) => void;
   hydrateTasks: (tasks: Task[]) => void;
-  addFlashcard: (card: Omit<Flashcard, 'id' | 'createdAt' | 'reviewCount'>) => void;
+  addFlashcardLocal: (card: Flashcard) => void;
+  updateFlashcardLocal: (id: string, updates: Partial<Flashcard>) => void;
+  deleteFlashcardLocal: (id: string) => void;
+  addFlashcard: (card: Omit<Flashcard, 'id' | 'createdAt' | 'reviewCount'>) => Flashcard;
   updateFlashcard: (id: string, updates: Partial<Flashcard>) => void;
   deleteFlashcard: (id: string) => void;
   setActiveFlashcardIndex: (index: number) => void;
-  addTask: (task: Omit<Task, 'id' | 'createdAt'>) => void;
+  addTaskLocal: (task: Task) => void;
+  updateTaskLocal: (id: string, updates: Partial<Task>) => void;
+  deleteTaskLocal: (id: string) => void;
+  addTask: (task: Omit<Task, 'id' | 'createdAt'>) => Task;
   toggleTask: (id: string) => void;
   deleteTask: (id: string) => void;
   addChatMessage: (msg: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
@@ -101,80 +132,14 @@ interface AppState {
 
 export const useAppStore = create<AppState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       currentPage: 'splash',
-      flashcards: [
-        {
-          id: '1',
-          front: 'What is the powerhouse of the cell?',
-          back: 'The mitochondria — it generates ATP through cellular respiration.',
-          category: 'Biology',
-          createdAt: Date.now() - 86400000,
-          reviewCount: 3,
-        },
-        {
-          id: '2',
-          front: 'Define photosynthesis',
-          back: 'The process by which plants convert light energy into chemical energy (glucose) using CO₂ and water.',
-          category: 'Biology',
-          createdAt: Date.now() - 72000000,
-          reviewCount: 1,
-        },
-        {
-          id: '3',
-          front: "What is Newton's second law?",
-          back: 'F = ma. Force equals mass times acceleration.',
-          category: 'Physics',
-          createdAt: Date.now() - 50000000,
-          reviewCount: 5,
-        },
-      ],
-      tasks: [
-        {
-          id: '1',
-          title: 'Review Biology chapter 4',
-          completed: false,
-          createdAt: Date.now() - 3600000,
-          priority: 'high',
-        },
-        {
-          id: '2',
-          title: 'Complete 20 math problems',
-          completed: true,
-          createdAt: Date.now() - 7200000,
-          priority: 'medium',
-        },
-        {
-          id: '3',
-          title: 'Read history notes',
-          completed: false,
-          createdAt: Date.now() - 1800000,
-          priority: 'low',
-        },
-      ],
+      flashcards: [],
+      tasks: [],
       chatMessages: [],
-      studentProfile: {
-        country: '',
-        level: '',
-        track: '',
-        profileComplete: false,
-      },
-      userProfile: {
-        name: 'Alex',
-        avatar: '',
-        studyGoal: 'Ace my final exams',
-        curriculum: 'STEM',
-        streak: 7,
-        totalSessions: 42,
-        lastStudyDate: new Date().toDateString(),
-      },
-      settings: {
-        language: 'English',
-        curriculum: 'STEM',
-        fontSize: 'medium',
-        darkMode: true,
-        notifications: true,
-      },
+      studentProfile: DEFAULT_STUDENT_PROFILE,
+      userProfile: DEFAULT_USER_PROFILE,
+      settings: DEFAULT_SETTINGS,
       isLoading: false,
       activeFlashcardIndex: 0,
       pomodoroState: {
@@ -202,36 +167,35 @@ export const useAppStore = create<AppState>()(
         set({
           currentPage: 'splash',
           chatMessages: [],
-          studentProfile: { country: '', level: '', track: '', profileComplete: false },
-          userProfile: {
-            name: '',
-            avatar: '',
-            studyGoal: '',
-            curriculum: '',
-            streak: 0,
-            totalSessions: 0,
-            lastStudyDate: new Date().toDateString(),
-          },
-          settings: {
-            language: 'Arabic',
-            curriculum: '',
-            fontSize: 'medium',
-            darkMode: true,
-            notifications: true,
-          },
+          studentProfile: DEFAULT_STUDENT_PROFILE,
+          userProfile: DEFAULT_USER_PROFILE,
           flashcards: [],
           tasks: [],
           activeFlashcardIndex: 0,
           pomodoroState: { isRunning: false, mode: 'work', timeLeft: 25 * 60, sessionsCompleted: 0 },
         }),
 
-      addFlashcard: (card) =>
+      addFlashcardLocal: (card) =>
+        set((state) => ({ flashcards: [...state.flashcards, card] })),
+
+      updateFlashcardLocal: (id, updates) =>
         set((state) => ({
-          flashcards: [
-            ...state.flashcards,
-            { ...card, id: Date.now().toString(), createdAt: Date.now(), reviewCount: 0 },
-          ],
+          flashcards: state.flashcards.map((c) => (c.id === id ? { ...c, ...updates } : c)),
         })),
+
+      deleteFlashcardLocal: (id) =>
+        set((state) => ({ flashcards: state.flashcards.filter((c) => c.id !== id) })),
+
+      addFlashcard: (card) => {
+        const newCard: Flashcard = {
+          ...card,
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+          createdAt: Date.now(),
+          reviewCount: 0,
+        };
+        set((state) => ({ flashcards: [...state.flashcards, newCard] }));
+        return newCard;
+      },
 
       updateFlashcard: (id, updates) =>
         set((state) => ({
@@ -243,10 +207,26 @@ export const useAppStore = create<AppState>()(
 
       setActiveFlashcardIndex: (index) => set({ activeFlashcardIndex: index }),
 
-      addTask: (task) =>
+      addTaskLocal: (task) =>
+        set((state) => ({ tasks: [task, ...state.tasks] })),
+
+      updateTaskLocal: (id, updates) =>
         set((state) => ({
-          tasks: [{ ...task, id: Date.now().toString(), createdAt: Date.now() }, ...state.tasks],
+          tasks: state.tasks.map((t) => (t.id === id ? { ...t, ...updates } : t)),
         })),
+
+      deleteTaskLocal: (id) =>
+        set((state) => ({ tasks: state.tasks.filter((t) => t.id !== id) })),
+
+      addTask: (task) => {
+        const newTask: Task = {
+          ...task,
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+          createdAt: Date.now(),
+        };
+        set((state) => ({ tasks: [newTask, ...state.tasks] }));
+        return newTask;
+      },
 
       toggleTask: (id) =>
         set((state) => ({
@@ -260,7 +240,7 @@ export const useAppStore = create<AppState>()(
         set((state) => ({
           chatMessages: [
             ...state.chatMessages,
-            { ...msg, id: Date.now().toString(), timestamp: Date.now() },
+            { ...msg, id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`, timestamp: Date.now() },
           ],
         })),
 
@@ -288,12 +268,8 @@ export const useAppStore = create<AppState>()(
     {
       name: 'smart-study-assistant',
       partialize: (state) => ({
-        flashcards: state.flashcards,
-        tasks: state.tasks,
-        chatMessages: state.chatMessages,
-        userProfile: state.userProfile,
-        studentProfile: state.studentProfile,
         settings: state.settings,
+        currentPage: state.currentPage,
       }),
     }
   )

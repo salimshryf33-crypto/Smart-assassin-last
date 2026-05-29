@@ -5,6 +5,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { useAppStore } from '../store/useAppStore';
+import { useAuth } from '../contexts/AuthContext';
+import { addChatMessageFS, clearChatMessages } from '../lib/firestore';
 import EmptyState from '../components/ui/EmptyState';
 import { generateAIResponse, CurriculumContext } from '../utils/ai';
 import { getSubjects, getSubjectLabel } from '../utils/curriculum';
@@ -164,6 +166,7 @@ export default function AIChat() {
   const addChatMessage = useAppStore((s) => s.addChatMessage);
   const clearChat = useAppStore((s) => s.clearChat);
   const studentProfile = useAppStore((s) => s.studentProfile);
+  const { user } = useAuth();
 
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -196,7 +199,11 @@ export default function AIChat() {
     if (!content || isTyping) return;
 
     setInput('');
+    const userMsg = { role: 'user' as const, content, timestamp: Date.now() };
     addChatMessage({ role: 'user', content });
+    if (user?.uid) {
+      addChatMessageFS(user.uid, userMsg).catch(() => {});
+    }
     setIsTyping(true);
 
     try {
@@ -206,20 +213,28 @@ export default function AIChat() {
       }));
       const response = await generateAIResponse(content, history, curriculum);
       addChatMessage({ role: 'assistant', content: response });
+      if (user?.uid) {
+        addChatMessageFS(user.uid, { role: 'assistant', content: response, timestamp: Date.now() }).catch(() => {});
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       const isQuota = msg.includes('quota_exceeded') || msg.includes('429') || msg.includes('quota');
       const isNoKey = msg.includes('not configured') || msg.includes('API_KEY_INVALID') || msg.includes('API key not valid');
-      addChatMessage({
-        role: 'assistant',
-        content: isQuota
-          ? 'تجاوزت الحد المجاني لـ Gemini API اليوم. جرب مجدداً غداً أو فعّل الفاتورة على Google AI Studio.'
-          : isNoKey
-          ? 'مفتاح API غير صحيح أو غير موجود. تأكد من إضافة VITE_GEMINI_API_KEY بشكل صحيح في Secrets.'
-          : `خطأ في الاتصال: ${msg}`,
-      });
+      const errorContent = isQuota
+        ? 'تجاوزت الحد المجاني لـ Gemini API اليوم. جرب مجدداً غداً أو فعّل الفاتورة على Google AI Studio.'
+        : isNoKey
+        ? 'مفتاح API غير صحيح أو غير موجود. تأكد من إضافة VITE_GEMINI_API_KEY بشكل صحيح في Secrets.'
+        : `خطأ في الاتصال: ${msg}`;
+      addChatMessage({ role: 'assistant', content: errorContent });
     } finally {
       setIsTyping(false);
+    }
+  };
+
+  const handleClearChat = () => {
+    clearChat();
+    if (user?.uid) {
+      clearChatMessages(user.uid).catch(() => {});
     }
   };
 
@@ -271,7 +286,7 @@ export default function AIChat() {
           {chatMessages.length > 0 && (
             <motion.button
               whileTap={{ scale: 0.9 }}
-              onClick={clearChat}
+              onClick={handleClearChat}
               className="flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs text-slate-500"
               style={{ background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.15)' }}
             >

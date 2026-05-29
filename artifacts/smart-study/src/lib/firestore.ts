@@ -2,7 +2,6 @@ import {
   doc,
   getDoc,
   setDoc,
-  updateDoc,
   collection,
   getDocs,
   addDoc,
@@ -11,6 +10,8 @@ import {
   orderBy,
   writeBatch,
   serverTimestamp,
+  onSnapshot,
+  Unsubscribe,
 } from 'firebase/firestore';
 import { db } from './firebase';
 import type { Flashcard, Task, ChatMessage, UserProfile, StudentProfile, Settings } from '../store/useAppStore';
@@ -37,6 +38,72 @@ export async function saveUserProfile(uid: string, profile: Partial<UserProfile>
 
 export async function saveSettings(uid: string, settings: Partial<Settings>) {
   await setDoc(userDoc(uid), { settings }, { merge: true });
+}
+
+export async function updateStreakFS(
+  uid: string,
+  streak: number,
+  totalSessions: number,
+  lastStudyDate: string
+) {
+  await setDoc(
+    userDoc(uid),
+    { userProfile: { streak, totalSessions, lastStudyDate } },
+    { merge: true }
+  );
+}
+
+export async function updateProgressFS(uid: string, updates: Partial<UserProfile>) {
+  await setDoc(userDoc(uid), { userProfile: updates }, { merge: true });
+}
+
+// ─── Real-time subscriptions ──────────────────────────────────
+export function subscribeToUserDoc(
+  uid: string,
+  onData: (data: { userProfile?: Partial<UserProfile>; studentProfile?: StudentProfile; settings?: Partial<Settings> } | null) => void
+): Unsubscribe {
+  return onSnapshot(userDoc(uid), (snap) => {
+    if (snap.exists()) {
+      onData(snap.data() as { userProfile?: Partial<UserProfile>; studentProfile?: StudentProfile; settings?: Partial<Settings> });
+    } else {
+      onData(null);
+    }
+  }, (err) => {
+    console.error('[Firestore] subscribeToUserDoc error:', err);
+  });
+}
+
+export function subscribeToFlashcards(
+  uid: string,
+  onData: (cards: Flashcard[]) => void
+): Unsubscribe {
+  return onSnapshot(
+    flashcardsCol(uid),
+    (snap) => {
+      const cards = snap.docs.map((d) => ({ id: d.id, ...d.data() } as Flashcard));
+      onData(cards);
+    },
+    (err) => {
+      console.error('[Firestore] subscribeToFlashcards error:', err);
+    }
+  );
+}
+
+export function subscribeToTasks(
+  uid: string,
+  onData: (tasks: Task[]) => void
+): Unsubscribe {
+  return onSnapshot(
+    tasksCol(uid),
+    (snap) => {
+      const tasks = snap.docs.map((d) => ({ id: d.id, ...d.data() } as Task));
+      tasks.sort((a, b) => b.createdAt - a.createdAt);
+      onData(tasks);
+    },
+    (err) => {
+      console.error('[Firestore] subscribeToTasks error:', err);
+    }
+  );
 }
 
 // ─── Chat messages ────────────────────────────────────────────

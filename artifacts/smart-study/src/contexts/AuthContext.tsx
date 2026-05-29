@@ -1,6 +1,7 @@
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, ReactNode } from 'react';
 import {
   User,
+  Unsubscribe,
   onAuthStateChanged,
   signInWithPopup,
   signInWithRedirect,
@@ -11,7 +12,13 @@ import {
   updateProfile,
 } from 'firebase/auth';
 import { auth, googleProvider } from '../lib/firebase';
-import { initUserDocument, loadUserDoc, loadChatMessages, loadFlashcards, loadTasks } from '../lib/firestore';
+import {
+  initUserDocument,
+  loadChatMessages,
+  subscribeToUserDoc,
+  subscribeToFlashcards,
+  subscribeToTasks,
+} from '../lib/firestore';
 import { useAppStore } from '../store/useAppStore';
 
 interface AuthContextValue {
@@ -31,58 +38,75 @@ export function useAuth() {
   return ctx;
 }
 
-async function hydrateStore(uid: string) {
-  const store = useAppStore.getState();
-
-  try {
-    const [userData, messages, flashcards, tasks] = await Promise.all([
-      loadUserDoc(uid),
-      loadChatMessages(uid),
-      loadFlashcards(uid),
-      loadTasks(uid),
-    ]);
-
-    if (userData?.userProfile) store.updateUserProfile(userData.userProfile);
-    if (userData?.studentProfile) store.setStudentProfileDirect(userData.studentProfile);
-    if (userData?.settings) store.updateSettings(userData.settings);
-    if (messages.length > 0) store.hydrateChat(messages);
-    if (flashcards.length > 0) store.hydrateFlashcards(flashcards);
-    if (tasks.length > 0) store.hydrateTasks(tasks);
-  } catch (err) {
-    console.error('[Auth] Failed to hydrate store:', err);
-  }
-}
-
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const resetStore = useAppStore((s) => s.resetStore);
 
+  const unsubscribersRef = useRef<Unsubscribe[]>([]);
+
+  function cleanupListeners() {
+    unsubscribersRef.current.forEach((fn) => fn());
+    unsubscribersRef.current = [];
+  }
+
+  async function setupRealtimeListeners(uid: string) {
+    cleanupListeners();
+
+    const store = useAppStore.getState();
+
+    const unsubUserDoc = subscribeToUserDoc(uid, (data) => {
+      if (!data) return;
+      if (data.userProfile) store.updateUserProfile(data.userProfile as Parameters<typeof store.updateUserProfile>[0]);
+      if (data.studentProfile) store.setStudentProfileDirect(data.studentProfile);
+      if (data.settings) store.updateSettings(data.settings as Parameters<typeof store.updateSettings>[0]);
+    });
+
+    const unsubFlashcards = subscribeToFlashcards(uid, (cards) => {
+      store.hydrateFlashcards(cards);
+    });
+
+    const unsubTasks = subscribeToTasks(uid, (tasks) => {
+      store.hydrateTasks(tasks);
+    });
+
+    unsubscribersRef.current = [unsubUserDoc, unsubFlashcards, unsubTasks];
+
+    try {
+      const messages = await loadChatMessages(uid);
+      if (messages.length > 0) store.hydrateChat(messages);
+    } catch (err) {
+      console.error('[Auth] Failed to load chat messages:', err);
+    }
+  }
+
   useEffect(() => {
-    // Handle redirect result first (from signInWithRedirect)
     getRedirectResult(auth).catch(() => {});
 
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
         setUser(firebaseUser);
         await initUserDocument(firebaseUser.uid, firebaseUser.displayName, firebaseUser.email);
-        await hydrateStore(firebaseUser.uid);
+        await setupRealtimeListeners(firebaseUser.uid);
       } else {
+        cleanupListeners();
         setUser(null);
         resetStore();
       }
       setLoading(false);
     });
-    return unsub;
+
+    return () => {
+      unsub();
+      cleanupListeners();
+    };
   }, []);
 
   const signInWithGoogle = async () => {
     try {
-      // Try popup first (works in most browsers)
       await signInWithPopup(auth, googleProvider);
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code ?? '';
-      // If popup is blocked or not allowed, fall back to redirect
       if (
         code === 'auth/popup-blocked' ||
         code === 'auth/popup-closed-by-user' ||
@@ -105,6 +129,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = async () => {
+    cleanupListeners();
     await signOut(auth);
     resetStore();
   };

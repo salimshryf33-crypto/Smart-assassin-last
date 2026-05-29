@@ -1,6 +1,8 @@
 import { motion } from 'framer-motion';
 import { Flame, CheckCircle2, Circle, BookOpen, Timer, Zap, TrendingUp, Plus, Settings, ChevronRight } from 'lucide-react';
-import { useAppStore } from '../store/useAppStore';
+import { useAppStore, Task } from '../store/useAppStore';
+import { useAuth } from '../contexts/AuthContext';
+import { saveTask, updateTaskFS } from '../lib/firestore';
 import PageWrapper from '../components/layout/PageWrapper';
 import GlassCard from '../components/ui/GlassCard';
 import EmptyState from '../components/ui/EmptyState';
@@ -31,7 +33,7 @@ function StreakCard() {
       <div className="relative z-10 flex items-start justify-between">
         <div>
           <p className="text-sm text-slate-400">Good morning,</p>
-          <h2 className="text-2xl font-bold text-white">{name} 👋</h2>
+          <h2 className="text-2xl font-bold text-white">{name || 'Student'} 👋</h2>
           <p className="mt-1 text-xs text-slate-400">Keep the momentum going!</p>
         </div>
         <div className="flex flex-col items-center">
@@ -104,9 +106,19 @@ function QuickActions() {
   );
 }
 
-function TaskItem({ task }: { task: { id: string; title: string; completed: boolean; priority: string } }) {
+function TaskItem({ task, uid }: { task: Task; uid: string | undefined }) {
   const toggleTask = useAppStore((s) => s.toggleTask);
   const priorityColor = task.priority === 'high' ? '#f87171' : task.priority === 'medium' ? '#f59e0b' : '#34d399';
+
+  const handleToggle = () => {
+    toggleTask(task.id);
+    const updatedTask = { ...task, completed: !task.completed };
+    if (uid) {
+      updateTaskFS(uid, updatedTask).catch((err) =>
+        console.error('[Firestore] Failed to toggle task:', err)
+      );
+    }
+  };
 
   return (
     <motion.div
@@ -116,7 +128,7 @@ function TaskItem({ task }: { task: { id: string; title: string; completed: bool
       whileTap={{ scale: 0.99 }}
       className="flex items-center gap-3 rounded-xl p-3 transition-all duration-200"
       style={{ background: task.completed ? 'rgba(0,0,0,0.1)' : 'rgba(255,255,255,0.03)' }}
-      onClick={() => toggleTask(task.id)}
+      onClick={handleToggle}
     >
       <motion.div whileTap={{ scale: 0.8 }}>
         {task.completed ? (
@@ -141,10 +153,22 @@ export default function HomeDashboard() {
   const flashcards = useAppStore((s) => s.flashcards);
   const setPage = useAppStore((s) => s.setPage);
   const addTask = useAppStore((s) => s.addTask);
+  const { user } = useAuth();
 
   const todayTasks = tasks.slice(0, 5);
   const completedCount = tasks.filter((t) => t.completed).length;
   const progressPct = tasks.length > 0 ? (completedCount / tasks.length) * 100 : 0;
+
+  const handleAddTask = () => {
+    const title = prompt('New task:');
+    if (!title?.trim()) return;
+    const newTask = addTask({ title: title.trim(), completed: false, priority: 'medium' });
+    if (user?.uid) {
+      saveTask(user.uid, newTask).catch((err) =>
+        console.error('[Firestore] Failed to save task:', err)
+      );
+    }
+  };
 
   return (
     <PageWrapper>
@@ -193,10 +217,7 @@ export default function HomeDashboard() {
             <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Today's Tasks</h3>
             <motion.button
               whileTap={{ scale: 0.9 }}
-              onClick={() => {
-                const title = prompt('New task:');
-                if (title?.trim()) addTask({ title: title.trim(), completed: false, priority: 'medium' });
-              }}
+              onClick={handleAddTask}
               className="flex items-center gap-1 text-xs text-[#00c6ff]"
             >
               <Plus size={14} />
@@ -210,16 +231,13 @@ export default function HomeDashboard() {
               title="All clear!"
               description="Your AI study journey begins here. Add tasks to track your progress."
               cta="Add your first task"
-              onCta={() => {
-                const title = prompt('New task:');
-                if (title?.trim()) addTask({ title: title.trim(), completed: false, priority: 'medium' });
-              }}
+              onCta={handleAddTask}
             />
           ) : (
             <GlassCard className="overflow-hidden" delay={0.25}>
               <div className="divide-y divide-white/[0.04]">
                 {todayTasks.map((task) => (
-                  <TaskItem key={task.id} task={task} />
+                  <TaskItem key={task.id} task={task} uid={user?.uid} />
                 ))}
               </div>
             </GlassCard>
@@ -258,7 +276,7 @@ export default function HomeDashboard() {
                   <p className="text-xs text-slate-400">cards ready to review</p>
                 </div>
                 <div className="flex -space-x-2">
-                  {['Biology', 'Physics', 'Math'].slice(0, 3).map((cat, i) => (
+                  {Array.from(new Set(flashcards.map((c) => c.category))).slice(0, 3).map((cat, i) => (
                     <div
                       key={cat}
                       className="flex h-8 w-8 items-center justify-center rounded-full text-[9px] font-bold text-white"

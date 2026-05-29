@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { motion, AnimatePresence, useMotionValue, useTransform, PanInfo } from 'framer-motion';
 import { Plus, Trash2, BookOpen, X, Check, RotateCcw } from 'lucide-react';
 import { useAppStore, Flashcard } from '../store/useAppStore';
+import { useAuth } from '../contexts/AuthContext';
+import { saveFlashcard, deleteFlashcardFS } from '../lib/firestore';
 import PageWrapper from '../components/layout/PageWrapper';
 import EmptyState from '../components/ui/EmptyState';
 import { useSounds } from '../hooks/useSounds';
@@ -200,6 +202,7 @@ function FlipCard({ card, onNext, onCorrect, onWrong }: {
 
 export default function FlashcardsPage() {
   const { flashcards, addFlashcard, deleteFlashcard, updateFlashcard } = useAppStore();
+  const { user } = useAuth();
   const [activeCategory, setActiveCategory] = useState('All');
   const [cardIndex, setCardIndex] = useState(0);
   const [showAdd, setShowAdd] = useState(false);
@@ -214,22 +217,48 @@ export default function FlashcardsPage() {
   const currentCard = filtered[cardIndex % Math.max(filtered.length, 1)];
 
   const handleNext = () => setCardIndex((i) => (i + 1) % Math.max(filtered.length, 1));
+
   const handleCorrect = () => {
     if (currentCard) {
-      updateFlashcard(currentCard.id, { reviewCount: currentCard.reviewCount + 1, lastReviewed: Date.now() });
+      const updated = { ...currentCard, reviewCount: currentCard.reviewCount + 1, lastReviewed: Date.now() };
+      updateFlashcard(currentCard.id, { reviewCount: updated.reviewCount, lastReviewed: updated.lastReviewed });
+      if (user?.uid) {
+        saveFlashcard(user.uid, updated).catch((err) =>
+          console.error('[Firestore] Failed to update flashcard review:', err)
+        );
+      }
     }
     onSuccessSound();
     handleNext();
   };
+
   const handleWrong = () => handleNext();
 
   const handleAdd = () => {
     if (!newFront.trim() || !newBack.trim()) return;
-    addFlashcard({ front: newFront.trim(), back: newBack.trim(), category: newCategory.trim() || 'General' });
+    const newCard = addFlashcard({
+      front: newFront.trim(),
+      back: newBack.trim(),
+      category: newCategory.trim() || 'General',
+    });
+    if (user?.uid) {
+      saveFlashcard(user.uid, newCard).catch((err) =>
+        console.error('[Firestore] Failed to save flashcard:', err)
+      );
+    }
     setNewFront('');
     setNewBack('');
     setNewCategory('General');
     setShowAdd(false);
+  };
+
+  const handleDelete = (cardId: string) => {
+    deleteFlashcard(cardId);
+    if (user?.uid) {
+      deleteFlashcardFS(user.uid, cardId).catch((err) =>
+        console.error('[Firestore] Failed to delete flashcard:', err)
+      );
+    }
   };
 
   return (
@@ -325,7 +354,7 @@ export default function FlashcardsPage() {
                   </button>
                   <motion.button
                     whileTap={{ scale: 0.85 }}
-                    onClick={() => deleteFlashcard(card.id)}
+                    onClick={() => handleDelete(card.id)}
                     className="flex-shrink-0 p-1.5 rounded-lg"
                     style={{ background: 'rgba(248,113,113,0.1)' }}
                   >

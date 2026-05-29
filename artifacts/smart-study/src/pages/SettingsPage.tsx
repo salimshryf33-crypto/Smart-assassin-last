@@ -1,6 +1,8 @@
 import { motion } from 'framer-motion';
 import { ChevronLeft, Globe, BookOpen, Type, Bell, Info, Moon, ChevronRight, Check, Database } from 'lucide-react';
-import { useAppStore } from '../store/useAppStore';
+import { useAppStore, Settings } from '../store/useAppStore';
+import { useAuth } from '../contexts/AuthContext';
+import { saveSettings } from '../lib/firestore';
 import PageWrapper from '../components/layout/PageWrapper';
 import GlassCard from '../components/ui/GlassCard';
 
@@ -64,6 +66,16 @@ const FONT_SIZES = ['small', 'medium', 'large'] as const;
 
 export default function SettingsPage() {
   const { settings, updateSettings, setPage } = useAppStore();
+  const { user } = useAuth();
+
+  const handleUpdateSettings = (updates: Partial<Settings>) => {
+    updateSettings(updates);
+    if (user?.uid) {
+      saveSettings(user.uid, { ...settings, ...updates }).catch((err) =>
+        console.error('[Firestore] Failed to save settings:', err)
+      );
+    }
+  };
 
   return (
     <PageWrapper>
@@ -96,7 +108,7 @@ export default function SettingsPage() {
                 right={
                   <ToggleSwitch
                     enabled={settings.darkMode}
-                    onChange={(v) => updateSettings({ darkMode: v })}
+                    onChange={(v) => handleUpdateSettings({ darkMode: v })}
                   />
                 }
               />
@@ -118,7 +130,7 @@ export default function SettingsPage() {
                     <motion.button
                       key={size}
                       whileTap={{ scale: 0.93 }}
-                      onClick={() => updateSettings({ fontSize: size })}
+                      onClick={() => handleUpdateSettings({ fontSize: size })}
                       className="flex flex-1 items-center justify-center gap-1.5 rounded-xl py-2 text-xs font-medium capitalize transition-all"
                       style={{
                         background: settings.fontSize === size ? 'rgba(245,158,11,0.15)' : 'rgba(255,255,255,0.04)',
@@ -156,7 +168,7 @@ export default function SettingsPage() {
                     <motion.button
                       key={cur}
                       whileTap={{ scale: 0.95 }}
-                      onClick={() => updateSettings({ curriculum: cur })}
+                      onClick={() => handleUpdateSettings({ curriculum: cur })}
                       className="rounded-xl px-3 py-2 text-xs font-medium transition-all text-left"
                       style={{
                         background: settings.curriculum === cur ? 'rgba(0,198,255,0.12)' : 'rgba(255,255,255,0.04)',
@@ -179,7 +191,7 @@ export default function SettingsPage() {
                 <motion.button
                   key={lang}
                   whileTap={{ scale: 0.99 }}
-                  onClick={() => updateSettings({ language: lang })}
+                  onClick={() => handleUpdateSettings({ language: lang })}
                   className="flex w-full items-center gap-3 px-4 py-3.5 text-left transition-colors duration-200"
                   style={{ background: settings.language === lang ? 'rgba(0,198,255,0.04)' : 'transparent' }}
                 >
@@ -207,7 +219,7 @@ export default function SettingsPage() {
                 right={
                   <ToggleSwitch
                     enabled={settings.notifications}
-                    onChange={(v) => updateSettings({ notifications: v })}
+                    onChange={(v) => handleUpdateSettings({ notifications: v })}
                   />
                 }
               />
