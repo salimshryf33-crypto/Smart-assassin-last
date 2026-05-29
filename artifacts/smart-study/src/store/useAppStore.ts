@@ -267,6 +267,8 @@ export const useAppStore = create<AppState>()(
     }),
     {
       name: 'smart-study-assistant',
+      version: 2,
+      migrate: () => ({}),
       partialize: (state) => ({
         settings: state.settings,
         currentPage: state.currentPage,

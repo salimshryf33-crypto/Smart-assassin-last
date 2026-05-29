@@ -2,6 +2,8 @@ import { useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Play, Pause, RotateCcw, Coffee, Brain, Trophy } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
+import { useAuth } from '../contexts/AuthContext';
+import { updateStreakFS } from '../lib/firestore';
 import PageWrapper from '../components/layout/PageWrapper';
 import { formatTime } from '../utils/format';
 
@@ -64,6 +66,7 @@ function CircularProgress({ progress, mode }: { progress: number; mode: 'work' |
 export default function FocusTimer() {
   const pomodoroState = useAppStore((s) => s.pomodoroState);
   const setPomodoroState = useAppStore((s) => s.setPomodoroState);
+  const { user } = useAuth();
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isWork = pomodoroState.mode === 'work';
@@ -77,12 +80,29 @@ export default function FocusTimer() {
         const newTime = current.timeLeft - 1;
         if (newTime <= 0) {
           const nextMode = current.mode === 'work' ? 'break' : 'work';
+          const isWorkSession = current.mode === 'work';
+          const newSessionsCompleted = isWorkSession ? current.sessionsCompleted + 1 : current.sessionsCompleted;
+
           setPomodoroState({
             timeLeft: nextMode === 'work' ? WORK_DURATION : BREAK_DURATION,
             mode: nextMode,
             isRunning: false,
-            sessionsCompleted: current.mode === 'work' ? current.sessionsCompleted + 1 : current.sessionsCompleted,
+            sessionsCompleted: newSessionsCompleted,
           });
+
+          if (isWorkSession) {
+            const store = useAppStore.getState();
+            store.incrementStreak();
+            const profile = store.userProfile;
+            const newStreak = profile.streak + 1;
+            const newTotalSessions = (profile.totalSessions ?? 0) + 1;
+            const today = new Date().toISOString().split('T')[0];
+            if (user?.uid) {
+              updateStreakFS(user.uid, newStreak, newTotalSessions, today).catch((err) =>
+                console.error('[Firestore] Failed to update streak:', err)
+              );
+            }
+          }
         } else {
           setPomodoroState({ timeLeft: newTime });
         }
@@ -91,7 +111,7 @@ export default function FocusTimer() {
       if (intervalRef.current) clearInterval(intervalRef.current);
     }
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [pomodoroState.isRunning, setPomodoroState]);
+  }, [pomodoroState.isRunning, setPomodoroState, user]);
 
   const toggle = () => setPomodoroState({ isRunning: !pomodoroState.isRunning });
   const reset = () => setPomodoroState({ isRunning: false, timeLeft: isWork ? WORK_DURATION : BREAK_DURATION });

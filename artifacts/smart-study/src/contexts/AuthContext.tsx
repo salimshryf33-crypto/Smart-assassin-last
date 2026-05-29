@@ -74,9 +74,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     try {
       const messages = await loadChatMessages(uid);
-      if (messages.length > 0) store.hydrateChat(messages);
+      store.hydrateChat(messages);
     } catch (err) {
       console.error('[Auth] Failed to load chat messages:', err);
+      store.hydrateChat([]);
     }
   }
 
