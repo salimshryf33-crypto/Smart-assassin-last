@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { type GamificationData, DEFAULT_GAMIFICATION } from '../lib/gamification';
 
 export type Page = 'splash' | 'profile-setup' | 'home' | 'flashcards' | 'focus' | 'chat' | 'search' | 'profile' | 'settings' | 'curriculum-manager';
 
@@ -92,6 +93,7 @@ interface AppState {
   studentProfile: StudentProfile;
   settings: Settings;
   isLoading: boolean;
+  gamification: GamificationData;
   activeFlashcardIndex: number;
   pomodoroState: {
     isRunning: boolean;
@@ -128,6 +130,8 @@ interface AppState {
   incrementStreak: () => void;
   setPomodoroState: (updates: Partial<AppState['pomodoroState']>) => void;
   setLoading: (loading: boolean) => void;
+  updateGamification: (updates: Partial<GamificationData>) => void;
+  hydrateGamification: (data: GamificationData) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -141,6 +145,7 @@ export const useAppStore = create<AppState>()(
       userProfile: DEFAULT_USER_PROFILE,
       settings: DEFAULT_SETTINGS,
       isLoading: false,
+      gamification: DEFAULT_GAMIFICATION,
       activeFlashcardIndex: 0,
       pomodoroState: {
         isRunning: false,
@@ -171,6 +176,7 @@ export const useAppStore = create<AppState>()(
           userProfile: DEFAULT_USER_PROFILE,
           flashcards: [],
           tasks: [],
+          gamification: DEFAULT_GAMIFICATION,
           activeFlashcardIndex: 0,
           pomodoroState: { isRunning: false, mode: 'work', timeLeft: 25 * 60, sessionsCompleted: 0 },
         }),
@@ -264,6 +270,12 @@ export const useAppStore = create<AppState>()(
         set((state) => ({ pomodoroState: { ...state.pomodoroState, ...updates } })),
 
       setLoading: (loading) => set({ isLoading: loading }),
+
+      updateGamification: (updates) =>
+        set((state) => ({ gamification: { ...state.gamification, ...updates } })),
+
+      hydrateGamification: (data) =>
+        set({ gamification: { ...DEFAULT_GAMIFICATION, ...data } }),
     }),
     {
       name: 'smart-study-assistant',

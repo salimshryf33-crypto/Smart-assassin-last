@@ -4,6 +4,7 @@ import { Plus, Trash2, BookOpen, X, Check, RotateCcw } from 'lucide-react';
 import { useAppStore, Flashcard } from '../store/useAppStore';
 import { useAuth } from '../contexts/AuthContext';
 import { saveFlashcard, deleteFlashcardFS } from '../lib/firestore';
+import { useStreak } from '../hooks/useStreak';
 import PageWrapper from '../components/layout/PageWrapper';
 import EmptyState from '../components/ui/EmptyState';
 import { useSounds } from '../hooks/useSounds';
@@ -203,6 +204,7 @@ function FlipCard({ card, onNext, onCorrect, onWrong }: {
 export default function FlashcardsPage() {
   const { flashcards, addFlashcard, deleteFlashcard, updateFlashcard } = useAppStore();
   const { user } = useAuth();
+  const { recordActivity } = useStreak();
   const [activeCategory, setActiveCategory] = useState('All');
   const [cardIndex, setCardIndex] = useState(0);
   const [showAdd, setShowAdd] = useState(false);
@@ -228,6 +230,7 @@ export default function FlashcardsPage() {
         );
       }
     }
+    recordActivity('flashcard').catch(() => {});
     onSuccessSound();
     handleNext();
   };

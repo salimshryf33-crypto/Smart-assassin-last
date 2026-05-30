@@ -1,17 +1,26 @@
+import { useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Flame, CheckCircle2, Circle, BookOpen, Timer, Zap, TrendingUp, Plus, Settings, ChevronRight } from 'lucide-react';
+import { Flame, CheckCircle2, Circle, BookOpen, Timer, Zap, TrendingUp, Plus, Settings, ChevronRight, Trophy } from 'lucide-react';
 import { useAppStore, Task } from '../store/useAppStore';
 import { useAuth } from '../contexts/AuthContext';
+import { useStreak } from '../hooks/useStreak';
 import { saveTask, updateTaskFS } from '../lib/firestore';
+import StreakTooltip from '../components/StreakTooltip';
 import PageWrapper from '../components/layout/PageWrapper';
 import GlassCard from '../components/ui/GlassCard';
 import EmptyState from '../components/ui/EmptyState';
 import { truncate } from '../utils/format';
 
 function StreakCard() {
-  const streak = useAppStore((s) => s.userProfile.streak);
-  const totalSessions = useAppStore((s) => s.userProfile.totalSessions);
+  const gamification = useAppStore((s) => s.gamification);
   const name = useAppStore((s) => s.userProfile.name);
+  const { checkAndResetStreak } = useStreak();
+
+  useEffect(() => {
+    checkAndResetStreak();
+  }, []);
+
+  const { currentStreak, longestStreak, xp } = gamification;
 
   return (
     <motion.div
@@ -32,39 +41,55 @@ function StreakCard() {
 
       <div className="relative z-10 flex items-start justify-between">
         <div>
-          <p className="text-sm text-slate-400">Good morning,</p>
+          <p className="text-sm text-slate-400">مرحبًا،</p>
           <h2 className="text-2xl font-bold text-white">{name || 'Student'} 👋</h2>
-          <p className="mt-1 text-xs text-slate-400">Keep the momentum going!</p>
+          <p className="mt-1 text-xs text-slate-400">واصل تقدمك اليومي!</p>
         </div>
         <div className="flex flex-col items-center">
           <motion.div
-            animate={{ scale: [1, 1.1, 1] }}
+            animate={{ scale: currentStreak > 0 ? [1, 1.1, 1] : 1 }}
             transition={{ duration: 2, repeat: Infinity }}
             className="flex h-14 w-14 items-center justify-center rounded-2xl"
             style={{
-              background: 'linear-gradient(135deg, rgba(251,191,36,0.2) 0%, rgba(245,158,11,0.1) 100%)',
-              border: '1px solid rgba(251,191,36,0.3)',
+              background: currentStreak > 0
+                ? 'linear-gradient(135deg, rgba(251,191,36,0.25) 0%, rgba(245,158,11,0.15) 100%)'
+                : 'rgba(255,255,255,0.05)',
+              border: currentStreak > 0 ? '1px solid rgba(251,191,36,0.4)' : '1px solid rgba(255,255,255,0.08)',
             }}
           >
-            <Flame size={26} className="text-amber-400" />
+            <Flame size={26} className={currentStreak > 0 ? 'text-amber-400' : 'text-slate-600'} />
           </motion.div>
-          <span className="mt-1 text-xl font-bold text-amber-400">{streak}</span>
-          <span className="text-[10px] text-amber-400/70">day streak</span>
+          <span className={`mt-1 text-xl font-bold ${currentStreak > 0 ? 'text-amber-400' : 'text-slate-500'}`}>
+            {currentStreak}
+          </span>
+          <span className={`text-[10px] ${currentStreak > 0 ? 'text-amber-400/70' : 'text-slate-600'}`}>
+            day streak
+          </span>
         </div>
       </div>
 
       <div className="mt-5 flex gap-4">
         <div className="flex-1 rounded-2xl p-3" style={{ background: 'rgba(0,0,0,0.2)' }}>
-          <p className="text-lg font-bold text-white">{totalSessions}</p>
-          <p className="text-[11px] text-slate-400">Sessions</p>
+          <div className="flex items-center gap-1.5">
+            <Zap size={12} className="text-cyan-400" />
+            <p className="text-lg font-bold text-white">{xp ?? 0}</p>
+          </div>
+          <p className="text-[11px] text-slate-400">XP</p>
         </div>
         <div className="flex-1 rounded-2xl p-3" style={{ background: 'rgba(0,0,0,0.2)' }}>
-          <p className="text-lg font-bold text-[#00c6ff]">85%</p>
-          <p className="text-[11px] text-slate-400">Accuracy</p>
+          <div className="flex items-center gap-1.5">
+            <Trophy size={12} className="text-amber-400" />
+            <p className="text-lg font-bold text-amber-300">{longestStreak ?? 0}</p>
+          </div>
+          <p className="text-[11px] text-slate-400">Best Streak</p>
         </div>
         <div className="flex-1 rounded-2xl p-3" style={{ background: 'rgba(0,0,0,0.2)' }}>
-          <p className="text-lg font-bold text-emerald-400">12h</p>
-          <p className="text-[11px] text-slate-400">This week</p>
+          <p className="text-lg font-bold text-emerald-400">
+            {currentStreak > 0 ? '🔥' : '💤'}
+          </p>
+          <p className="text-[11px] text-slate-400">
+            {currentStreak > 0 ? 'Active' : 'Start!'}
+          </p>
         </div>
       </div>
     </motion.div>
@@ -106,17 +131,29 @@ function QuickActions() {
   );
 }
 
-function TaskItem({ task, uid }: { task: Task; uid: string | undefined }) {
+function TaskItem({
+  task,
+  uid,
+  onComplete,
+}: {
+  task: Task;
+  uid: string | undefined;
+  onComplete: (taskId: string) => void;
+}) {
   const toggleTask = useAppStore((s) => s.toggleTask);
   const priorityColor = task.priority === 'high' ? '#f87171' : task.priority === 'medium' ? '#f59e0b' : '#34d399';
 
   const handleToggle = () => {
+    const wasCompleted = task.completed;
     toggleTask(task.id);
-    const updatedTask = { ...task, completed: !task.completed };
+    const updatedTask = { ...task, completed: !wasCompleted };
     if (uid) {
       updateTaskFS(uid, updatedTask).catch((err) =>
         console.error('[Firestore] Failed to toggle task:', err)
       );
+    }
+    if (!wasCompleted) {
+      onComplete(task.id);
     }
   };
 
@@ -154,6 +191,7 @@ export default function HomeDashboard() {
   const setPage = useAppStore((s) => s.setPage);
   const addTask = useAppStore((s) => s.addTask);
   const { user } = useAuth();
+  const { recordActivity } = useStreak();
 
   const todayTasks = tasks.slice(0, 5);
   const completedCount = tasks.filter((t) => t.completed).length;
@@ -168,6 +206,10 @@ export default function HomeDashboard() {
         console.error('[Firestore] Failed to save task:', err)
       );
     }
+  };
+
+  const handleTaskComplete = (taskId: string) => {
+    recordActivity('task', { taskId }).catch(() => {});
   };
 
   return (
@@ -229,7 +271,7 @@ export default function HomeDashboard() {
             <EmptyState
               icon={<CheckCircle2 size={32} />}
               title="All clear!"
-              description="Your AI study journey begins here. Add tasks to track your progress."
+              description="أضف مهمة وابدأ رحلتك الدراسية اليومية لبناء الـ Streak."
               cta="Add your first task"
               onCta={handleAddTask}
             />
@@ -237,7 +279,12 @@ export default function HomeDashboard() {
             <GlassCard className="overflow-hidden" delay={0.25}>
               <div className="divide-y divide-white/[0.04]">
                 {todayTasks.map((task) => (
-                  <TaskItem key={task.id} task={task} uid={user?.uid} />
+                  <TaskItem
+                    key={task.id}
+                    task={task}
+                    uid={user?.uid}
+                    onComplete={handleTaskComplete}
+                  />
                 ))}
               </div>
             </GlassCard>
@@ -299,6 +346,8 @@ export default function HomeDashboard() {
           )}
         </div>
       </div>
+
+      <StreakTooltip />
     </PageWrapper>
   );
 }

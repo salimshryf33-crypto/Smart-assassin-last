@@ -2,8 +2,7 @@ import { useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Play, Pause, RotateCcw, Coffee, Brain, Trophy } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
-import { useAuth } from '../contexts/AuthContext';
-import { updateStreakFS } from '../lib/firestore';
+import { useStreak } from '../hooks/useStreak';
 import PageWrapper from '../components/layout/PageWrapper';
 import { formatTime } from '../utils/format';
 
@@ -66,8 +65,10 @@ function CircularProgress({ progress, mode }: { progress: number; mode: 'work' |
 export default function FocusTimer() {
   const pomodoroState = useAppStore((s) => s.pomodoroState);
   const setPomodoroState = useAppStore((s) => s.setPomodoroState);
-  const { user } = useAuth();
+  const { recordActivity } = useStreak();
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recordActivityRef = useRef(recordActivity);
+  useEffect(() => { recordActivityRef.current = recordActivity; }, [recordActivity]);
 
   const isWork = pomodoroState.mode === 'work';
   const total = isWork ? WORK_DURATION : BREAK_DURATION;
@@ -91,17 +92,8 @@ export default function FocusTimer() {
           });
 
           if (isWorkSession) {
-            const store = useAppStore.getState();
-            store.incrementStreak();
-            const profile = store.userProfile;
-            const newStreak = profile.streak + 1;
-            const newTotalSessions = (profile.totalSessions ?? 0) + 1;
-            const today = new Date().toISOString().split('T')[0];
-            if (user?.uid) {
-              updateStreakFS(user.uid, newStreak, newTotalSessions, today).catch((err) =>
-                console.error('[Firestore] Failed to update streak:', err)
-              );
-            }
+            console.log('[Gamification] Focus session completed — granting XP + streak');
+            recordActivityRef.current('focus_session').catch(() => {});
           }
         } else {
           setPomodoroState({ timeLeft: newTime });
@@ -111,7 +103,7 @@ export default function FocusTimer() {
       if (intervalRef.current) clearInterval(intervalRef.current);
     }
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [pomodoroState.isRunning, setPomodoroState, user]);
+  }, [pomodoroState.isRunning, setPomodoroState]);
 
   const toggle = () => setPomodoroState({ isRunning: !pomodoroState.isRunning });
   const reset = () => setPomodoroState({ isRunning: false, timeLeft: isWork ? WORK_DURATION : BREAK_DURATION });

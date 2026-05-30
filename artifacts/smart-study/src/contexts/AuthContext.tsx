@@ -19,6 +19,7 @@ import {
   subscribeToFlashcards,
   subscribeToTasks,
 } from '../lib/firestore';
+import { subscribeToGamification, flushOfflineQueue } from '../lib/gamification';
 import { useAppStore } from '../store/useAppStore';
 
 interface AuthContextValue {
@@ -52,6 +53,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function setupRealtimeListeners(uid: string) {
     cleanupListeners();
+    await flushOfflineQueue(uid);
 
     const store = useAppStore.getState();
 
@@ -70,7 +72,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       store.hydrateTasks(tasks);
     });
 
-    unsubscribersRef.current = [unsubUserDoc, unsubFlashcards, unsubTasks];
+    const unsubGamification = subscribeToGamification(uid, (data) => {
+      store.hydrateGamification(data);
+    });
+
+    unsubscribersRef.current = [unsubUserDoc, unsubFlashcards, unsubTasks, unsubGamification];
 
     try {
       const messages = await loadChatMessages(uid);

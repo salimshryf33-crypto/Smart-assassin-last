@@ -7,6 +7,7 @@ import rehypeKatex from 'rehype-katex';
 import { useAppStore } from '../store/useAppStore';
 import { useAuth } from '../contexts/AuthContext';
 import { addChatMessageFS, clearChatMessages } from '../lib/firestore';
+import { useStreak } from '../hooks/useStreak';
 import EmptyState from '../components/ui/EmptyState';
 import { generateAIResponse, CurriculumContext } from '../utils/ai';
 import { getSubjects, getSubjectLabel } from '../utils/curriculum';
@@ -167,6 +168,7 @@ export default function AIChat() {
   const clearChat = useAppStore((s) => s.clearChat);
   const studentProfile = useAppStore((s) => s.studentProfile);
   const { user } = useAuth();
+  const { recordActivity } = useStreak();
 
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -216,6 +218,7 @@ export default function AIChat() {
       if (user?.uid) {
         addChatMessageFS(user.uid, { role: 'assistant', content: response, timestamp: Date.now() }).catch(() => {});
       }
+      recordActivity('ai_chat', { messageLength: content.length }).catch(() => {});
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       const isQuota = msg.includes('quota_exceeded') || msg.includes('429') || msg.includes('quota');
