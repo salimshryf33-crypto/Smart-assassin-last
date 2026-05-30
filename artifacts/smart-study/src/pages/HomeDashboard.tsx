@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Flame, CheckCircle2, Circle, BookOpen, Timer, Zap, TrendingUp, Plus, Settings, ChevronRight, Trophy } from 'lucide-react';
+import { Flame, CheckCircle2, Circle, BookOpen, Timer, Zap, TrendingUp, Plus, Settings, ChevronRight, Trophy, Brain, MessageSquare } from 'lucide-react';
 import { useAppStore, Task } from '../store/useAppStore';
 import { useAuth } from '../contexts/AuthContext';
 import { useStreak } from '../hooks/useStreak';
@@ -20,6 +20,7 @@ function StreakCard() {
     checkAndResetStreak();
   }, []);
 
+  // Single source of truth: gamification (synced from Firestore)
   const { currentStreak, longestStreak, xp } = gamification;
 
   return (
@@ -43,7 +44,7 @@ function StreakCard() {
         <div>
           <p className="text-sm text-slate-400">مرحبًا،</p>
           <h2 className="text-2xl font-bold text-white">{name || 'Student'} 👋</h2>
-          <p className="mt-1 text-xs text-slate-400">واصل تقدمك اليومي!</p>
+          <p className="mt-1 text-xs text-slate-400">أكمل المهام الثلاث لتحصل على يوم streak!</p>
         </div>
         <div className="flex flex-col items-center">
           <motion.div
@@ -81,7 +82,7 @@ function StreakCard() {
             <Trophy size={12} className="text-amber-400" />
             <p className="text-lg font-bold text-amber-300">{longestStreak ?? 0}</p>
           </div>
-          <p className="text-[11px] text-slate-400">Best Streak</p>
+          <p className="text-[11px] text-slate-400">Best</p>
         </div>
         <div className="flex-1 rounded-2xl p-3" style={{ background: 'rgba(0,0,0,0.2)' }}>
           <p className="text-lg font-bold text-emerald-400">
@@ -93,6 +94,121 @@ function StreakCard() {
         </div>
       </div>
     </motion.div>
+  );
+}
+
+function DailyChecklistCard() {
+  const checklist = useAppStore((s) => s.dailyChecklist);
+  const setPage = useAppStore((s) => s.setPage);
+
+  const items = [
+    {
+      key: 'taskDone' as const,
+      label: 'أكمل مهمة',
+      sublabel: 'من قائمة المهام',
+      icon: CheckCircle2,
+      color: '#34d399',
+      done: checklist.taskDone,
+      navigates: false,
+      action: undefined as (() => void) | undefined,
+    },
+    {
+      key: 'aiChatDone' as const,
+      label: 'AI Chat',
+      sublabel: 'رسالة دراسية حقيقية',
+      icon: Brain,
+      color: '#00c6ff',
+      done: checklist.aiChatDone,
+      navigates: true,
+      action: () => setPage('chat'),
+    },
+    {
+      key: 'cardReviewed' as const,
+      label: 'مراجعة بطاقة',
+      sublabel: 'اقلب وصنّف بطاقة',
+      icon: BookOpen,
+      color: '#f59e0b',
+      done: checklist.cardReviewed,
+      navigates: true,
+      action: () => setPage('flashcards'),
+    },
+  ];
+
+  const doneCount = items.filter((i) => i.done).length;
+  const allDone = checklist.dailyCompleted;
+
+  return (
+    <GlassCard className="p-4" delay={0.1}>
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-semibold text-white">Daily Streak Conditions</h3>
+          <p className="text-[11px] text-slate-500 mt-0.5">أكمل الثلاثة لتحصل على يوم streak</p>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {allDone ? (
+            <span className="text-[11px] font-bold text-amber-400">🔥 Streak earned!</span>
+          ) : (
+            <span className="text-xs text-slate-500">{doneCount}/3</span>
+          )}
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      <div className="mb-3 h-1.5 w-full overflow-hidden rounded-full" style={{ background: 'rgba(255,255,255,0.06)' }}>
+        <motion.div
+          initial={{ width: 0 }}
+          animate={{ width: `${(doneCount / 3) * 100}%` }}
+          transition={{ duration: 0.6, ease: 'easeOut' }}
+          className="h-full rounded-full"
+          style={{
+            background: allDone
+              ? 'linear-gradient(90deg, #f59e0b, #fbbf24)'
+              : 'linear-gradient(90deg, #00c6ff, #38bdf8)',
+          }}
+        />
+      </div>
+
+      <div className="space-y-2">
+        {items.map((item) => {
+          const Icon = item.icon;
+          return (
+            <motion.div
+              key={item.key}
+              whileTap={!item.done ? { scale: 0.98 } : {}}
+              onClick={!item.done && item.navigates ? item.action : undefined}
+              className={`flex items-center gap-3 rounded-xl px-3 py-2.5 transition-all ${!item.done && item.navigates ? 'cursor-pointer' : ''}`}
+              style={{
+                background: item.done ? 'rgba(52,211,153,0.05)' : 'rgba(255,255,255,0.025)',
+                border: item.done
+                  ? '1px solid rgba(52,211,153,0.15)'
+                  : '1px solid rgba(255,255,255,0.05)',
+              }}
+            >
+              <div
+                className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl"
+                style={{
+                  background: item.done ? `${item.color}18` : 'rgba(255,255,255,0.04)',
+                  border: `1px solid ${item.done ? item.color + '30' : 'rgba(255,255,255,0.07)'}`,
+                }}
+              >
+                <Icon size={15} style={{ color: item.done ? item.color : '#475569' }} strokeWidth={1.8} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className={`text-xs font-medium ${item.done ? 'text-slate-300' : 'text-slate-400'}`}>
+                  {item.label}
+                </p>
+                <p className="text-[10px] text-slate-600">{item.sublabel}</p>
+              </div>
+              {item.done ? (
+                <CheckCircle2 size={16} className="flex-shrink-0 text-emerald-400" />
+              ) : (
+                <Circle size={16} className="flex-shrink-0 text-slate-700" />
+              )}
+            </motion.div>
+          );
+        })}
+      </div>
+    </GlassCard>
   );
 }
 
@@ -230,6 +346,9 @@ export default function HomeDashboard() {
 
       <div className="space-y-5 px-5 pb-32">
         <StreakCard />
+
+        {/* Daily Conditions Checklist */}
+        <DailyChecklistCard />
 
         <div>
           <h3 className="mb-3 text-sm font-semibold text-slate-400 uppercase tracking-wider">Quick Start</h3>

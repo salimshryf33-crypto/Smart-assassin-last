@@ -1,101 +1,129 @@
-import { useRef, useCallback } from 'react';
+import { useCallback } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useAppStore } from '../store/useAppStore';
 import {
-  ActivityType,
-  computeStreakUpdate,
-  computeXPGrant,
-  checkStreakExpiry,
-  saveGamification,
-  getLocalDateString,
-} from '../lib/gamification';
-
-const AI_CHAT_MIN_LENGTH = 30;
-const AI_CHAT_DEBOUNCE_MS = 30_000;
+  getDateForCountry,
+  isValidAIChatMessage,
+  updateChecklistFlag,
+  atomicCompleteDay,
+  checkStreakExpiryForCountry,
+} from '../lib/streakEngine';
+import { computeXPGrant, saveGamification } from '../lib/gamification';
+import type { ActivityType } from '../lib/gamification';
 
 export function useStreak() {
   const { user } = useAuth();
   const gamification = useAppStore((s) => s.gamification);
   const updateGamification = useAppStore((s) => s.updateGamification);
+  const studentProfile = useAppStore((s) => s.studentProfile);
+  const dailyChecklist = useAppStore((s) => s.dailyChecklist);
+  const updateDailyChecklist = useAppStore((s) => s.updateDailyChecklist);
 
-  const lastActivityRef = useRef<Partial<Record<ActivityType, number>>>({});
+  const getToday = useCallback(() => {
+    return getDateForCountry(studentProfile?.country ?? 'egypt');
+  }, [studentProfile?.country]);
 
-  const recordActivity = useCallback(
-    async (type: ActivityType, options?: { taskId?: string; messageLength?: number }) => {
+  const checkAllMet = useCallback(
+    (cl: typeof dailyChecklist) => cl.taskDone && cl.aiChatDone && cl.cardReviewed,
+    []
+  );
+
+  const triggerCompletion = useCallback(
+    async (today: string) => {
       if (!user?.uid) return;
+      if (dailyChecklist.dailyCompleted && dailyChecklist.date === today) return;
 
-      console.log('[Gamification] Activity detected:', type);
-
-      if (type === 'ai_chat') {
-        const len = options?.messageLength ?? 0;
-        if (len < AI_CHAT_MIN_LENGTH) {
-          console.log('[Gamification] AI chat skipped: message too short', len);
-          return;
-        }
-        const last = lastActivityRef.current.ai_chat ?? 0;
-        if (Date.now() - last < AI_CHAT_DEBOUNCE_MS) {
-          console.log('[Gamification] AI chat skipped: debounce');
-          return;
-        }
-        lastActivityRef.current.ai_chat = Date.now();
-      }
-
-      if (type === 'task') {
-        const taskId = options?.taskId;
-        if (!taskId) return;
-
-        const today = getLocalDateString();
-        const storageKey = `sage_tasks_${user.uid}_${today}`;
-        let completedToday: Set<string>;
-        try {
-          completedToday = new Set<string>(JSON.parse(localStorage.getItem(storageKey) ?? '[]'));
-        } catch {
-          completedToday = new Set<string>();
-        }
-
-        if (completedToday.has(taskId)) {
-          console.log('[Gamification] Task already counted today:', taskId);
-          return;
-        }
-
-        completedToday.add(taskId);
-        try {
-          localStorage.setItem(storageKey, JSON.stringify([...completedToday]));
-        } catch {}
-      }
-
-      const today = getLocalDateString();
-      const streakTriggers: ActivityType[] = ['task', 'flashcard', 'focus_session'];
-
-      let streakUpdates: Partial<ReturnType<typeof computeStreakUpdate>> = {};
-      if (streakTriggers.includes(type)) {
-        const result = computeStreakUpdate(gamification, today);
-        if (result) streakUpdates = result;
-      }
-
-      const { xpGained, updates: xpUpdates } = computeXPGrant(gamification, type, today);
-
-      const finalUpdates = { ...streakUpdates, ...xpUpdates };
-      if (Object.keys(finalUpdates).length === 0) return;
-
-      updateGamification(finalUpdates);
-      await saveGamification(user.uid, finalUpdates);
-
-      if (xpGained > 0) {
-        console.log('[Gamification] +' + xpGained + ' XP for', type);
+      const result = await atomicCompleteDay(user.uid, today);
+      if (result.streakIncremented) {
+        updateGamification({
+          currentStreak: result.newStreak,
+          longestStreak: result.newLongest,
+          lastStreakDate: today,
+          lastActiveTimestamp: Date.now(),
+        });
+        updateDailyChecklist({ dailyCompleted: true, date: today });
       }
     },
-    [user?.uid, gamification, updateGamification]
+    [user?.uid, dailyChecklist, updateGamification, updateDailyChecklist]
+  );
+
+  const recordActivity = useCallback(
+    async (
+      type: ActivityType,
+      options?: { taskId?: string; messageText?: string }
+    ) => {
+      if (!user?.uid) return;
+
+      const today = getToday();
+
+      // Grant XP for any activity regardless of checklist state
+      const { xpGained, updates: xpUpdates } = computeXPGrant(gamification, type, today);
+      if (xpGained > 0) {
+        updateGamification(xpUpdates);
+        saveGamification(user.uid, xpUpdates).catch(console.error);
+      }
+
+      // focus_session does not contribute to daily checklist
+      if (type === 'focus_session') return;
+
+      // If today's checklist is already fully completed — no further action needed
+      if (dailyChecklist.dailyCompleted && dailyChecklist.date === today) return;
+
+      // Determine which checklist flag to set
+      let flag: 'taskDone' | 'aiChatDone' | 'cardReviewed' | null = null;
+
+      if (type === 'task') {
+        if (!options?.taskId) return;
+        // If taskDone already set for today — skip
+        if (dailyChecklist.taskDone && dailyChecklist.date === today) return;
+        flag = 'taskDone';
+      } else if (type === 'ai_chat') {
+        const text = options?.messageText ?? '';
+        if (!isValidAIChatMessage(text)) {
+          console.log('[StreakEngine] AI chat rejected: invalid message (too short or spam)');
+          return;
+        }
+        if (dailyChecklist.aiChatDone && dailyChecklist.date === today) return;
+        flag = 'aiChatDone';
+      } else if (type === 'flashcard') {
+        if (dailyChecklist.cardReviewed && dailyChecklist.date === today) return;
+        flag = 'cardReviewed';
+      }
+
+      if (!flag) return;
+
+      try {
+        const updated = await updateChecklistFlag(user.uid, today, flag);
+        updateDailyChecklist(updated);
+
+        if (checkAllMet(updated)) {
+          await triggerCompletion(today);
+        }
+      } catch (err) {
+        console.error('[StreakEngine] Failed to update checklist flag:', err);
+        // Safe: UI remains functional, streak preserved
+      }
+    },
+    [
+      user?.uid,
+      gamification,
+      dailyChecklist,
+      getToday,
+      updateGamification,
+      updateDailyChecklist,
+      checkAllMet,
+      triggerCompletion,
+    ]
   );
 
   const checkAndResetStreak = useCallback(async () => {
     if (!user?.uid) return;
-    const expiry = checkStreakExpiry(gamification);
+    const expiry = checkStreakExpiryForCountry(gamification, studentProfile?.country ?? 'egypt');
     if (expiry) {
       updateGamification(expiry);
-      await saveGamification(user.uid, expiry);
+      await saveGamification(user.uid, expiry).catch(console.error);
     }
-  }, [user?.uid, gamification, updateGamification]);
+  }, [user?.uid, gamification, studentProfile?.country, updateGamification]);
 
   return { recordActivity, checkAndResetStreak };
 }

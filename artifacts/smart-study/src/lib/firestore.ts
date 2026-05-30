@@ -60,17 +60,31 @@ export async function updateProgressFS(uid: string, updates: Partial<UserProfile
 // ─── Real-time subscriptions ──────────────────────────────────
 export function subscribeToUserDoc(
   uid: string,
-  onData: (data: { userProfile?: Partial<UserProfile>; studentProfile?: StudentProfile; settings?: Partial<Settings> } | null) => void
+  onData: (data: {
+    userProfile?: Partial<UserProfile>;
+    studentProfile?: StudentProfile;
+    settings?: Partial<Settings>;
+    dailyChecklist?: Record<string, unknown>;
+  } | null) => void
 ): Unsubscribe {
-  return onSnapshot(userDoc(uid), (snap) => {
-    if (snap.exists()) {
-      onData(snap.data() as { userProfile?: Partial<UserProfile>; studentProfile?: StudentProfile; settings?: Partial<Settings> });
-    } else {
-      onData(null);
+  return onSnapshot(
+    userDoc(uid),
+    (snap) => {
+      if (snap.exists()) {
+        onData(snap.data() as {
+          userProfile?: Partial<UserProfile>;
+          studentProfile?: StudentProfile;
+          settings?: Partial<Settings>;
+          dailyChecklist?: Record<string, unknown>;
+        });
+      } else {
+        onData(null);
+      }
+    },
+    (err) => {
+      console.error('[Firestore] subscribeToUserDoc error:', err);
     }
-  }, (err) => {
-    console.error('[Firestore] subscribeToUserDoc error:', err);
-  });
+  );
 }
 
 export function subscribeToFlashcards(

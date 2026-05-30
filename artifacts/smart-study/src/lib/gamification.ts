@@ -23,6 +23,7 @@ export interface GamificationData {
   totalXP: number;
   hasSeenStreakTooltip: boolean;
   dailyCaps: Record<string, DailyCap>;
+  streakHistory: string[];
 }
 
 export type ActivityType = 'task' | 'flashcard' | 'ai_chat' | 'focus_session';
@@ -54,6 +55,7 @@ export const DEFAULT_GAMIFICATION: GamificationData = {
   totalXP: 0,
   hasSeenStreakTooltip: false,
   dailyCaps: {},
+  streakHistory: [],
 };
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────

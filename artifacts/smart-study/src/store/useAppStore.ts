@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { type GamificationData, DEFAULT_GAMIFICATION } from '../lib/gamification';
+import { type DailyChecklist, DEFAULT_DAILY_CHECKLIST } from '../lib/streakEngine';
 
 export type Page = 'splash' | 'profile-setup' | 'home' | 'flashcards' | 'focus' | 'chat' | 'search' | 'profile' | 'settings' | 'curriculum-manager';
 
@@ -94,6 +95,7 @@ interface AppState {
   settings: Settings;
   isLoading: boolean;
   gamification: GamificationData;
+  dailyChecklist: DailyChecklist;
   activeFlashcardIndex: number;
   pomodoroState: {
     isRunning: boolean;
@@ -132,6 +134,8 @@ interface AppState {
   setLoading: (loading: boolean) => void;
   updateGamification: (updates: Partial<GamificationData>) => void;
   hydrateGamification: (data: GamificationData) => void;
+  updateDailyChecklist: (updates: Partial<DailyChecklist>) => void;
+  hydrateDailyChecklist: (checklist: DailyChecklist) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -146,6 +150,7 @@ export const useAppStore = create<AppState>()(
       settings: DEFAULT_SETTINGS,
       isLoading: false,
       gamification: DEFAULT_GAMIFICATION,
+      dailyChecklist: DEFAULT_DAILY_CHECKLIST,
       activeFlashcardIndex: 0,
       pomodoroState: {
         isRunning: false,
@@ -177,6 +182,7 @@ export const useAppStore = create<AppState>()(
           flashcards: [],
           tasks: [],
           gamification: DEFAULT_GAMIFICATION,
+          dailyChecklist: DEFAULT_DAILY_CHECKLIST,
           activeFlashcardIndex: 0,
           pomodoroState: { isRunning: false, mode: 'work', timeLeft: 25 * 60, sessionsCompleted: 0 },
         }),
@@ -276,10 +282,16 @@ export const useAppStore = create<AppState>()(
 
       hydrateGamification: (data) =>
         set({ gamification: { ...DEFAULT_GAMIFICATION, ...data } }),
+
+      updateDailyChecklist: (updates) =>
+        set((state) => ({ dailyChecklist: { ...state.dailyChecklist, ...updates } })),
+
+      hydrateDailyChecklist: (checklist) =>
+        set({ dailyChecklist: { ...DEFAULT_DAILY_CHECKLIST, ...checklist } }),
     }),
     {
       name: 'smart-study-assistant',
-      version: 2,
+      version: 3,
       migrate: () => ({}),
       partialize: (state) => ({
         settings: state.settings,

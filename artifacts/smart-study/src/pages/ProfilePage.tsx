@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { User, Flame, BookOpen, Timer, Edit3, Check, Target, GraduationCap, X, Settings, LogOut } from 'lucide-react';
+import { User, Flame, BookOpen, Timer, Edit3, Check, Target, GraduationCap, X, Settings, LogOut, Zap } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import { useAuth } from '../contexts/AuthContext';
 import { saveUserProfile } from '../lib/firestore';
+import { getDateForCountry, getLast28Days } from '../lib/streakEngine';
 import PageWrapper from '../components/layout/PageWrapper';
 import GlassCard from '../components/ui/GlassCard';
 
@@ -29,12 +30,24 @@ function StatCard({ icon: Icon, value, label, color }: { icon: typeof Flame; val
 
 export default function ProfilePage() {
   const { userProfile, updateProfile, flashcards, tasks, setPage } = useAppStore();
+  const gamification = useAppStore((s) => s.gamification);
+  const studentProfile = useAppStore((s) => s.studentProfile);
   const { user, logout } = useAuth();
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(userProfile.name);
   const [editGoal, setEditGoal] = useState(userProfile.studyGoal ?? '');
   const [editCurriculum, setEditCurriculum] = useState(userProfile.curriculum ?? '');
   const [editAvatar, setEditAvatar] = useState(userProfile.avatar || '🧠');
+
+  // ─── Single source of truth: gamification.currentStreak ────────────────────
+  const currentStreak = gamification.currentStreak ?? 0;
+  const longestStreak = gamification.longestStreak ?? 0;
+  const xp = gamification.xp ?? 0;
+
+  // ─── 28-day grid from streakHistory (real Firestore data) ──────────────────
+  const today = getDateForCountry(studentProfile?.country ?? 'egypt');
+  const last28 = getLast28Days(today);
+  const historySet = new Set<string>(Array.isArray(gamification.streakHistory) ? gamification.streakHistory : []);
 
   const handleSave = () => {
     const updates = { name: editName, studyGoal: editGoal, curriculum: editCurriculum, avatar: editAvatar };
@@ -122,42 +135,56 @@ export default function ProfilePage() {
           </div>
         </GlassCard>
 
+        {/* Stats — all from gamification (single source of truth) */}
         <div className="mb-5 flex gap-3">
-          <StatCard icon={Flame} value={userProfile.streak} label="Day Streak" color="#f59e0b" />
-          <StatCard icon={BookOpen} value={flashcards.length} label="Flashcards" color="#00c6ff" />
-          <StatCard icon={Timer} value={userProfile.totalSessions} label="Sessions" color="#34d399" />
+          <StatCard icon={Flame} value={currentStreak} label="Day Streak" color="#f59e0b" />
+          <StatCard icon={Zap} value={xp} label="XP" color="#00c6ff" />
+          <StatCard icon={BookOpen} value={flashcards.length} label="Cards" color="#34d399" />
           <StatCard icon={Check} value={completedTasks} label="Tasks Done" color="#f87171" />
         </div>
 
+        {/* 28-day grid — driven by streakHistory from Firestore */}
         <GlassCard className="mb-5 p-4" delay={0.1}>
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-white">Study Streak</h3>
-            <span className="text-xs text-amber-400">{userProfile.streak} days</span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-amber-400">{currentStreak} days</span>
+              <span className="text-xs text-slate-600">·</span>
+              <span className="text-xs text-slate-500">Best: {longestStreak}</span>
+            </div>
           </div>
           <div className="flex gap-1.5 flex-wrap">
-            {Array.from({ length: 28 }, (_, i) => {
-              const isStudied = i < userProfile.streak;
-              const isToday = i === userProfile.streak - 1;
+            {last28.map((day) => {
+              const isCompleted = historySet.has(day);
+              const isToday = day === today;
               return (
                 <motion.div
-                  key={i}
+                  key={day}
                   initial={{ scale: 0 }}
                   animate={{ scale: 1 }}
-                  transition={{ delay: i * 0.02 }}
+                  transition={{ delay: last28.indexOf(day) * 0.015 }}
                   className="h-5 w-5 rounded-md"
+                  title={day}
                   style={{
-                    background: isStudied
+                    background: isCompleted
                       ? isToday
                         ? 'linear-gradient(135deg, #f59e0b, #fbbf24)'
-                        : 'rgba(245,158,11,0.4)'
-                      : 'rgba(255,255,255,0.05)',
-                    boxShadow: isToday ? '0 0 8px rgba(245,158,11,0.6)' : 'none',
+                        : 'rgba(245,158,11,0.45)'
+                      : isToday
+                        ? 'rgba(0,198,255,0.12)'
+                        : 'rgba(255,255,255,0.05)',
+                    border: isToday
+                      ? isCompleted
+                        ? '1px solid rgba(245,158,11,0.6)'
+                        : '1px solid rgba(0,198,255,0.25)'
+                      : 'none',
+                    boxShadow: isToday && isCompleted ? '0 0 8px rgba(245,158,11,0.6)' : 'none',
                   }}
                 />
               );
             })}
           </div>
-          <p className="mt-2 text-xs text-slate-500">Last 28 days · Keep it going!</p>
+          <p className="mt-2 text-xs text-slate-500">Last 28 days · Complete all 3 daily tasks to earn a streak day</p>
         </GlassCard>
 
         <GlassCard className="p-4" delay={0.15}>

@@ -20,6 +20,7 @@ import {
   subscribeToTasks,
 } from '../lib/firestore';
 import { subscribeToGamification, flushOfflineQueue } from '../lib/gamification';
+import { DEFAULT_DAILY_CHECKLIST } from '../lib/streakEngine';
 import { useAppStore } from '../store/useAppStore';
 
 interface AuthContextValue {
@@ -59,9 +60,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const unsubUserDoc = subscribeToUserDoc(uid, (data) => {
       if (!data) return;
-      if (data.userProfile) store.updateUserProfile(data.userProfile as Parameters<typeof store.updateUserProfile>[0]);
-      if (data.studentProfile) store.setStudentProfileDirect(data.studentProfile);
-      if (data.settings) store.updateSettings(data.settings as Parameters<typeof store.updateSettings>[0]);
+      if (data.userProfile) {
+        store.updateUserProfile(data.userProfile as Parameters<typeof store.updateUserProfile>[0]);
+      }
+      if (data.studentProfile) {
+        store.setStudentProfileDirect(data.studentProfile);
+      }
+      if (data.settings) {
+        store.updateSettings(data.settings as Parameters<typeof store.updateSettings>[0]);
+      }
+      // Hydrate dailyChecklist from Firestore — single source of truth
+      if (data.dailyChecklist) {
+        store.hydrateDailyChecklist({
+          ...DEFAULT_DAILY_CHECKLIST,
+          ...(data.dailyChecklist as object),
+        });
+      }
     });
 
     const unsubFlashcards = subscribeToFlashcards(uid, (cards) => {

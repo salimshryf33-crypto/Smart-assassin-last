@@ -218,7 +218,7 @@ export default function AIChat() {
       if (user?.uid) {
         addChatMessageFS(user.uid, { role: 'assistant', content: response, timestamp: Date.now() }).catch(() => {});
       }
-      recordActivity('ai_chat', { messageLength: content.length }).catch(() => {});
+      recordActivity('ai_chat', { messageText: content }).catch(() => {});
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       const isQuota = msg.includes('quota_exceeded') || msg.includes('429') || msg.includes('quota');
