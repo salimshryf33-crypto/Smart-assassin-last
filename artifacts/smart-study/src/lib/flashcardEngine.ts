@@ -172,8 +172,12 @@ export function getAIGeneratedTodayCount(cards: Flashcard[]): number {
 
 // ─── Gemini JSON Call (shared utility) ───────────────────────────────────────
 
+function getApiKey(): string | null {
+  return import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem('sage_gemini_api_key') || null;
+}
+
 async function callGeminiJSON<T>(prompt: string): Promise<T | null> {
-  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+  const apiKey = getApiKey();
   if (!apiKey) return null;
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;

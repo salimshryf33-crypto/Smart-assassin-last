@@ -1,10 +1,145 @@
-import { motion } from 'framer-motion';
-import { ChevronLeft, Globe, BookOpen, Type, Bell, Info, Moon, ChevronRight, Check, Database } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { useState } from 'react';
+import { ChevronLeft, Globe, BookOpen, Type, Bell, Info, Moon, ChevronRight, Check, Database, Key, Eye, EyeOff, X, CheckCircle2, AlertCircle } from 'lucide-react';
 import { useAppStore, Settings } from '../store/useAppStore';
 import { useAuth } from '../contexts/AuthContext';
 import { saveSettings } from '../lib/firestore';
 import PageWrapper from '../components/layout/PageWrapper';
 import GlassCard from '../components/ui/GlassCard';
+
+const API_KEY_STORAGE = 'sage_gemini_api_key';
+
+function ApiKeyModal({ onClose }: { onClose: () => void }) {
+  const saved = localStorage.getItem(API_KEY_STORAGE) ?? '';
+  const [key, setKey] = useState(saved);
+  const [show, setShow] = useState(false);
+  const [saved2, setSaved2] = useState(false);
+
+  const handleSave = () => {
+    const trimmed = key.trim();
+    if (trimmed) {
+      localStorage.setItem(API_KEY_STORAGE, trimmed);
+    } else {
+      localStorage.removeItem(API_KEY_STORAGE);
+    }
+    setSaved2(true);
+    setTimeout(() => { setSaved2(false); onClose(); }, 1200);
+  };
+
+  const handleClear = () => {
+    setKey('');
+    localStorage.removeItem(API_KEY_STORAGE);
+  };
+
+  const hasSaved = !!localStorage.getItem(API_KEY_STORAGE);
+  const masked = saved ? `${saved.slice(0, 8)}${'•'.repeat(20)}` : '';
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 flex items-end"
+      style={{ background: 'rgba(0,0,0,0.75)' }}
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <motion.div
+        initial={{ y: '100%' }}
+        animate={{ y: 0 }}
+        exit={{ y: '100%' }}
+        transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+        className="w-full rounded-t-3xl p-6 pb-10"
+        style={{ background: '#0d1426', border: '1px solid rgba(255,255,255,0.08)', borderBottom: 'none' }}
+      >
+        <div className="mb-5 flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl" style={{ background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.2)' }}>
+              <Key size={16} className="text-amber-400" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-white">Gemini API Key</h2>
+              <p className="text-[11px] text-slate-500">مفتاح Google AI Studio</p>
+            </div>
+          </div>
+          <motion.button whileTap={{ scale: 0.9 }} onClick={onClose}>
+            <X size={20} className="text-slate-500" />
+          </motion.button>
+        </div>
+
+        {hasSaved && !key && (
+          <div className="mb-4 flex items-center gap-2.5 rounded-xl px-3.5 py-3" style={{ background: 'rgba(52,211,153,0.07)', border: '1px solid rgba(52,211,153,0.18)' }}>
+            <CheckCircle2 size={14} className="text-emerald-400 flex-shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium text-emerald-400">مفتاح محفوظ</p>
+              <p className="text-[11px] text-slate-500 font-mono truncate mt-0.5">{masked}</p>
+            </div>
+            <motion.button
+              whileTap={{ scale: 0.9 }}
+              onClick={handleClear}
+              className="text-[11px] text-red-400 flex-shrink-0"
+            >
+              حذف
+            </motion.button>
+          </div>
+        )}
+
+        <div className="mb-3">
+          <label className="mb-1.5 block text-xs font-medium text-slate-400">
+            {hasSaved ? 'تحديث المفتاح' : 'أدخل مفتاح API'}
+          </label>
+          <div className="relative flex items-center">
+            <input
+              type={show ? 'text' : 'password'}
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              placeholder="AIza..."
+              className="w-full rounded-xl p-3 pr-11 font-mono text-sm text-white placeholder-slate-600 outline-none"
+              style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' }}
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <motion.button
+              whileTap={{ scale: 0.9 }}
+              onClick={() => setShow((s) => !s)}
+              className="absolute left-3"
+            >
+              {show ? <EyeOff size={15} className="text-slate-500" /> : <Eye size={15} className="text-slate-500" />}
+            </motion.button>
+          </div>
+        </div>
+
+        <div className="mb-4 flex items-start gap-2 rounded-xl px-3 py-2.5" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}>
+          <AlertCircle size={13} className="text-slate-500 flex-shrink-0 mt-0.5" />
+          <p className="text-[11px] text-slate-500 leading-relaxed">
+            المفتاح يُحفظ في المتصفح فقط ولا يُرسل لأي خادم.
+            احصل على مفتاح مجاني من{' '}
+            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-[#00c6ff] underline">
+              Google AI Studio
+            </a>
+          </p>
+        </div>
+
+        <motion.button
+          whileTap={{ scale: 0.97 }}
+          onClick={handleSave}
+          className="w-full rounded-2xl py-3.5 text-sm font-semibold text-white flex items-center justify-center gap-2"
+          style={{
+            background: saved2
+              ? 'linear-gradient(135deg, #059669, #10b981)'
+              : 'linear-gradient(135deg, #0090ff, #00c6ff)',
+            boxShadow: saved2 ? '0 4px 16px rgba(16,185,129,0.3)' : '0 4px 16px rgba(0,144,255,0.3)',
+          }}
+        >
+          {saved2 ? (
+            <><CheckCircle2 size={16} /> تم الحفظ!</>
+          ) : (
+            <><Key size={15} /> حفظ المفتاح</>
+          )}
+        </motion.button>
+      </motion.div>
+    </motion.div>
+  );
+}
 
 function ToggleSwitch({ enabled, onChange }: { enabled: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -67,6 +202,8 @@ const FONT_SIZES = ['small', 'medium', 'large'] as const;
 export default function SettingsPage() {
   const { settings, updateSettings, setPage } = useAppStore();
   const { user } = useAuth();
+  const [showApiKey, setShowApiKey] = useState(false);
+  const hasApiKey = !!(import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem(API_KEY_STORAGE));
 
   const handleUpdateSettings = (updates: Partial<Settings>) => {
     updateSettings(updates);
@@ -250,6 +387,40 @@ export default function SettingsPage() {
           </div>
 
           <div>
+            <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-slate-500">AI Integration</p>
+            <GlassCard className="overflow-hidden divide-y divide-white/[0.04]">
+              <motion.button
+                whileTap={{ scale: 0.99 }}
+                onClick={() => setShowApiKey(true)}
+                className="flex w-full items-center gap-3 px-4 py-3.5 text-left"
+              >
+                <div
+                  className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
+                  style={{ background: 'rgba(245,158,11,0.1)' }}
+                >
+                  <Key size={16} style={{ color: '#f59e0b' }} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-white">Gemini API Key</p>
+                  <p className="text-[11px] text-slate-500">
+                    {hasApiKey ? 'مفتاح مفعّل ✓' : 'لم يُضف مفتاح بعد'}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div
+                    className="h-2 w-2 rounded-full flex-shrink-0"
+                    style={{
+                      background: hasApiKey ? '#34d399' : '#f87171',
+                      boxShadow: hasApiKey ? '0 0 6px rgba(52,211,153,0.8)' : '0 0 6px rgba(248,113,113,0.6)',
+                    }}
+                  />
+                  <ChevronRight size={14} className="text-slate-600" />
+                </div>
+              </motion.button>
+            </GlassCard>
+          </div>
+
+          <div>
             <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-slate-500">About</p>
             <GlassCard className="overflow-hidden divide-y divide-white/[0.04]">
               <SettingRow
@@ -264,6 +435,10 @@ export default function SettingsPage() {
           </div>
         </div>
       </div>
+
+      <AnimatePresence>
+        {showApiKey && <ApiKeyModal onClose={() => setShowApiKey(false)} />}
+      </AnimatePresence>
     </PageWrapper>
   );
 }

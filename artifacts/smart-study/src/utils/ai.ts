@@ -150,12 +150,16 @@ async function discoverModel(apiKey: string): Promise<string> {
   return cachedModel;
 }
 
+function getApiKey(): string | null {
+  return import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem('sage_gemini_api_key') || null;
+}
+
 export async function generateAIResponse(
   userMessage: string,
   history: ConversationMessage[] = [],
   curriculum?: CurriculumContext
 ): Promise<string> {
-  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+  const apiKey = getApiKey();
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
 
   const modelId = await discoverModel(apiKey);
