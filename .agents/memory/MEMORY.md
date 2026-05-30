@@ -1,0 +1,2 @@
+- [Flashcard Pipeline Architecture](flashcard-pipeline.md) — AI-powered flashcard generation from chat; SM-2 SRS; Jaccard dedup; daily limit 10; understanding checks.
+- [Streak Engine Architecture](streak-engine.md) — 3-condition daily checklist (task + AI chat + flashcard); atomic Firestore transactions; timezone-aware Egypt/Sudan.

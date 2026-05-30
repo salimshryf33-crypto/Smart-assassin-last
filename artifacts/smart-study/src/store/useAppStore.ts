@@ -17,6 +17,20 @@ export interface Flashcard {
   createdAt: number;
   reviewCount: number;
   lastReviewed?: number;
+
+  source?: 'manual' | 'ai_explanation' | 'student_mistake' | 'exam_question';
+  status?: 'new' | 'learning' | 'review' | 'mastered';
+  easeFactor?: number;
+  interval?: number;
+  repetitions?: number;
+  nextReviewDate?: number;
+  curriculumTag?: {
+    country: string;
+    level: string;
+    track: string;
+    subject: string;
+    lesson?: string;
+  };
 }
 
 export interface Task {
