@@ -638,7 +638,7 @@ export default function AIChat() {
       </motion.div>
 
       {/* ── Messages ── */}
-      <div className="flex-1 overflow-y-auto py-4 pb-6" style={{ paddingBottom: '200px' }}>
+      <div className="flex-1 overflow-y-auto py-4 pb-6" style={{ paddingBottom: '100px' }}>
         {chatMessages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full min-h-[400px] px-5">
             <EmptyState
@@ -676,7 +676,7 @@ export default function AIChat() {
       </div>
 
       {/* ── Bottom panel: toast + understanding check ── */}
-      <div className="fixed bottom-0 left-0 right-0 z-40" style={{ paddingBottom: '100px' }}>
+      <div className="fixed bottom-0 left-0 right-0 z-40">
         <AnimatePresence>
           {toastCount > 0 && (
             <CardGeneratedToast count={toastCount} onDismiss={() => setToastCount(0)} />
@@ -708,7 +708,7 @@ export default function AIChat() {
           initial={{ y: 20, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
           transition={{ delay: 0.2 }}
-          className="px-4 pb-28"
+          className="px-4 pb-4"
           style={{ background: 'linear-gradient(to top, rgba(10,15,30,1) 70%, transparent)' }}
         >
           <div
