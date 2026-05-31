@@ -29,6 +29,14 @@ const DEFAULT_MODEL = 'gemini-1.5-flash-latest';
 export const NO_CONTEXT_RESPONSE =
   'عذراً، هذه المعلومة غير متوفرة في كتاب المنهج المعتمد المرفوع حالياً.';
 
+/**
+ * Returned verbatim when no subject has been selected yet.
+ * Mirrors the existing subject-locking behavior in buildSystemPrompt (utils/ai.ts).
+ * Gemini is NOT called and RAG is NOT run in this case.
+ */
+export const NO_SUBJECT_RESPONSE =
+  'لم تختر مادةً بعد. يرجى اختيار المادة الدراسية أولاً من قائمة المواد المتاحة حتى أتمكن من مساعدتك.';
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface AnswerRequest {
@@ -42,6 +50,11 @@ export interface AnswerResult {
   ragChunksFound: number;
   retrievedContext: string | null;
   modelUsed: string;
+  /**
+   * True when no subject is selected. Gemini and RAG are NOT called.
+   * The text field will equal NO_SUBJECT_RESPONSE in this case.
+   */
+  noSubject: boolean;
   /**
    * True when retrieval returned no chunks and Gemini was NOT called.
    * The text field will equal NO_CONTEXT_RESPONSE in this case.
@@ -153,12 +166,17 @@ function buildStrictRAGPrompt(
   return `أنت Sage — مساعد تعليمي يعمل بنظام RAG صارم.
 
 ==================================================
-مصدر الإجابة الوحيد المسموح به
+النطاق المحدد (غير قابل للتغيير)
 ==================================================
-المقاطع أدناه مُستخرجة من الكتاب المدرسي الرسمي المعتمد لـ:
 - الدولة: ${countryLabel}
 - المرحلة: ${levelLabel}
-- المادة: ${curriculum.subject ?? 'غير محددة'}
+- المادة المفعّلة: ${curriculum.subject}
+- المسار: ${curriculum.track || 'غير محدد'}
+
+==================================================
+مصدر الإجابة الوحيد المسموح به
+==================================================
+المقاطع أدناه مُستخرجة من الكتاب المدرسي الرسمي المعتمد للمادة المحددة فقط.
 
 ${ragContext}
 
@@ -166,11 +184,12 @@ ${ragContext}
 قواعد صارمة غير قابلة للتجاوز
 ==================================================
 1. أجب فقط بناءً على المقاطع المُستخرجة أعلاه.
-2. إذا كانت الإجابة غير موجودة في المقاطع المُستخرجة — قل ذلك صراحةً.
+2. إذا كانت الإجابة غير موجودة في المقاطع المُستخرجة — قل: "عذراً، هذه المعلومة غير متوفرة في كتاب المنهج المعتمد المرفوع حالياً."
 3. لا تستخدم ذاكرة النموذج أو المعرفة العامة إطلاقاً.
 4. لا تستنتج أو تكمل معلومات غير موجودة في النص.
-5. لا تذكر مصادر خارجية أو كتباً أخرى.
-6. لا تتجاوز نطاق المادة والمرحلة المحددتين.
+5. إذا كان السؤال يخص مادةً أخرى غير "${curriculum.subject}" — ارفض الإجابة وأخبر الطالب بلطف أن هذا خارج نطاق المادة المختارة.
+6. لا تتعامل مع أسئلة تخص دولة أو مرحلة أو مساراً مختلفاً عما هو محدد أعلاه.
+7. لا تذكر مصادر خارجية أو كتباً أخرى.
 
 ==================================================
 أسلوب الإجابة
@@ -274,26 +293,42 @@ export async function answerQuestion(req: AnswerRequest): Promise<AnswerResult> 
   const apiKey = resolveApiKey();
   if (!apiKey) throw Object.assign(new Error('NO_API_KEY'), { code: 'NO_API_KEY' });
 
+  // ── GATE 1: Subject validation ─────────────────────────────────────────────
+  // Must match existing subject-locking behavior (utils/ai.ts buildSystemPrompt).
+  // No subject selected → no RAG, no Gemini. Return immediately.
+  if (!req.curriculum.subject) {
+    return {
+      text: NO_SUBJECT_RESPONSE,
+      ragChunksFound: 0,
+      retrievedContext: null,
+      modelUsed: 'none',
+      noSubject: true,
+      noContext: false,
+    };
+  }
+  // ──────────────────────────────────────────────────────────────────────────
+
   // Step 1 — RAG retrieval (runs in parallel with model discovery)
   const [modelId, ragResult] = await Promise.all([
     resolveModel(apiKey),
     retrieveContext(req.curriculum, req.message),
   ]);
 
-  // ── HARD GATE ─────────────────────────────────────────────────────────────
-  // No context found → return fixed message. Gemini is NOT called.
+  // ── GATE 2: Context existence check ───────────────────────────────────────
+  // No curriculum chunks found → return fixed message. Gemini is NOT called.
   if (!ragResult) {
     return {
       text: NO_CONTEXT_RESPONSE,
       ragChunksFound: 0,
       retrievedContext: null,
       modelUsed: 'none',
+      noSubject: false,
       noContext: true,
     };
   }
   // ──────────────────────────────────────────────────────────────────────────
 
-  // Step 2 — Build strict RAG-only system prompt (no fallback language)
+  // Step 2 — Build strict RAG-only system prompt (subject + country + level locked)
   const systemPrompt = buildStrictRAGPrompt(req.curriculum, ragResult.formatted);
 
   // Step 3 — Call Gemini with retrieved context only
@@ -310,6 +345,7 @@ export async function answerQuestion(req: AnswerRequest): Promise<AnswerResult> 
     ragChunksFound: ragResult.chunks,
     retrievedContext: ragResult.formatted,
     modelUsed: modelId,
+    noSubject: false,
     noContext: false,
   };
 }
