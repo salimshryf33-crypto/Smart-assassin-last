@@ -9,15 +9,11 @@ import { useAuth } from '../contexts/AuthContext';
 import { addChatMessageFS, clearChatMessages, saveFlashcard } from '../lib/firestore';
 import { useStreak } from '../hooks/useStreak';
 import EmptyState from '../components/ui/EmptyState';
-import { generateAIResponse, CurriculumContext } from '../utils/ai';
+import { CurriculumContext } from '../utils/ai';
 import { getSubjects, getSubjectLabel } from '../utils/curriculum';
 import { formatDate } from '../utils/format';
-import {
-  generateFlashcardsFromAIResponse,
-  evaluateUnderstandingAnswer,
-  type UnderstandingCheck,
-  type EvaluationResult,
-} from '../lib/flashcardEngine';
+import { orchestrate, type UnderstandingCheck, type EvaluationResult } from '../lib/engines/aiOrchestrator';
+import { evaluateAnswer } from '../lib/engines/flashcardGenEngine';
 
 // ─── Typing indicator ─────────────────────────────────────────────────────────
 
@@ -153,7 +149,7 @@ function UnderstandingCheckPanel({
     if (!answer.trim() || loading) return;
     setLoading(true);
     try {
-      const result = await evaluateUnderstandingAnswer(check, answer.trim(), category);
+      const result = await evaluateAnswer({ check, studentAnswer: answer.trim(), category });
       onResult(result);
     } catch {
       onResult({ understood: true, feedback: 'تعذر التقييم. استمر في الدراسة!', mistakeCard: null });
@@ -361,44 +357,19 @@ export default function AIChat() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages, isTyping, understandingCheck, checkResult]);
 
-  // ─── Async flashcard generation (non-blocking) ───────────────────────────
-  const triggerFlashcardGeneration = useCallback(
-    async (aiResponse: string) => {
-      try {
-        const result = await generateFlashcardsFromAIResponse(
-          aiResponse,
-          curriculum,
-          flashcards,
-          { country: studentProfile?.country ?? '', level: studentProfile?.level ?? '', track: studentProfile?.track ?? '' }
-        );
-
-        if (result.cards.length > 0) {
-          for (const cardData of result.cards) {
-            const fullCard = {
-              ...cardData,
-              id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-              createdAt: Date.now(),
-              reviewCount: 0,
-            };
-            addFlashcardLocal(fullCard);
-            if (user?.uid) {
-              saveFlashcard(user.uid, fullCard).catch((err) =>
-                console.error('[FlashcardEngine] Firestore save failed:', err)
-              );
-            }
-          }
-          setToastCount(result.cards.length);
+  // ─── Card save handler (used by orchestrator's onCardsGenerated callback) ──
+  const saveGeneratedCards = useCallback(
+    (cards: Parameters<typeof addFlashcardLocal>[0][]) => {
+      for (const cardData of cards) {
+        addFlashcardLocal(cardData);
+        if (user?.uid) {
+          saveFlashcard(user.uid, cardData).catch((err) =>
+            console.error('[Orchestrator] Firestore card save failed:', err)
+          );
         }
-
-        if (result.understandingCheck && !understandingCheck) {
-          setUnderstandingCheck(result.understandingCheck);
-          setCheckResult(null);
-        }
-      } catch (err) {
-        console.error('[FlashcardEngine] Generation error (non-fatal):', err);
       }
     },
-    [curriculum, flashcards, studentProfile, user, addFlashcardLocal, understandingCheck]
+    [user, addFlashcardLocal]
   );
 
   // ─── Handle understanding check result ───────────────────────────────────
@@ -457,25 +428,75 @@ export default function AIChat() {
         role: m.role === 'assistant' ? 'model' : ('user' as 'user' | 'model'),
         parts: [{ text: m.content }],
       }));
-      const response = await generateAIResponse(content, history, curriculum);
+
+      // ── Single orchestrated entry point ──────────────────────────────────
+      // Order: subject gate → RAG retrieval gate → Gemini (strict RAG only)
+      // Flashcard generation fires async via callback — never delays response.
+      const result = await orchestrate(
+        {
+          message: content,
+          history,
+          curriculum,
+          existingCards: flashcards,
+          studentProfile: {
+            country: studentProfile?.country ?? '',
+            level: studentProfile?.level ?? '',
+            track: studentProfile?.track ?? '',
+          },
+        },
+        {
+          generateFlashcards: true,
+          onCardsGenerated: (cardResult) => {
+            if (cardResult.cards.length > 0) {
+              const fullCards = cardResult.cards.map((cardData) => ({
+                ...cardData,
+                id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+                createdAt: Date.now(),
+                reviewCount: 0,
+              }));
+              saveGeneratedCards(fullCards);
+              setToastCount(cardResult.cards.length);
+            }
+            if (cardResult.understandingCheck) {
+              setUnderstandingCheck((prev) => prev ?? cardResult.understandingCheck);
+              setCheckResult(null);
+            }
+          },
+        }
+      );
+      // ─────────────────────────────────────────────────────────────────────
+
+      const response = result.answer.text;
 
       addChatMessage({ role: 'assistant', content: response });
       if (user?.uid) {
-        addChatMessageFS(user.uid, { role: 'assistant', content: response, timestamp: Date.now() }).catch(() => {});
+        addChatMessageFS(user.uid, {
+          role: 'assistant',
+          content: response,
+          timestamp: Date.now(),
+        }).catch(() => {});
       }
 
-      recordActivity('ai_chat', { messageText: content }).catch(() => {});
-
-      // Non-blocking: generate flashcards async after AI responds
-      triggerFlashcardGeneration(response);
+      // Only record streak activity when a real answer was generated
+      if (!result.answer.noSubject && !result.answer.noContext) {
+        recordActivity('ai_chat', { messageText: content }).catch(() => {});
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      const isQuota = msg.includes('quota_exceeded') || msg.includes('429') || msg.includes('quota');
-      const isNoKey = msg.includes('not configured') || msg.includes('API_KEY_INVALID') || msg.includes('API key not valid');
+      const isQuota =
+        msg.includes('QUOTA_EXCEEDED') ||
+        msg.includes('quota_exceeded') ||
+        msg.includes('429') ||
+        msg.includes('quota');
+      const isNoKey =
+        msg.includes('NO_API_KEY') ||
+        msg.includes('not configured') ||
+        msg.includes('API_KEY_INVALID') ||
+        msg.includes('API key not valid');
       const errorContent = isQuota
         ? 'تجاوزت الحد المجاني لـ Gemini API اليوم. جرب مجدداً غداً أو فعّل الفاتورة على Google AI Studio.'
         : isNoKey
-          ? 'مفتاح API غير صحيح أو غير موجود. تأكد من إضافة VITE_GEMINI_API_KEY بشكل صحيح في Secrets.'
+          ? 'مفتاح API غير صحيح أو غير موجود. أضف مفتاحك من الإعدادات أو من Secrets.'
           : `خطأ في الاتصال: ${msg}`;
       addChatMessage({ role: 'assistant', content: errorContent });
     } finally {
