@@ -3,18 +3,31 @@
  *
  * Responsibility:
  *   Given a student question + curriculum context, retrieve relevant curriculum
- *   chunks via RAG and produce a grounded answer using Gemini.
+ *   chunks via RAG and produce a grounded answer using ONLY that retrieved material.
  *
- * Rules:
- *   - NEVER answers without first attempting RAG retrieval
+ * Hard Rules (enforced in code, not just prompt):
+ *   - MUST retrieve curriculum context before any Gemini call
+ *   - If retrieval returns no chunks → return fixed Arabic message, NO Gemini call
+ *   - Gemini is ONLY called when relevant context exists
+ *   - System prompt forbids all general-knowledge and model-memory answering
  *   - NEVER generates flashcards or detects weaknesses
  *   - NEVER calls other engines
- *   - Throws on missing API key (caller handles gracefully)
  */
 
 import { searchCurriculum, formatCurriculumContext } from '../../utils/curriculumSearch';
-import { buildSystemPrompt } from '../../utils/ai';
 import type { ConversationMessage, CurriculumContext } from '../../utils/ai';
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
+const DEFAULT_MODEL = 'gemini-1.5-flash-latest';
+
+/**
+ * Returned verbatim when no curriculum context is found.
+ * Gemini is NOT called in this case.
+ */
+export const NO_CONTEXT_RESPONSE =
+  'عذراً، هذه المعلومة غير متوفرة في كتاب المنهج المعتمد المرفوع حالياً.';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -29,6 +42,11 @@ export interface AnswerResult {
   ragChunksFound: number;
   retrievedContext: string | null;
   modelUsed: string;
+  /**
+   * True when retrieval returned no chunks and Gemini was NOT called.
+   * The text field will equal NO_CONTEXT_RESPONSE in this case.
+   */
+  noContext: boolean;
 }
 
 export type AnswerEngineError =
@@ -37,10 +55,7 @@ export type AnswerEngineError =
   | { code: 'EMPTY_RESPONSE' }
   | { code: 'NETWORK_ERROR'; detail: string };
 
-// ─── Internal Helpers ─────────────────────────────────────────────────────────
-
-const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
-const DEFAULT_MODEL = 'gemini-1.5-flash-latest';
+// ─── API Key ──────────────────────────────────────────────────────────────────
 
 function resolveApiKey(): string | null {
   return (
@@ -49,6 +64,8 @@ function resolveApiKey(): string | null {
     null
   );
 }
+
+// ─── Model Discovery ──────────────────────────────────────────────────────────
 
 let _cachedModel: string | null = null;
 
@@ -80,7 +97,6 @@ async function resolveModel(apiKey: string): Promise<string> {
   return _cachedModel;
 }
 
-/** Clear cached model — call if the model returns a 404 */
 export function resetModelCache(): void {
   _cachedModel = null;
 }
@@ -89,7 +105,8 @@ export function resetModelCache(): void {
 
 /**
  * Retrieve grounding context from the curriculum index.
- * Returns null if the curriculum is incomplete or retrieval fails.
+ * Returns null if curriculum is incomplete or no chunks are found.
+ * This is the ONLY source of truth for answering.
  */
 async function retrieveContext(
   curriculum: CurriculumContext,
@@ -111,6 +128,59 @@ async function retrieveContext(
   }
 }
 
+// ─── Strict RAG System Prompt ─────────────────────────────────────────────────
+
+/**
+ * Build a system prompt that enforces strict retrieval-grounded answering.
+ * Contains NO academic fallback, NO general knowledge allowance.
+ * Only called when ragContext is non-null.
+ */
+function buildStrictRAGPrompt(
+  curriculum: CurriculumContext,
+  ragContext: string
+): string {
+  const countryLabel =
+    curriculum.country === 'egypt' ? 'مصر' :
+    curriculum.country === 'sudan' ? 'السودان' :
+    curriculum.country;
+
+  const levelLabel =
+    curriculum.level === 'primary' ? 'المرحلة الابتدائية' :
+    curriculum.level === 'preparatory' ? 'المرحلة الإعدادية' :
+    curriculum.level === 'secondary' ? 'المرحلة الثانوية' :
+    curriculum.level;
+
+  return `أنت Sage — مساعد تعليمي يعمل بنظام RAG صارم.
+
+==================================================
+مصدر الإجابة الوحيد المسموح به
+==================================================
+المقاطع أدناه مُستخرجة من الكتاب المدرسي الرسمي المعتمد لـ:
+- الدولة: ${countryLabel}
+- المرحلة: ${levelLabel}
+- المادة: ${curriculum.subject ?? 'غير محددة'}
+
+${ragContext}
+
+==================================================
+قواعد صارمة غير قابلة للتجاوز
+==================================================
+1. أجب فقط بناءً على المقاطع المُستخرجة أعلاه.
+2. إذا كانت الإجابة غير موجودة في المقاطع المُستخرجة — قل ذلك صراحةً.
+3. لا تستخدم ذاكرة النموذج أو المعرفة العامة إطلاقاً.
+4. لا تستنتج أو تكمل معلومات غير موجودة في النص.
+5. لا تذكر مصادر خارجية أو كتباً أخرى.
+6. لا تتجاوز نطاق المادة والمرحلة المحددتين.
+
+==================================================
+أسلوب الإجابة
+==================================================
+- أجب بالعربية الفصحى الواضحة المناسبة للطالب.
+- استخدم markdown للتنسيق واللاتكس للمعادلات.
+- اجعل الإجابة مختصرة ومركزة.
+- اقتبس من النص الأصلي عند الضرورة.`;
+}
+
 // ─── Gemini Call ──────────────────────────────────────────────────────────────
 
 async function callGemini(
@@ -125,7 +195,6 @@ async function callGemini(
     { role: 'user', parts: [{ text: userMessage }] },
   ];
 
-  // Attempt 1 — system_instruction field (v1beta)
   const attempt1 = async () => {
     const url = `${GEMINI_BASE}/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
     const res = await fetch(url, {
@@ -134,7 +203,7 @@ async function callGemini(
       body: JSON.stringify({
         system_instruction: { parts: [{ text: systemPrompt }] },
         contents,
-        generationConfig: { maxOutputTokens: 1024, temperature: 0.7 },
+        generationConfig: { maxOutputTokens: 1024, temperature: 0.3 },
       }),
     });
     const data = await res.json();
@@ -155,7 +224,6 @@ async function callGemini(
     return text;
   };
 
-  // Attempt 2 — prepend system as first user turn (fallback for older models)
   const attempt2 = async () => {
     const url = `${GEMINI_BASE}/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
     const res = await fetch(url, {
@@ -164,14 +232,11 @@ async function callGemini(
       body: JSON.stringify({
         contents: [
           { role: 'user', parts: [{ text: systemPrompt }] },
-          {
-            role: 'model',
-            parts: [{ text: 'مفهوم. أنا Sage، مدرسك الخاص. كيف يمكنني مساعدتك؟' }],
-          },
+          { role: 'model', parts: [{ text: 'مفهوم. سأجيب فقط من المقاطع المُستخرجة.' }] },
           ...history,
           { role: 'user', parts: [{ text: userMessage }] },
         ],
-        generationConfig: { maxOutputTokens: 1024, temperature: 0.7 },
+        generationConfig: { maxOutputTokens: 1024, temperature: 0.3 },
       }),
     });
     const data = await res.json();
@@ -195,21 +260,43 @@ async function callGemini(
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Answer a student question using strict RAG grounding.
+ * Answer a student question using STRICT RAG-only grounding.
  *
- * @throws AnswerEngineError codes as Error.message
+ * Hard gate enforced in code:
+ *   - If RAG retrieval returns no chunks → Gemini is NOT called.
+ *     Returns NO_CONTEXT_RESPONSE with noContext: true.
+ *   - If RAG retrieval returns chunks → Gemini is called with a strict
+ *     prompt that forbids any use of general knowledge.
+ *
+ * @throws Error with code 'NO_API_KEY' | 'QUOTA_EXCEEDED' | 'EMPTY_RESPONSE'
  */
 export async function answerQuestion(req: AnswerRequest): Promise<AnswerResult> {
   const apiKey = resolveApiKey();
   if (!apiKey) throw Object.assign(new Error('NO_API_KEY'), { code: 'NO_API_KEY' });
 
+  // Step 1 — RAG retrieval (runs in parallel with model discovery)
   const [modelId, ragResult] = await Promise.all([
     resolveModel(apiKey),
     retrieveContext(req.curriculum, req.message),
   ]);
 
-  const systemPrompt = buildSystemPrompt(req.curriculum, ragResult?.formatted ?? undefined);
+  // ── HARD GATE ─────────────────────────────────────────────────────────────
+  // No context found → return fixed message. Gemini is NOT called.
+  if (!ragResult) {
+    return {
+      text: NO_CONTEXT_RESPONSE,
+      ragChunksFound: 0,
+      retrievedContext: null,
+      modelUsed: 'none',
+      noContext: true,
+    };
+  }
+  // ──────────────────────────────────────────────────────────────────────────
 
+  // Step 2 — Build strict RAG-only system prompt (no fallback language)
+  const systemPrompt = buildStrictRAGPrompt(req.curriculum, ragResult.formatted);
+
+  // Step 3 — Call Gemini with retrieved context only
   const text = await callGemini(
     apiKey,
     modelId,
@@ -220,8 +307,9 @@ export async function answerQuestion(req: AnswerRequest): Promise<AnswerResult> 
 
   return {
     text,
-    ragChunksFound: ragResult?.chunks ?? 0,
-    retrievedContext: ragResult?.formatted ?? null,
+    ragChunksFound: ragResult.chunks,
+    retrievedContext: ragResult.formatted,
     modelUsed: modelId,
+    noContext: false,
   };
 }
