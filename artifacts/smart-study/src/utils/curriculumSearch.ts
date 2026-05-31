@@ -20,7 +20,7 @@ export function formatCurriculumContext(chunks: CurriculumChunk[]): string {
   if (chunks.length === 0) return '';
   const sections = chunks.map(
     (c, i) =>
-      `--- [قسم ${i + 1}: ${c.chapter} | صفحات ${c.pageRange}] ---\n${c.content.slice(0, 2500)}`
+      `--- [قسم ${i + 1}: ${c.chapter} | صفحات ${c.pageRange}] ---\n${c.content}`
   );
   return `\n\n==================================================\nCURRICULUM REFERENCE MATERIAL\n==================================================\nThe following is extracted directly from the official textbook. Use it as your primary teaching source:\n\n${sections.join('\n\n')}\n==================================================`;
 }
