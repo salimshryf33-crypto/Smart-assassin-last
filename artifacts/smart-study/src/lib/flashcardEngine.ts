@@ -170,22 +170,15 @@ export function getAIGeneratedTodayCount(cards: Flashcard[]): number {
   ).length;
 }
 
-// ─── Gemini JSON Call (shared utility) ───────────────────────────────────────
-
-function getApiKey(): string | null {
-  return import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem('sage_gemini_api_key') || null;
-}
+// ─── Gemini JSON Call (via backend proxy) ────────────────────────────────────
 
 async function callGeminiJSON<T>(prompt: string): Promise<T | null> {
-  const apiKey = getApiKey();
-  if (!apiKey) return null;
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
   try {
-    const res = await fetch(url, {
+    const res = await fetch('/api/gemini/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        model: 'gemini-1.5-flash-latest',
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         generationConfig: { maxOutputTokens: 1024, temperature: 0.4 },
       }),

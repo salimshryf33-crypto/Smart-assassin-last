@@ -54,23 +54,13 @@ export interface EvalRequest {
 
 // ─── Internal Helpers ─────────────────────────────────────────────────────────
 
-const GEMINI_URL =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent';
-
-function resolveApiKey(): string | null {
-  return (
-    (typeof import.meta !== 'undefined' && import.meta.env?.VITE_GEMINI_API_KEY) ||
-    (typeof localStorage !== 'undefined' && localStorage.getItem('sage_gemini_api_key')) ||
-    null
-  );
-}
-
-async function callGeminiJSON<T>(prompt: string, apiKey: string): Promise<T | null> {
+async function callGeminiJSON<T>(prompt: string, model = 'gemini-1.5-flash-latest'): Promise<T | null> {
   try {
-    const res = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
+    const res = await fetch('/api/gemini/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        model,
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         generationConfig: { maxOutputTokens: 1024, temperature: 0.4 },
       }),
@@ -176,7 +166,7 @@ Rules:
 
 /**
  * Extract flashcards from an AI tutor response.
- * Returns a safe empty result if no API key is available or response is too short.
+ * Returns a safe empty result if server is unavailable or response is too short.
  */
 export async function generateCards(req: CardGenRequest): Promise<CardGenResult> {
   const empty: CardGenResult = {
@@ -188,9 +178,6 @@ export async function generateCards(req: CardGenRequest): Promise<CardGenResult>
   };
 
   if (!req.aiResponse || req.aiResponse.length < 80) return empty;
-
-  const apiKey = resolveApiKey();
-  if (!apiKey) return empty;
 
   const todayCount = getAIGeneratedTodayCount(req.existingCards);
   if (todayCount >= MAX_FLASHCARDS_PER_DAY) {
@@ -210,7 +197,7 @@ export async function generateCards(req: CardGenRequest): Promise<CardGenResult>
     understandingCheck: { question: string; correctAnswer: string } | null;
   }
 
-  const raw = await callGeminiJSON<RawResponse>(prompt, apiKey);
+  const raw = await callGeminiJSON<RawResponse>(prompt);
   if (!raw || !Array.isArray(raw.flashcards)) return empty;
 
   let skippedDuplicate = 0;
@@ -268,7 +255,7 @@ export async function generateCards(req: CardGenRequest): Promise<CardGenResult>
 
 /**
  * Evaluate a student's comprehension-check answer.
- * Returns a safe "pass" result if no API key is available.
+ * Returns a safe "pass" result if server is unavailable.
  */
 export async function evaluateAnswer(req: EvalRequest): Promise<EvaluationResult> {
   if (!req.studentAnswer.trim() || req.studentAnswer.trim().length < 3) {
@@ -279,17 +266,12 @@ export async function evaluateAnswer(req: EvalRequest): Promise<EvaluationResult
     };
   }
 
-  const apiKey = resolveApiKey();
-  if (!apiKey) {
-    return { understood: true, feedback: 'تعذر التقييم. استمر في المراجعة!', mistakeCard: null };
-  }
-
   const prompt = buildEvaluationPrompt(req.check, req.studentAnswer);
   const result = await callGeminiJSON<{
     understood: boolean;
     feedback: string;
     mistakeCard: { question: string; answer: string } | null;
-  }>(prompt, apiKey);
+  }>(prompt);
 
   if (!result) {
     return { understood: true, feedback: 'تعذر التقييم. استمر في المراجعة!', mistakeCard: null };

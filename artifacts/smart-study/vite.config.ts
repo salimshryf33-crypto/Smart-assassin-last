@@ -28,9 +28,6 @@ if (!basePath) {
 
 export default defineConfig({
   base: basePath,
-  define: {
-    'import.meta.env.VITE_GEMINI_API_KEY': JSON.stringify(process.env.VITE_GEMINI_API_KEY ?? ''),
-  },
   plugins: [
     react(),
     tailwindcss(),

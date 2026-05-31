@@ -19,7 +19,6 @@ import type { ConversationMessage, CurriculumContext } from '../../utils/ai';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
 const DEFAULT_MODEL = 'gemini-1.5-flash-latest';
 
 /**
@@ -68,24 +67,14 @@ export type AnswerEngineError =
   | { code: 'EMPTY_RESPONSE' }
   | { code: 'NETWORK_ERROR'; detail: string };
 
-// ─── API Key ──────────────────────────────────────────────────────────────────
-
-function resolveApiKey(): string | null {
-  return (
-    (typeof import.meta !== 'undefined' && import.meta.env?.VITE_GEMINI_API_KEY) ||
-    (typeof localStorage !== 'undefined' && localStorage.getItem('sage_gemini_api_key')) ||
-    null
-  );
-}
-
 // ─── Model Discovery ──────────────────────────────────────────────────────────
 
 let _cachedModel: string | null = null;
 
-async function resolveModel(apiKey: string): Promise<string> {
+async function resolveModel(): Promise<string> {
   if (_cachedModel) return _cachedModel;
   try {
-    const res = await fetch(`${GEMINI_BASE}/v1beta/models?key=${apiKey}`);
+    const res = await fetch('/api/gemini/models');
     if (res.ok) {
       const data = await res.json();
       const models: Array<{ name: string; supportedGenerationMethods?: string[] }> =
@@ -200,10 +189,9 @@ ${ragContext}
 - اقتبس من النص الأصلي عند الضرورة.`;
 }
 
-// ─── Gemini Call ──────────────────────────────────────────────────────────────
+// ─── Gemini Call (via backend proxy) ──────────────────────────────────────────
 
 async function callGemini(
-  apiKey: string,
   modelId: string,
   systemPrompt: string,
   history: ConversationMessage[],
@@ -215,11 +203,11 @@ async function callGemini(
   ];
 
   const attempt1 = async () => {
-    const url = `${GEMINI_BASE}/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
-    const res = await fetch(url, {
+    const res = await fetch('/api/gemini/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        model: modelId,
         system_instruction: { parts: [{ text: systemPrompt }] },
         contents,
         generationConfig: { maxOutputTokens: 1024, temperature: 0.3 },
@@ -227,16 +215,18 @@ async function callGemini(
     });
     const data = await res.json();
     if (!res.ok) {
-      const msg: string = data?.error?.message ?? `HTTP ${res.status}`;
+      const msg: string = data?.error?.message ?? data?.error ?? `HTTP ${res.status}`;
       if (
         res.status === 429 ||
-        msg.toLowerCase().includes('quota') ||
-        msg.toLowerCase().includes('resource_exhausted')
+        (typeof msg === 'string' && (
+          msg.toLowerCase().includes('quota') ||
+          msg.toLowerCase().includes('resource_exhausted')
+        ))
       ) {
-        throw Object.assign(new Error(msg), { code: 'QUOTA_EXCEEDED' });
+        throw Object.assign(new Error(String(msg)), { code: 'QUOTA_EXCEEDED' });
       }
-      if (msg.toLowerCase().includes('not found')) resetModelCache();
-      throw new Error(msg);
+      if (typeof msg === 'string' && msg.toLowerCase().includes('not found')) resetModelCache();
+      throw new Error(String(msg));
     }
     const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
     if (!text) throw new Error('EMPTY_RESPONSE');
@@ -244,11 +234,11 @@ async function callGemini(
   };
 
   const attempt2 = async () => {
-    const url = `${GEMINI_BASE}/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
-    const res = await fetch(url, {
+    const res = await fetch('/api/gemini/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        model: modelId,
         contents: [
           { role: 'user', parts: [{ text: systemPrompt }] },
           { role: 'model', parts: [{ text: 'مفهوم. سأجيب فقط من المقاطع المُستخرجة.' }] },
@@ -260,8 +250,8 @@ async function callGemini(
     });
     const data = await res.json();
     if (!res.ok) {
-      const msg: string = data?.error?.message ?? `HTTP ${res.status}`;
-      throw new Error(msg);
+      const msg: string = data?.error?.message ?? data?.error ?? `HTTP ${res.status}`;
+      throw new Error(String(msg));
     }
     const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
     if (!text) throw new Error('EMPTY_RESPONSE');
@@ -290,12 +280,7 @@ async function callGemini(
  * @throws Error with code 'NO_API_KEY' | 'QUOTA_EXCEEDED' | 'EMPTY_RESPONSE'
  */
 export async function answerQuestion(req: AnswerRequest): Promise<AnswerResult> {
-  const apiKey = resolveApiKey();
-  if (!apiKey) throw Object.assign(new Error('NO_API_KEY'), { code: 'NO_API_KEY' });
-
   // ── GATE 1: Subject validation ─────────────────────────────────────────────
-  // Must match existing subject-locking behavior (utils/ai.ts buildSystemPrompt).
-  // No subject selected → no RAG, no Gemini. Return immediately.
   if (!req.curriculum.subject) {
     return {
       text: NO_SUBJECT_RESPONSE,
@@ -310,12 +295,11 @@ export async function answerQuestion(req: AnswerRequest): Promise<AnswerResult> 
 
   // Step 1 — RAG retrieval (runs in parallel with model discovery)
   const [modelId, ragResult] = await Promise.all([
-    resolveModel(apiKey),
+    resolveModel(),
     retrieveContext(req.curriculum, req.message),
   ]);
 
   // ── GATE 2: Context existence check ───────────────────────────────────────
-  // No curriculum chunks found → return fixed message. Gemini is NOT called.
   if (!ragResult) {
     return {
       text: NO_CONTEXT_RESPONSE,
@@ -331,9 +315,8 @@ export async function answerQuestion(req: AnswerRequest): Promise<AnswerResult> 
   // Step 2 — Build strict RAG-only system prompt (subject + country + level locked)
   const systemPrompt = buildStrictRAGPrompt(req.curriculum, ragResult.formatted);
 
-  // Step 3 — Call Gemini with retrieved context only
+  // Step 3 — Call Gemini via backend proxy with retrieved context only
   const text = await callGemini(
-    apiKey,
     modelId,
     systemPrompt,
     req.history,

@@ -123,12 +123,10 @@ export interface ConversationMessage {
 
 let cachedModel: string | null = null;
 
-async function discoverModel(apiKey: string): Promise<string> {
+async function discoverModel(): Promise<string> {
   if (cachedModel) return cachedModel;
   try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
-    );
+    const res = await fetch('/api/gemini/models');
     if (res.ok) {
       const data = await res.json();
       const models: Array<{ name: string; supportedGenerationMethods?: string[] }> = data.models ?? [];
@@ -150,19 +148,12 @@ async function discoverModel(apiKey: string): Promise<string> {
   return cachedModel;
 }
 
-function getApiKey(): string | null {
-  return import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem('sage_gemini_api_key') || null;
-}
-
 export async function generateAIResponse(
   userMessage: string,
   history: ConversationMessage[] = [],
   curriculum?: CurriculumContext
 ): Promise<string> {
-  const apiKey = getApiKey();
-  if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
-
-  const modelId = await discoverModel(apiKey);
+  const modelId = await discoverModel();
   const ctx = curriculum ?? { country: '', level: '', track: '', subject: null };
 
   // Retrieve curriculum reference from backend (async RAG)
@@ -185,14 +176,15 @@ export async function generateAIResponse(
   const attempts = [
     {
       body: {
+        model: modelId,
         system_instruction: { parts: [{ text: systemPrompt }] },
         contents,
         generationConfig: { maxOutputTokens: 1024, temperature: 0.7 },
       },
-      apiVersion: 'v1beta',
     },
     {
       body: {
+        model: modelId,
         contents: [
           { role: 'user', parts: [{ text: systemPrompt }] },
           { role: 'model', parts: [{ text: 'مفهوم. أنا Sage، مدرسك الخاص. كيف يمكنني مساعدتك؟' }] },
@@ -201,7 +193,6 @@ export async function generateAIResponse(
         ],
         generationConfig: { maxOutputTokens: 1024, temperature: 0.7 },
       },
-      apiVersion: 'v1beta',
     },
   ];
 
@@ -209,20 +200,19 @@ export async function generateAIResponse(
 
   for (const attempt of attempts) {
     try {
-      const url = `https://generativelanguage.googleapis.com/${attempt.apiVersion}/models/${modelId}:generateContent?key=${apiKey}`;
-      const res = await fetch(url, {
+      const res = await fetch('/api/gemini/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(attempt.body),
       });
       const data = await res.json();
       if (!res.ok) {
-        const errMsg: string = data?.error?.message ?? `HTTP ${res.status}`;
-        lastError = errMsg;
-        if (res.status === 429 || errMsg.toLowerCase().includes('quota') || errMsg.toLowerCase().includes('resource_exhausted')) {
+        const errMsg: string = data?.error?.message ?? data?.error ?? `HTTP ${res.status}`;
+        lastError = String(errMsg);
+        if (res.status === 429 || (typeof errMsg === 'string' && (errMsg.toLowerCase().includes('quota') || errMsg.toLowerCase().includes('resource_exhausted')))) {
           throw new Error('quota_exceeded');
         }
-        if (errMsg.toLowerCase().includes('not found')) cachedModel = null;
+        if (typeof errMsg === 'string' && errMsg.toLowerCase().includes('not found')) cachedModel = null;
         continue;
       }
       const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
