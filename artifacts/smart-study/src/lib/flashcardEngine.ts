@@ -1,5 +1,6 @@
 import type { Flashcard } from '../store/useAppStore';
 import type { CurriculumContext } from '../utils/ai';
+import { resolveModel } from './engines/modelResolver';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -174,16 +175,20 @@ export function getAIGeneratedTodayCount(cards: Flashcard[]): number {
 
 async function callGeminiJSON<T>(prompt: string): Promise<T | null> {
   try {
+    const model = await resolveModel();
     const res = await fetch('/api/gemini/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'gemini-1.5-flash-latest',
+        model,
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         generationConfig: { maxOutputTokens: 1024, temperature: 0.4 },
       }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.error('[FlashcardEngine] Gemini returned', res.status, 'for model:', model);
+      return null;
+    }
     const data = await res.json();
     const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
     const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();

@@ -16,10 +16,7 @@
 
 import { searchCurriculum, formatCurriculumContext } from '../../utils/curriculumSearch';
 import type { ConversationMessage, CurriculumContext } from '../../utils/ai';
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const DEFAULT_MODEL = 'gemini-1.5-flash-latest';
+import { resolveModel } from './modelResolver';
 
 /**
  * Returned verbatim when no curriculum context is found.
@@ -67,40 +64,11 @@ export type AnswerEngineError =
   | { code: 'EMPTY_RESPONSE' }
   | { code: 'NETWORK_ERROR'; detail: string };
 
-// ─── Model Discovery ──────────────────────────────────────────────────────────
-
-let _cachedModel: string | null = null;
-
-async function resolveModel(): Promise<string> {
-  if (_cachedModel) return _cachedModel;
-  try {
-    const res = await fetch('/api/gemini/models');
-    if (res.ok) {
-      const data = await res.json();
-      const models: Array<{ name: string; supportedGenerationMethods?: string[] }> =
-        data.models ?? [];
-      const match = models.find(
-        (m) =>
-          Array.isArray(m.supportedGenerationMethods) &&
-          m.supportedGenerationMethods.includes('generateContent') &&
-          !m.name.includes('vision') &&
-          !m.name.includes('embedding') &&
-          !m.name.includes('aqa')
-      );
-      if (match) {
-        _cachedModel = match.name.replace(/^models\//, '');
-        return _cachedModel;
-      }
-    }
-  } catch {
-    /* fall through to default */
-  }
-  _cachedModel = DEFAULT_MODEL;
-  return _cachedModel;
-}
+export { resolveModel } from './modelResolver';
 
 export function resetModelCache(): void {
-  _cachedModel = null;
+  // No-op: cache is managed by the shared modelResolver module.
+  // Kept for API compatibility.
 }
 
 // ─── RAG Retrieval ────────────────────────────────────────────────────────────

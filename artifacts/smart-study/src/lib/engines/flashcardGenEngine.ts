@@ -23,6 +23,7 @@ import {
   type UnderstandingCheck,
   type EvaluationResult,
 } from '../flashcardEngine';
+import { resolveModel } from './modelResolver';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -54,8 +55,9 @@ export interface EvalRequest {
 
 // ─── Internal Helpers ─────────────────────────────────────────────────────────
 
-async function callGeminiJSON<T>(prompt: string, model = 'gemini-1.5-flash-latest'): Promise<T | null> {
+async function callGeminiJSON<T>(prompt: string): Promise<T | null> {
   try {
+    const model = await resolveModel();
     const res = await fetch('/api/gemini/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -65,7 +67,10 @@ async function callGeminiJSON<T>(prompt: string, model = 'gemini-1.5-flash-lates
         generationConfig: { maxOutputTokens: 1024, temperature: 0.4 },
       }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.error('[FlashcardGenEngine] Gemini returned', res.status, 'for model:', model);
+      return null;
+    }
     const data = await res.json();
     const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
     const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
