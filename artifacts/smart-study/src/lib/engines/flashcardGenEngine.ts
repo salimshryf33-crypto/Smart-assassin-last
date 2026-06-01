@@ -56,29 +56,64 @@ export interface EvalRequest {
 // ─── Internal Helpers ─────────────────────────────────────────────────────────
 
 async function callGeminiJSON<T>(prompt: string): Promise<T | null> {
-  try {
-    const model = await resolveModel();
-    const res = await fetch('/api/gemini/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { maxOutputTokens: 1024, temperature: 0.4 },
-      }),
-    });
-    if (!res.ok) {
-      console.error('[FlashcardGenEngine] Gemini returned', res.status, 'for model:', model);
+  const model = await resolveModel();
+
+  const attempt = async (): Promise<{ status: number; text: string } | null> => {
+    try {
+      const res = await fetch('/api/gemini/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: 1024, temperature: 0.4 },
+        }),
+      });
+      if (!res.ok) {
+        return { status: res.status, text: '' };
+      }
+      const data = await res.json();
+      const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+      return { status: 200, text };
+    } catch (err) {
+      console.error('[FlashcardGenEngine] fetch error:', err);
       return null;
     }
-    const data = await res.json();
-    const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-    const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-    if (!jsonMatch) return null;
+  };
+
+  let result = await attempt();
+
+  // Retry once on 503 (Gemini transient overload) after 2s
+  if (result && result.status === 503) {
+    console.warn('[FlashcardGenEngine] 503 — retrying in 2s (model:', model, ')');
+    await new Promise((r) => setTimeout(r, 2000));
+    result = await attempt();
+  }
+
+  if (!result) return null;
+
+  if (result.status !== 200) {
+    console.error('[FlashcardGenEngine] Gemini returned', result.status, 'for model:', model);
+    return null;
+  }
+
+  const { text } = result;
+  if (!text) {
+    console.error('[FlashcardGenEngine] Gemini returned 200 but empty text (safety block or empty candidates). model:', model);
+    return null;
+  }
+
+  const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+  const jsonMatch = cleaned.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+  if (!jsonMatch) {
+    console.error('[FlashcardGenEngine] JSON parse failed. Raw text snippet:', text.slice(0, 200));
+    return null;
+  }
+
+  try {
     return JSON.parse(jsonMatch[0]) as T;
   } catch (err) {
-    console.error('[FlashcardGenEngine] callGeminiJSON error:', err);
+    console.error('[FlashcardGenEngine] JSON.parse threw:', err, '| snippet:', jsonMatch[0].slice(0, 200));
     return null;
   }
 }
@@ -203,7 +238,10 @@ export async function generateCards(req: CardGenRequest): Promise<CardGenResult>
   }
 
   const raw = await callGeminiJSON<RawResponse>(prompt);
-  if (!raw || !Array.isArray(raw.flashcards)) return empty;
+  if (!raw || !Array.isArray(raw.flashcards)) {
+    console.log('[FlashcardGenEngine] generated=0 skipped=0 check=false (null/invalid raw — see errors above)');
+    return empty;
+  }
 
   let skippedDuplicate = 0;
   const accepted: Omit<Flashcard, 'id' | 'createdAt' | 'reviewCount'>[] = [];
