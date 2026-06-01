@@ -11,18 +11,5 @@
     "status": "done",
     "uploadedAt": 1779963081730,
     "processedAt": 1779963082445
-  },
-  {
-    "id": "e238dc50-9bc7-43f1-a01c-45bcd2cfcfab",
-    "country": "sudan",
-    "grade": "grade12",
-    "subject": "biology",
-    "track": "",
-    "filename": "test-upload.pdf",
-    "totalPages": 0,
-    "chunkCount": 0,
-    "status": "error",
-    "errorMessage": "bad XRef entry",
-    "uploadedAt": 1780261247683
   }
 ]
