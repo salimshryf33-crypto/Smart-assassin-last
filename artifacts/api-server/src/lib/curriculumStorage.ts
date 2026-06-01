@@ -40,6 +40,24 @@ function ensureDirs() {
   fs.mkdirSync(DOCS_DIR, { recursive: true });
 }
 
+// ─── In-memory chunk cache ────────────────────────────────────────────────────
+// Caches loaded chunks per docId. Invalidated explicitly after every saveChunks.
+const _chunkCache = new Map<string, CurriculumChunk[]>();
+
+/**
+ * Invalidate cached chunks for a specific document (or all docs if no id given).
+ * Called by curriculumQueue after saveChunks so searches always see fresh data.
+ */
+export function invalidateChunkCache(docId?: string) {
+  if (docId) {
+    _chunkCache.delete(docId);
+  } else {
+    _chunkCache.clear();
+  }
+}
+
+// ─── Index helpers ────────────────────────────────────────────────────────────
+
 export function readIndex(): CurriculumDocument[] {
   ensureDirs();
   try {
@@ -68,19 +86,30 @@ export function deleteDoc(id: string) {
   writeIndex(readIndex().filter((d) => d.id !== id));
   const chunksFile = path.join(DOCS_DIR, `${id}.json`);
   if (fs.existsSync(chunksFile)) fs.unlinkSync(chunksFile);
+  invalidateChunkCache(id);
   logger.info({ docId: id }, 'Deleted curriculum document');
 }
+
+// ─── Chunk I/O ────────────────────────────────────────────────────────────────
 
 export function saveChunks(docId: string, chunks: CurriculumChunk[]) {
   ensureDirs();
   fs.writeFileSync(path.join(DOCS_DIR, `${docId}.json`), JSON.stringify(chunks));
+  // Always invalidate cache after a write so the next search reads fresh data
+  invalidateChunkCache(docId);
 }
 
 export function loadChunks(docId: string): CurriculumChunk[] {
+  // Return from cache if available
+  const cached = _chunkCache.get(docId);
+  if (cached) return cached;
+
   const f = path.join(DOCS_DIR, `${docId}.json`);
   if (!fs.existsSync(f)) return [];
   try {
-    return JSON.parse(fs.readFileSync(f, 'utf8')) as CurriculumChunk[];
+    const chunks = JSON.parse(fs.readFileSync(f, 'utf8')) as CurriculumChunk[];
+    _chunkCache.set(docId, chunks);
+    return chunks;
   } catch {
     return [];
   }
@@ -177,13 +206,38 @@ function trigramScore(queryTrigrams: Set<string>, chunkNormalized: string): numb
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Grade / level mapping
+//
+// Supports both directions:
+//   level  → grades  e.g. 'secondary' → {grade10, grade11, grade12}
+//   grade  → itself  e.g. 'grade12'   → {grade12}
+//
+// This means a doc uploaded with grade='grade12' is found when searching
+// with gradeOrLevel='secondary', AND a doc uploaded with grade='secondary'
+// is found when searching with gradeOrLevel='secondary'.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const LEVEL_GRADE_MAP: Record<string, string[]> = {
+export const LEVEL_GRADE_MAP: Record<string, string[]> = {
   primary: ['grade1', 'grade2', 'grade3', 'grade4', 'grade5', 'grade6'],
   preparatory: ['grade7', 'grade8', 'grade9'],
   secondary: ['grade10', 'grade11', 'grade12'],
 };
+
+function resolveGrades(gradeOrLevel: string): Set<string> {
+  const mapped = LEVEL_GRADE_MAP[gradeOrLevel];
+  if (mapped) {
+    // It's a level name — include all grades for that level PLUS the level name itself
+    // (handles docs uploaded with grade='secondary' directly)
+    return new Set<string>([...mapped, gradeOrLevel]);
+  }
+  // It's a specific grade value — also check if it belongs to a level and include the level name
+  const levelEntry = Object.entries(LEVEL_GRADE_MAP).find(([, grades]) =>
+    grades.includes(gradeOrLevel)
+  );
+  if (levelEntry) {
+    return new Set<string>([gradeOrLevel, levelEntry[0], ...levelEntry[1]]);
+  }
+  return new Set<string>([gradeOrLevel]);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main search
@@ -196,8 +250,9 @@ export function searchChunks(
   query: string,
   topK = 5
 ): CurriculumChunk[] {
-  const validGrades = new Set<string>(LEVEL_GRADE_MAP[gradeOrLevel] ?? [gradeOrLevel]);
+  const validGrades = resolveGrades(gradeOrLevel);
 
+  // Always read the index fresh from disk — no in-memory index cache
   const docs = readIndex().filter(
     (d) =>
       d.status === 'done' &&
@@ -207,7 +262,10 @@ export function searchChunks(
   );
 
   if (docs.length === 0) {
-    console.log(`[search] No docs — country=${country} grade/level=${gradeOrLevel} subject=${subject}`);
+    console.log(
+      `[search] No docs — country=${country} grade/level=${gradeOrLevel}` +
+      ` (validGrades=[${[...validGrades].join(',')}]) subject=${subject}`
+    );
     return [];
   }
 
