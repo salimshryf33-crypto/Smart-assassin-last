@@ -456,6 +456,9 @@ export default function AIChat() {
               }));
               saveGeneratedCards(fullCards);
               setToastCount(cardResult.cards.length);
+              console.log(
+                `[FlashcardGenEngine] saved=${fullCards.length} skipped=${cardResult.skippedDuplicate} (Firestore writes dispatched)`
+              );
             }
             if (cardResult.understandingCheck) {
               setUnderstandingCheck((prev) => prev ?? cardResult.understandingCheck);

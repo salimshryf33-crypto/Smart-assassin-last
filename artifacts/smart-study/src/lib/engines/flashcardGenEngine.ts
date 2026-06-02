@@ -53,7 +53,78 @@ export interface EvalRequest {
   category: string;
 }
 
-// ─── Internal Helpers ─────────────────────────────────────────────────────────
+// ─── Raw card shape returned by Gemini ───────────────────────────────────────
+
+interface RawCard {
+  question: string;
+  answer: string;
+  category: string;
+}
+
+interface RawResponse {
+  flashcards: RawCard[];
+  understandingCheck: { question: string; correctAnswer: string } | null;
+}
+
+// ─── Resilient JSON parser ────────────────────────────────────────────────────
+//
+// Two-pass approach:
+//   Pass 1 — try standard JSON.parse on the full cleaned response.
+//   Pass 2 — if the JSON was truncated (no closing brace, parse throws),
+//             scan for individually-complete card objects using a character-
+//             level regex and salvage whichever cards finished before the cut.
+//             This is the main defence against maxOutputTokens truncation.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Matches a single complete flashcard object: all three string fields present.
+// Handles Arabic text, escaped quotes, and any Unicode.
+const CARD_OBJECT_RE =
+  /\{\s*"question"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"answer"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"category"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}/g;
+
+function parseFlashcardJSON(raw: string): RawResponse | null {
+  const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+  // Pass 1: standard parse
+  const jsonMatch = cleaned.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]) as RawResponse;
+      if (Array.isArray(parsed.flashcards)) return parsed;
+    } catch {
+      // fall through to salvage pass
+    }
+  }
+
+  // Pass 2: salvage complete card objects from a truncated response
+  CARD_OBJECT_RE.lastIndex = 0;
+  const salvaged: RawCard[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = CARD_OBJECT_RE.exec(cleaned)) !== null) {
+    try {
+      const card = JSON.parse(m[0]) as RawCard;
+      if (card.question?.trim() && card.answer?.trim()) {
+        salvaged.push(card);
+      }
+    } catch {
+      // skip malformed match
+    }
+  }
+
+  if (salvaged.length > 0) {
+    console.warn(
+      '[FlashcardGenEngine] Salvaged',
+      salvaged.length,
+      'card(s) from truncated JSON (understandingCheck discarded)'
+    );
+    return { flashcards: salvaged, understandingCheck: null };
+  }
+
+  console.error('[FlashcardGenEngine] JSON parse failed. Raw text snippet:', raw.slice(0, 200));
+  return null;
+}
+
+// ─── Gemini call with retry ───────────────────────────────────────────────────
 
 async function callGeminiJSON<T>(prompt: string): Promise<T | null> {
   const model = await resolveModel();
@@ -66,7 +137,9 @@ async function callGeminiJSON<T>(prompt: string): Promise<T | null> {
         body: JSON.stringify({
           model,
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: { maxOutputTokens: 1024, temperature: 0.4 },
+          // 2048 tokens — enough for 3 Arabic cards (~150 tokens each) +
+          // comprehension check + JSON structure overhead, without truncation.
+          generationConfig: { maxOutputTokens: 2048, temperature: 0.4 },
         }),
       });
       if (!res.ok) {
@@ -99,23 +172,14 @@ async function callGeminiJSON<T>(prompt: string): Promise<T | null> {
 
   const { text } = result;
   if (!text) {
-    console.error('[FlashcardGenEngine] Gemini returned 200 but empty text (safety block or empty candidates). model:', model);
+    console.error(
+      '[FlashcardGenEngine] Gemini returned 200 but empty text (safety block or empty candidates). model:',
+      model
+    );
     return null;
   }
 
-  const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-  const jsonMatch = cleaned.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-  if (!jsonMatch) {
-    console.error('[FlashcardGenEngine] JSON parse failed. Raw text snippet:', text.slice(0, 200));
-    return null;
-  }
-
-  try {
-    return JSON.parse(jsonMatch[0]) as T;
-  } catch (err) {
-    console.error('[FlashcardGenEngine] JSON.parse threw:', err, '| snippet:', jsonMatch[0].slice(0, 200));
-    return null;
-  }
+  return parseFlashcardJSON(text) as unknown as T;
 }
 
 // ─── Extraction Prompt ────────────────────────────────────────────────────────
@@ -133,10 +197,14 @@ function buildExtractionPrompt(
     subject: curriculum.subject ?? '',
   });
 
+  // Cap at 3 cards per call — keeps the response well within 2048 tokens for
+  // Arabic answers and guarantees complete JSON even with long per-card text.
+  const cardLimit = Math.min(maxCards, 3);
+
   return `You are a flashcard extraction engine for a student learning app.
 
 Given the AI tutor's response below, do TWO things:
-1. Extract 0-${Math.min(maxCards, 5)} key learning flashcards
+1. Extract 0-${cardLimit} key learning flashcards
 2. Optionally generate ONE understanding check question
 
 RULES FOR FLASHCARDS:
@@ -232,14 +300,9 @@ export async function generateCards(req: CardGenRequest): Promise<CardGenResult>
     remaining
   );
 
-  interface RawResponse {
-    flashcards: Array<{ question: string; answer: string; category: string }>;
-    understandingCheck: { question: string; correctAnswer: string } | null;
-  }
-
   const raw = await callGeminiJSON<RawResponse>(prompt);
   if (!raw || !Array.isArray(raw.flashcards)) {
-    console.log('[FlashcardGenEngine] generated=0 skipped=0 check=false (null/invalid raw — see errors above)');
+    console.log('[FlashcardGenEngine] generated=0 saved=0 skipped=0 (null/invalid raw — see errors above)');
     return empty;
   }
 
@@ -283,6 +346,8 @@ export async function generateCards(req: CardGenRequest): Promise<CardGenResult>
       ? { ...raw.understandingCheck, context: req.aiResponse.slice(0, 500) }
       : null;
 
+  // Note: saved= is logged in AIChat.tsx after Firestore writes complete.
+  // generated= here reflects cards accepted by the engine before save.
   console.log(
     `[FlashcardGenEngine] generated=${accepted.length} skipped=${skippedDuplicate} check=${!!understandingCheck}`
   );
