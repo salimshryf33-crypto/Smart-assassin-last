@@ -321,11 +321,23 @@ export function searchChunks(
     return { chunk, score, tSim };
   });
 
-  // Sort and take topK — no minimum score threshold (let all chunks compete)
+  // Sort and filter.
+  // Rules to prevent false positives:
+  //   • A chunk needs score > 4.0 to appear in results
+  //   • If score comes ENTIRELY from trigrams (no direct token/substring/keyword
+  //     signal from paths A-F), the trigram similarity must be ≥ 0.35 to pass.
+  //     This blocks weak trigram coincidences (e.g. كهر in شبكهرواد matching
+  //     an electricity query) while still allowing trigrams to rescue heavily
+  //     corrupted Arabic text that IS semantically relevant.
   const result = scored
     .sort((a, b) => b.score - a.score)
     .slice(0, topK)
-    .filter((r) => r.score > 0.5) // only require minimal signal
+    .filter((r) => {
+      if (r.score <= 4.0) return false; // minimum bar
+      const directScore = r.score - r.tSim * 15; // score excluding trigrams
+      if (directScore < 0.5 && r.tSim < 0.35) return false; // pure-trigram false-positive guard
+      return true;
+    })
     .map((r) => r.chunk);
 
   console.log(

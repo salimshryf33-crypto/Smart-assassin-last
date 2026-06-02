@@ -15,46 +15,64 @@ export interface ExtractionResult {
 }
 
 // Virtual page size when the PDF produces a single text blob (no per-page breaks).
-// ~2000 chars ≈ half an A4 page of Arabic text — fine-grained enough for RAG.
 const VIRTUAL_PAGE_CHARS = 2000;
 
 // Minimum chars for a page to be considered non-empty
 const MIN_PAGE_CHARS = 10;
 
 // ─── RTL character-separation fix ────────────────────────────────────────────
-// Some Arabic PDFs store text in visual (RTL) order, causing pdf-parse to emit
-// each character separated by a space: "ة ي ن ا د و س ل ا" instead of "السودانية".
-// Detection: if > 50% of whitespace-delimited tokens are single Arabic chars,
-// collapse consecutive single-char sequences into words.
+// Some Arabic PDFs store text with pdfjs emitting each Unicode code point as a
+// separate item: "ة ي ن ا د و س ل ا" instead of "السودانية".
+//
+// Algorithm:
+//   1. Detect: if > 50% of whitespace tokens are single Arabic chars
+//   2. Collect consecutive single-char runs, capped at MAX_WORD_LEN (≈ longest
+//      real Arabic word) to prevent merging multiple words into one blob
+//   3. Reverse each capped group to restore logical RTL order
+//   4. Emit the result with spaces preserved around non-Arabic tokens
 // ─────────────────────────────────────────────────────────────────────────────
 
 const ARABIC_CHAR_RE = /^[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]$/;
 
-function fixCharSeparatedArabic(text: string): string {
+// Maximum Arabic word length in characters (longest realistic Arabic word ≤ 12).
+// Capping here prevents merging unrelated words that have no non-Arabic separator.
+const MAX_WORD_LEN = 10;
+
+export function fixCharSeparatedArabic(text: string): string {
   const tokens = text.split(/\s+/).filter(Boolean);
   if (tokens.length < 4) return text;
 
   const arabicSingleCount = tokens.filter((t) => ARABIC_CHAR_RE.test(t)).length;
-  if (arabicSingleCount / tokens.length < 0.5) return text; // not char-separated
+  if (arabicSingleCount / tokens.length < 0.5) return text;
 
-  // Collapse sequences of single Arabic letters into words.
-  // Since RTL PDFs often store characters in reverse visual order,
-  // each collapsed sequence is also reversed to restore logical order.
   const result: string[] = [];
   let i = 0;
+
   while (i < tokens.length) {
     if (ARABIC_CHAR_RE.test(tokens[i])) {
-      const chars: string[] = [tokens[i]];
-      while (i + 1 < tokens.length && ARABIC_CHAR_RE.test(tokens[i + 1])) {
-        chars.push(tokens[++i]);
+      // Collect single Arabic chars up to MAX_WORD_LEN per group.
+      // When the cap is hit we flush the group and start a new one —
+      // this ensures no word exceeds the max length even if the PDF
+      // stored multi-word sequences without any non-Arabic separator.
+      const chars: string[] = [];
+      while (i < tokens.length && ARABIC_CHAR_RE.test(tokens[i])) {
+        chars.push(tokens[i]);
+        if (chars.length === MAX_WORD_LEN) {
+          // Flush this group reversed, then continue collecting
+          result.push(chars.reverse().join(''));
+          chars.length = 0;
+        }
+        i++;
       }
-      // Reverse the collected chars to restore logical RTL order
-      result.push(chars.reverse().join(''));
+      if (chars.length > 0) {
+        result.push(chars.reverse().join(''));
+      }
     } else {
       result.push(tokens[i]);
+      i++;
     }
-    i++;
   }
+
   return result.join(' ');
 }
 
@@ -96,7 +114,6 @@ export async function extractPdf(
   onProgress?.(totalPages, totalPages);
 
   // ── Stage 1: per-page render (preferred) ─────────────────────────────────
-  // Apply char-separation fix to each rendered page before filtering.
   const renderedPages = pageTexts
     .map(fixCharSeparatedArabic)
     .filter((t) => t.trim().length >= MIN_PAGE_CHARS);
@@ -110,7 +127,6 @@ export async function extractPdf(
   }
 
   // ── Stage 2: form-feed split fallback ─────────────────────────────────────
-  // pdf-parse sometimes doesn't fire pagerender for certain PDF encodings.
   const ffPages = result.text
     .split('\f')
     .map((p) => fixCharSeparatedArabic(
@@ -128,8 +144,7 @@ export async function extractPdf(
 
   // ── Stage 3: virtual page split ───────────────────────────────────────────
   // Last resort: the entire PDF text arrived as one blob with no page breaks.
-  // Apply char-separation fix first, then split into fixed-size virtual pages
-  // so the chunker can still produce meaningful, searchable chunks.
+  // Apply char-separation fix first, then split into fixed-size virtual pages.
   const rawBlob = fixCharSeparatedArabic(
     (ffPages[0] || pageTexts[0] || result.text || '').trim()
   );
@@ -137,7 +152,6 @@ export async function extractPdf(
   if (rawBlob.length >= MIN_PAGE_CHARS) {
     const virtualPages: string[] = [];
     for (let i = 0; i < rawBlob.length; i += VIRTUAL_PAGE_CHARS) {
-      // Break at a word boundary so we don't cut inside a word
       let end = Math.min(i + VIRTUAL_PAGE_CHARS, rawBlob.length);
       if (end < rawBlob.length) {
         const spaceIdx = rawBlob.lastIndexOf(' ', end);
