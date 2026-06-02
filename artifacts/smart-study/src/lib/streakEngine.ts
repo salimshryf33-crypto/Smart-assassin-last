@@ -76,8 +76,13 @@ export function getLast28Days(today: string): string[] {
 export function isValidAIChatMessage(text: string): boolean {
   const trimmed = text.trim();
   if (trimmed.length < 10) return false;
-  // Reject pure symbols/punctuation/numbers with no Arabic or Latin letters
-  if (/^[\s\W\d]+$/.test(trimmed)) return false;
+  // Require at least one Arabic or Latin letter.
+  // NOTE: JavaScript \W matches Arabic characters (not ASCII word chars), so
+  // the old /^[\s\W\d]+$/ check incorrectly rejected valid Arabic-only messages.
+  // This positive assertion is correct: block pure emoji/number/symbol spam
+  // while accepting any message that contains actual Arabic or Latin letters.
+  const hasLetter = /[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFFa-zA-Z]/.test(trimmed);
+  if (!hasLetter) return false;
   return true;
 }
 
