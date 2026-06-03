@@ -180,6 +180,20 @@ function enqueueOfflineUpdate(uid: string, updates: Partial<GamificationData>) {
   } catch {}
 }
 
+/**
+ * Remove all queued offline updates for a specific user from localStorage.
+ * Call this during account deletion so stale updates are never flushed
+ * for a UID that no longer exists in Firebase.
+ */
+export function clearGamificationQueue(uid: string): void {
+  try {
+    const raw = localStorage.getItem(QUEUE_KEY) ?? '[]';
+    const queue: QueuedUpdate[] = JSON.parse(raw);
+    const remaining = queue.filter((q) => q.uid !== uid);
+    localStorage.setItem(QUEUE_KEY, JSON.stringify(remaining));
+  } catch {}
+}
+
 export async function flushOfflineQueue(uid: string): Promise<void> {
   try {
     const raw = localStorage.getItem(QUEUE_KEY) ?? '[]';

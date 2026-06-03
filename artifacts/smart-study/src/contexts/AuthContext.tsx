@@ -25,7 +25,7 @@ import {
   subscribeToTasks,
   deleteUserData,
 } from '../lib/firestore';
-import { subscribeToGamification, flushOfflineQueue } from '../lib/gamification';
+import { subscribeToGamification, flushOfflineQueue, clearGamificationQueue } from '../lib/gamification';
 import { DEFAULT_DAILY_CHECKLIST } from '../lib/streakEngine';
 import { useAppStore } from '../store/useAppStore';
 
@@ -34,6 +34,11 @@ import { useAppStore } from '../store/useAppStore';
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
+  /**
+   * Reactive email-verified flag. Updated immediately when reloadUser() resolves
+   * so the UI reflects the new state without a sign-out/sign-in cycle.
+   */
+  emailVerified: boolean;
   signInWithGoogle: () => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
   signUpWithEmail: (email: string, password: string, name: string) => Promise<void>;
@@ -51,6 +56,12 @@ interface AuthContextValue {
    * No-op (safe to call) for Google users.
    */
   resendVerificationEmail: () => Promise<void>;
+  /**
+   * Reload the Firebase Auth user from the server and sync emailVerified state.
+   * Call this when the user returns after clicking the verification link in their
+   * inbox — without this, emailVerified stays stale until a full sign-out/in.
+   */
+  reloadUser: () => Promise<void>;
 }
 
 // ─── Context ──────────────────────────────────────────────────────────────────
@@ -68,6 +79,7 @@ export function useAuth() {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [emailVerified, setEmailVerified] = useState(false);
   const resetStore = useAppStore((s) => s.resetStore);
 
   const unsubscribersRef = useRef<Unsubscribe[]>([]);
@@ -152,12 +164,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           '| emailVerified:', firebaseUser.emailVerified
         );
         setUser(firebaseUser);
+        setEmailVerified(firebaseUser.emailVerified);
         await initUserDocument(firebaseUser.uid, firebaseUser.displayName, firebaseUser.email);
         await setupRealtimeListeners(firebaseUser.uid);
       } else {
         console.log('[Auth] User signed out');
         cleanupListeners();
         setUser(null);
+        setEmailVerified(false);
         resetStore();
       }
       setLoading(false);
@@ -231,6 +245,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   /**
+   * Reload the Firebase Auth user from the server and sync the emailVerified
+   * reactive flag. Firebase User objects are mutable — after reload() the same
+   * object reference has updated fields, so React won't detect the change on its
+   * own. We maintain a separate `emailVerified` state for this purpose.
+   */
+  const reloadUser = async () => {
+    const currentUser = auth.currentUser;
+    if (!currentUser) return;
+    await currentUser.reload();
+    const verified = auth.currentUser?.emailVerified ?? false;
+    setEmailVerified(verified);
+    console.log('[Auth] reloadUser — emailVerified:', verified);
+  };
+
+  /**
    * Resend a verification email to the current signed-in email user.
    * Safe to call for Google users — exits immediately (they are always verified).
    */
@@ -274,6 +303,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await deleteUserData(uid);
       console.log('[Auth] deleteAccount — Firestore data purged');
       await deleteUser(currentUser);
+      clearGamificationQueue(uid); // Remove stale offline XP queue for this uid
       resetStore();
       console.log('[Auth] deleteAccount — Auth user deleted, account fully removed');
     };
@@ -318,12 +348,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       value={{
         user,
         loading,
+        emailVerified,
         signInWithGoogle,
         signInWithEmail,
         signUpWithEmail,
         logout,
         deleteAccount,
         resendVerificationEmail,
+        reloadUser,
       }}
     >
       {children}

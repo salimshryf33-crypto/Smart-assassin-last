@@ -60,24 +60,40 @@ function LoadingScreen() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function EmailVerificationBanner() {
-  const { user, resendVerificationEmail } = useAuth();
+  const { user, emailVerified, resendVerificationEmail, reloadUser } = useAuth();
   const [dismissed, setDismissed] = useState(false);
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
+  const [sendError, setSendError] = useState('');
+  const [reloading, setReloading] = useState(false);
 
   const isEmailUser = user?.providerData[0]?.providerId === 'password';
-  if (!user || !isEmailUser || user.emailVerified || dismissed) return null;
+  // Use context-managed emailVerified so reloadUser() triggers a re-render
+  if (!user || !isEmailUser || emailVerified || dismissed) return null;
 
   const handleResend = async () => {
     if (sending || sent) return;
     setSending(true);
+    setSendError('');
     try {
       await resendVerificationEmail();
       setSent(true);
     } catch {
-      // Error already logged in AuthContext; don't crash the banner
+      setSendError('فشل الإرسال');
     } finally {
       setSending(false);
+    }
+  };
+
+  // Called after the user clicks the link in their inbox and returns to the app.
+  // Calls auth.currentUser.reload() on the server and syncs emailVerified state.
+  const handleCheckVerified = async () => {
+    if (reloading) return;
+    setReloading(true);
+    try {
+      await reloadUser();
+    } finally {
+      setReloading(false);
     }
   };
 
@@ -86,31 +102,45 @@ function EmailVerificationBanner() {
       initial={{ opacity: 0, height: 0 }}
       animate={{ opacity: 1, height: 'auto' }}
       exit={{ opacity: 0, height: 0 }}
-      className="flex items-center gap-2.5 px-4 py-2.5 text-[11px] flex-shrink-0"
+      className="flex items-center gap-2 px-4 py-2.5 text-[11px] flex-shrink-0"
       style={{
         background: 'rgba(245,158,11,0.08)',
         borderBottom: '1px solid rgba(245,158,11,0.15)',
       }}
     >
       <MailWarning size={13} className="text-amber-400 flex-shrink-0" />
-      <span className="flex-1 text-amber-300/90 leading-relaxed" dir="rtl">
-        يرجى تأكيد بريدك الإلكتروني لتأمين حسابك
+      <span className="flex-1 text-amber-300/90 leading-relaxed min-w-0 truncate" dir="rtl">
+        يرجى تأكيد بريدك الإلكتروني
       </span>
-      {sent ? (
-        <span className="text-emerald-400 font-medium flex-shrink-0">✓ تم الإرسال</span>
-      ) : (
+      <div className="flex items-center gap-2 flex-shrink-0">
+        {sendError && (
+          <span className="text-red-400 text-[10px]">{sendError}</span>
+        )}
+        {sent ? (
+          <span className="text-emerald-400 font-medium">✓ أُرسل</span>
+        ) : (
+          <button
+            onClick={handleResend}
+            disabled={sending}
+            className="text-[#00c6ff] font-semibold transition-opacity"
+            style={{ opacity: sending ? 0.5 : 1 }}
+          >
+            {sending ? '...' : 'إرسال'}
+          </button>
+        )}
         <button
-          onClick={handleResend}
-          disabled={sending}
-          className="text-[#00c6ff] font-semibold flex-shrink-0 transition-opacity"
-          style={{ opacity: sending ? 0.5 : 1 }}
+          onClick={handleCheckVerified}
+          disabled={reloading}
+          className="text-slate-400 font-medium transition-opacity border border-white/10 rounded-lg px-2 py-0.5"
+          style={{ opacity: reloading ? 0.5 : 1 }}
+          title="إذا تحققت من بريدك، اضغط هنا"
         >
-          {sending ? '...' : 'إرسال'}
+          {reloading ? '...' : 'تحققت ✓'}
         </button>
-      )}
+      </div>
       <button
         onClick={() => setDismissed(true)}
-        className="text-slate-600 flex-shrink-0 ml-0.5"
+        className="text-slate-600 flex-shrink-0"
         aria-label="dismiss"
       >
         <X size={12} />
