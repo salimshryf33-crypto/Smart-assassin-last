@@ -11,6 +11,7 @@ export interface CurriculumDocMeta {
   errorMessage?: string;
   uploadedAt: number;
   processedAt?: number;
+  docType?: 'book' | 'note' | 'exam';
 }
 
 export interface CurriculumChunk {
@@ -39,7 +40,7 @@ const BASE = '/api/curriculum';
 
 export async function uploadCurriculumPdf(
   file: File,
-  meta: { country: string; grade: string; subject: string; track?: string }
+  meta: { country: string; grade: string; subject: string; track?: string; docType?: 'book' | 'note' | 'exam' }
 ): Promise<{ jobId: string; docId: string }> {
   const form = new FormData();
   form.append('pdf', file);
@@ -47,6 +48,7 @@ export async function uploadCurriculumPdf(
   form.append('grade', meta.grade);
   form.append('subject', meta.subject);
   form.append('track', meta.track ?? '');
+  form.append('docType', meta.docType ?? 'book');
 
   const res = await fetch(`${BASE}/upload`, { method: 'POST', body: form });
   if (!res.ok) {

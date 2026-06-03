@@ -30,6 +30,7 @@ export interface CurriculumDocument {
   errorMessage?: string;
   uploadedAt: number;
   processedAt?: number;
+  docType?: 'book' | 'note' | 'exam';
 }
 
 const DATA_DIR = path.join(process.cwd(), 'data', 'curriculum');

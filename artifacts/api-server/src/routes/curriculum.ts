@@ -42,12 +42,14 @@ router.post('/upload', upload.single('pdf'), (req, res) => {
     return;
   }
 
-  const { country, grade, subject, track = '' } = req.body as Record<string, string>;
+  const { country, grade, subject, track = '', docType = 'book' } = req.body as Record<string, string>;
   if (!country || !grade || !subject) {
     fs.unlinkSync(req.file.path);
     res.status(400).json({ error: 'country, grade, and subject are required' });
     return;
   }
+
+  const validDocType = ['book', 'note', 'exam'].includes(docType) ? docType as 'book' | 'note' | 'exam' : 'book';
 
   const docId = uuidv4();
   const jobId = enqueueJob({
@@ -58,6 +60,7 @@ router.post('/upload', upload.single('pdf'), (req, res) => {
     subject,
     track,
     filename: req.file.originalname,
+    docType: validDocType,
   });
 
   req.log.info({ jobId, docId, filename: req.file.originalname }, 'Curriculum upload queued');

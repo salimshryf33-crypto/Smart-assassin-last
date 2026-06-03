@@ -23,6 +23,7 @@ export interface Job {
   subject: string;
   track: string;
   filename: string;
+  docType?: 'book' | 'note' | 'exam';
   status: JobStatus;
   progress: { current: number; total: number };
   result?: { totalPages: number; chunkCount: number; searchable: boolean };
@@ -57,6 +58,7 @@ export function enqueueJob(data: Omit<Job, 'id' | 'status' | 'progress' | 'creat
     chunkCount: 0,
     status: 'queued',
     uploadedAt: Date.now(),
+    docType: data.docType,
   });
 
   setImmediate(processNext);
@@ -111,6 +113,7 @@ async function processNext() {
     chunkCount: 0,
     status: 'processing',
     uploadedAt: job.createdAt,
+    docType: job.docType,
   });
 
   logger.info({ jobId, docId: job.docId, filename: job.filename }, 'Processing curriculum PDF');
@@ -170,6 +173,7 @@ async function processNext() {
       status: 'done',
       uploadedAt: job.createdAt,
       processedAt: Date.now(),
+      docType: job.docType,
     });
 
     // ── Stage 7: Verify searchability ───────────────────────────────────────
@@ -214,6 +218,7 @@ async function processNext() {
       status: 'error',
       errorMessage: msg,
       uploadedAt: job.createdAt,
+      docType: job.docType,
     });
   } finally {
     // Clean up temp file

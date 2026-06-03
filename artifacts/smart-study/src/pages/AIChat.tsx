@@ -1,6 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Trash2, Brain, Sparkles, MessageCircle, BookOpen, Zap, CheckCircle2, XCircle, ChevronRight } from 'lucide-react';
+import {
+  Send, Trash2, Brain, Sparkles, MessageCircle, BookOpen, Zap,
+  CheckCircle2, XCircle, ChevronRight, FolderOpen, BookMarked,
+  StickyNote, GraduationCap, Puzzle, Crown, BarChart3, RefreshCw, X,
+} from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
@@ -14,6 +18,83 @@ import { getSubjects, getSubjectLabel } from '../utils/curriculum';
 import { formatDate } from '../utils/format';
 import { orchestrate, type UnderstandingCheck, type EvaluationResult } from '../lib/engines/aiOrchestrator';
 import { evaluateAnswer } from '../lib/engines/flashcardGenEngine';
+
+// ─── Resource categories ──────────────────────────────────────────────────────
+
+type FreeResourceId = 'curriculum' | 'notes' | 'exams' | 'quiz';
+type PremiumResourceId = 'smart_quiz' | 'ai_revision' | 'analytics';
+type ResourceId = FreeResourceId | PremiumResourceId;
+
+interface ResourceItem {
+  id: ResourceId;
+  label: string;
+  description: string;
+  icon: typeof BookMarked;
+  color: string;
+  premium?: boolean;
+}
+
+const RESOURCE_ITEMS: ResourceItem[] = [
+  {
+    id: 'curriculum',
+    label: 'كتب المنهج',
+    description: 'اشرح من الكتاب المدرسي',
+    icon: BookMarked,
+    color: '#00c6ff',
+  },
+  {
+    id: 'notes',
+    label: 'ملاحظاتي',
+    description: 'ذاكر من ملاحظاتك',
+    icon: StickyNote,
+    color: '#34d399',
+  },
+  {
+    id: 'exams',
+    label: 'بنك الامتحانات',
+    description: 'تدرب على أسئلة الامتحانات',
+    icon: GraduationCap,
+    color: '#f59e0b',
+  },
+  {
+    id: 'quiz',
+    label: 'اختبار تفاعلي',
+    description: 'اختبر نفسك فوراً',
+    icon: Puzzle,
+    color: '#a78bfa',
+  },
+  {
+    id: 'smart_quiz',
+    label: 'اختبارات ذكية',
+    description: 'أسئلة مُولَّدة بالذكاء الاصطناعي',
+    icon: Crown,
+    color: '#f59e0b',
+    premium: true,
+  },
+  {
+    id: 'ai_revision',
+    label: 'مراجعة AI',
+    description: 'خطة مراجعة مخصصة لك',
+    icon: RefreshCw,
+    color: '#f472b6',
+    premium: true,
+  },
+  {
+    id: 'analytics',
+    label: 'تحليل الأداء',
+    description: 'تقرير نقاط ضعفك وقوتك',
+    icon: BarChart3,
+    color: '#fb923c',
+    premium: true,
+  },
+];
+
+const RESOURCE_LABELS: Partial<Record<ResourceId, string>> = {
+  curriculum: 'كتب المنهج',
+  notes: 'ملاحظاتي',
+  exams: 'بنك الامتحانات',
+  quiz: 'اختبار تفاعلي',
+};
 
 // ─── Typing indicator ─────────────────────────────────────────────────────────
 
@@ -254,6 +335,133 @@ function UnderstandingResultPanel({
   );
 }
 
+// ─── Resource Drawer ──────────────────────────────────────────────────────────
+
+function ResourceDrawer({
+  activeResource,
+  onSelect,
+  onClose,
+}: {
+  activeResource: FreeResourceId | null;
+  onSelect: (id: FreeResourceId) => void;
+  onClose: () => void;
+}) {
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 flex items-end"
+      style={{ background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)' }}
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <motion.div
+        initial={{ y: '100%' }}
+        animate={{ y: 0 }}
+        exit={{ y: '100%' }}
+        transition={{ type: 'spring', stiffness: 320, damping: 32 }}
+        className="w-full rounded-t-3xl p-5 pb-10"
+        style={{
+          background: '#0d1426',
+          border: '1px solid rgba(255,255,255,0.08)',
+          borderBottom: 'none',
+        }}
+      >
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-bold text-white">مصادر التعلم</h2>
+            <p className="text-[11px] text-slate-500 mt-0.5">اختر المصدر الذي يستخدمه Sage</p>
+          </div>
+          <motion.button
+            whileTap={{ scale: 0.9 }}
+            onClick={onClose}
+            className="flex h-8 w-8 items-center justify-center rounded-xl"
+            style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)' }}
+          >
+            <X size={15} className="text-slate-400" />
+          </motion.button>
+        </div>
+
+        {/* Free resources */}
+        <div className="grid grid-cols-2 gap-2 mb-4">
+          {RESOURCE_ITEMS.filter((r) => !r.premium).map((item) => {
+            const Icon = item.icon;
+            const isActive = activeResource === item.id;
+            return (
+              <motion.button
+                key={item.id}
+                whileTap={{ scale: 0.96 }}
+                onClick={() => { onSelect(item.id as FreeResourceId); onClose(); }}
+                className="flex items-center gap-3 rounded-2xl p-3 text-left transition-all"
+                style={{
+                  background: isActive ? `${item.color}18` : 'rgba(255,255,255,0.03)',
+                  border: isActive ? `1px solid ${item.color}40` : '1px solid rgba(255,255,255,0.07)',
+                }}
+              >
+                <div
+                  className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
+                  style={{ background: `${item.color}18`, border: `1px solid ${item.color}30` }}
+                >
+                  <Icon size={16} style={{ color: item.color }} />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-white leading-tight">{item.label}</p>
+                  <p className="text-[10px] text-slate-500 mt-0.5 leading-tight">{item.description}</p>
+                </div>
+                {isActive && (
+                  <CheckCircle2 size={13} style={{ color: item.color }} className="flex-shrink-0 mr-auto" />
+                )}
+              </motion.button>
+            );
+          })}
+        </div>
+
+        {/* Premium divider */}
+        <div className="flex items-center gap-2 mb-3">
+          <div className="flex-1 h-px" style={{ background: 'rgba(255,255,255,0.06)' }} />
+          <span className="text-[10px] font-medium text-slate-600 flex items-center gap-1">
+            <Crown size={10} className="text-amber-500" />
+            قريباً — مميزات متقدمة
+          </span>
+          <div className="flex-1 h-px" style={{ background: 'rgba(255,255,255,0.06)' }} />
+        </div>
+
+        {/* Premium resources — visible but locked */}
+        <div className="grid grid-cols-3 gap-2">
+          {RESOURCE_ITEMS.filter((r) => r.premium).map((item) => {
+            const Icon = item.icon;
+            return (
+              <div
+                key={item.id}
+                className="flex flex-col items-center gap-2 rounded-2xl p-3 relative overflow-hidden"
+                style={{
+                  background: 'rgba(255,255,255,0.02)',
+                  border: '1px solid rgba(255,255,255,0.06)',
+                }}
+              >
+                <div
+                  className="flex h-9 w-9 items-center justify-center rounded-xl opacity-40"
+                  style={{ background: `${item.color}15`, border: `1px solid ${item.color}20` }}
+                >
+                  <Icon size={16} style={{ color: item.color }} />
+                </div>
+                <p className="text-[10px] font-medium text-slate-600 text-center leading-tight">{item.label}</p>
+                <div
+                  className="absolute top-1.5 right-1.5 flex items-center gap-0.5 rounded-md px-1 py-0.5"
+                  style={{ background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.25)' }}
+                >
+                  <Crown size={8} className="text-amber-400" />
+                  <span className="text-[8px] font-bold text-amber-400">PRO</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+}
+
 // ─── Message bubble ───────────────────────────────────────────────────────────
 
 function MessageBubble({ message }: { message: { id: string; role: 'user' | 'assistant'; content: string; timestamp: number } }) {
@@ -335,6 +543,8 @@ export default function AIChat() {
   const [toastCount, setToastCount] = useState(0);
   const [understandingCheck, setUnderstandingCheck] = useState<UnderstandingCheck | null>(null);
   const [checkResult, setCheckResult] = useState<EvaluationResult | null>(null);
+  const [showResourceDrawer, setShowResourceDrawer] = useState(false);
+  const [activeResource, setActiveResource] = useState<FreeResourceId | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -352,12 +562,12 @@ export default function AIChat() {
   };
 
   const activeSubjectLabel = getSubjectLabel(subjects, selectedSubject);
+  const activeResourceLabel = activeResource ? (RESOURCE_LABELS[activeResource] ?? null) : null;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages, isTyping, understandingCheck, checkResult]);
 
-  // ─── Card save handler (used by orchestrator's onCardsGenerated callback) ──
   const saveGeneratedCards = useCallback(
     (cards: Parameters<typeof addFlashcardLocal>[0][]) => {
       for (const cardData of cards) {
@@ -372,7 +582,6 @@ export default function AIChat() {
     [user, addFlashcardLocal]
   );
 
-  // ─── Handle understanding check result ───────────────────────────────────
   const handleCheckResult = useCallback(
     async (result: EvaluationResult) => {
       setCheckResult(result);
@@ -429,9 +638,6 @@ export default function AIChat() {
         parts: [{ text: m.content }],
       }));
 
-      // ── Single orchestrated entry point ──────────────────────────────────
-      // Order: subject gate → RAG retrieval gate → Gemini (strict RAG only)
-      // Flashcard generation fires async via callback — never delays response.
       const result = await orchestrate(
         {
           message: content,
@@ -456,9 +662,6 @@ export default function AIChat() {
               }));
               saveGeneratedCards(fullCards);
               setToastCount(cardResult.cards.length);
-              console.log(
-                `[FlashcardGenEngine] saved=${fullCards.length} skipped=${cardResult.skippedDuplicate} (Firestore writes dispatched)`
-              );
             }
             if (cardResult.understandingCheck) {
               setUnderstandingCheck((prev) => prev ?? cardResult.understandingCheck);
@@ -467,7 +670,6 @@ export default function AIChat() {
           },
         }
       );
-      // ─────────────────────────────────────────────────────────────────────
 
       const response = result.answer.text;
 
@@ -480,7 +682,6 @@ export default function AIChat() {
         }).catch(() => {});
       }
 
-      // Only record streak activity when a real answer was generated
       if (!result.answer.noSubject && !result.answer.noContext) {
         recordActivity('ai_chat', { messageText: content }).catch(() => {});
       }
@@ -556,12 +757,34 @@ export default function AIChat() {
               <div className="flex items-center gap-1.5">
                 <div className="h-1.5 w-1.5 rounded-full bg-emerald-400" style={{ boxShadow: '0 0 6px rgba(52,211,153,0.8)' }} />
                 <p className="text-[11px] text-slate-500">
-                  {activeSubjectLabel ? activeSubjectLabel : 'اختر مادة للبدء'}
+                  {activeSubjectLabel
+                    ? activeResourceLabel
+                      ? `${activeSubjectLabel} · ${activeResourceLabel}`
+                      : activeSubjectLabel
+                    : 'اختر مادة للبدء'}
                 </p>
               </div>
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {/* Resources button */}
+            <motion.button
+              whileTap={{ scale: 0.9 }}
+              onClick={() => setShowResourceDrawer(true)}
+              className="flex items-center gap-1.5 rounded-xl px-2.5 py-1.5"
+              style={{
+                background: activeResource ? 'rgba(0,198,255,0.12)' : 'rgba(255,255,255,0.05)',
+                border: activeResource ? '1px solid rgba(0,198,255,0.3)' : '1px solid rgba(255,255,255,0.08)',
+              }}
+            >
+              <FolderOpen size={13} className={activeResource ? 'text-[#00c6ff]' : 'text-slate-500'} />
+              {activeResource && (
+                <span className="text-[10px] font-medium text-[#00c6ff]">
+                  {RESOURCE_LABELS[activeResource]}
+                </span>
+              )}
+            </motion.button>
+
             {flashcards.filter((c) => c.source && c.source !== 'manual').length > 0 && (
               <div
                 className="flex items-center gap-1 rounded-xl px-2.5 py-1.5"
@@ -679,7 +902,6 @@ export default function AIChat() {
       </div>
 
       {/* ── Bottom panel: toast + understanding check ── */}
-      {/* Sits above BottomNav (72px) + safe-area on all devices */}
       <div
         className="fixed left-0 right-0 z-40"
         style={{ bottom: 'calc(72px + env(safe-area-inset-bottom, 0px))' }}
@@ -752,7 +974,6 @@ export default function AIChat() {
             </motion.button>
           </div>
 
-          {/* Generation hint */}
           <div className="mt-1.5 flex items-center justify-center gap-1">
             <Zap size={9} className="text-slate-700" />
             <span className="text-[10px] text-slate-700">بطاقات تُنشأ تلقائياً من المحادثة</span>
@@ -760,6 +981,17 @@ export default function AIChat() {
           </div>
         </motion.div>
       </div>
+
+      {/* ── Resource Drawer ── */}
+      <AnimatePresence>
+        {showResourceDrawer && (
+          <ResourceDrawer
+            activeResource={activeResource}
+            onSelect={(id) => setActiveResource(id)}
+            onClose={() => setShowResourceDrawer(false)}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

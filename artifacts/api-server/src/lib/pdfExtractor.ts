@@ -172,8 +172,116 @@ export async function extractPdf(
 
   // ── Stage 4: truly empty PDF ──────────────────────────────────────────────
   console.warn(
-    `[pdfExtractor] No extractable text found in "${filePath}"` +
-    ` (totalPages=${totalPages}). PDF may be image-based (scanned) with no text layer.`
+    `[pdfExtractor] No text layer found in "${filePath}"` +
+    ` (totalPages=${totalPages}). Attempting Gemini OCR...`
+  );
+
+  // ── Stage 5: Gemini Vision OCR fallback for scanned PDFs ─────────────────
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (apiKey) {
+    try {
+      const ocrPages = await ocrPdfWithGemini(filePath, buffer, apiKey);
+      if (ocrPages.length > 0) {
+        console.log(
+          `[pdfExtractor] Gemini OCR extracted ${ocrPages.length} pages from scanned PDF "${filePath}"`
+        );
+        return { pageTexts: ocrPages, totalPages: Math.max(totalPages, ocrPages.length) };
+      }
+    } catch (ocrErr) {
+      console.warn(
+        `[pdfExtractor] Gemini OCR failed for "${filePath}": ` +
+        (ocrErr instanceof Error ? ocrErr.message : String(ocrErr))
+      );
+    }
+  }
+
+  console.error(
+    `[pdfExtractor] All extraction stages failed for "${filePath}". ` +
+    `PDF is image-based and OCR produced no usable text.`
   );
   return { pageTexts: [], totalPages };
+}
+
+// ─── Gemini Vision OCR for scanned PDFs ───────────────────────────────────────
+async function ocrPdfWithGemini(
+  filePath: string,
+  buffer: Buffer,
+  apiKey: string
+): Promise<string[]> {
+  const MAX_INLINE_BYTES = 20 * 1024 * 1024; // 20 MB inline limit
+  if (buffer.length > MAX_INLINE_BYTES) {
+    throw new Error(
+      `PDF size ${(buffer.length / 1024 / 1024).toFixed(1)} MB exceeds 20 MB inline OCR limit. ` +
+      `Please use a smaller file or a version with a text layer.`
+    );
+  }
+
+  const base64 = buffer.toString('base64');
+  const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
+
+  const response = await fetch(
+    `${GEMINI_BASE}/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            {
+              text:
+                'هذا ملف PDF ممسوح ضوئياً. استخرج كل النصوص العربية والإنجليزية من جميع صفحاته.\n' +
+                'قسّم الناتج باستخدام الفاصل "=== الصفحة N ===" قبل كل صفحة (حيث N هو رقم الصفحة).\n' +
+                'لا تضف شرحاً أو تعليقاً، فقط النص المستخرج كما هو.',
+            },
+            {
+              inline_data: {
+                mime_type: 'application/pdf',
+                data: base64,
+              },
+            },
+          ],
+        }],
+        generationConfig: { temperature: 0, maxOutputTokens: 65536 },
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    const errBody = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    throw new Error(`Gemini OCR API error ${response.status}: ${(errBody as any)?.error?.message ?? JSON.stringify(errBody)}`);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data = await response.json() as any;
+  const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+
+  if (!text.trim()) {
+    throw new Error('Gemini OCR returned empty text — PDF may be unreadable or encrypted.');
+  }
+
+  // Split on page markers: "=== الصفحة N ===" or "=== Page N ==="
+  const pages = text
+    .split(/===\s*(?:الصفحة|Page)\s*\d+\s*===/i)
+    .map((p: string) => fixCharSeparatedArabic(p.trim()))
+    .filter((p: string) => p.length >= MIN_PAGE_CHARS);
+
+  if (pages.length > 0) return pages;
+
+  // No page markers — treat entire response as one block and virtual-split
+  const blob = fixCharSeparatedArabic(text.trim());
+  if (blob.length < MIN_PAGE_CHARS) throw new Error('Gemini OCR text too short to be useful.');
+
+  const virtualPages: string[] = [];
+  for (let i = 0; i < blob.length; i += VIRTUAL_PAGE_CHARS) {
+    let end = Math.min(i + VIRTUAL_PAGE_CHARS, blob.length);
+    if (end < blob.length) {
+      const spaceIdx = blob.lastIndexOf(' ', end);
+      if (spaceIdx > i + VIRTUAL_PAGE_CHARS / 2) end = spaceIdx + 1;
+    }
+    const slice = blob.slice(i, end).trim();
+    if (slice.length >= MIN_PAGE_CHARS) virtualPages.push(slice);
+  }
+
+  return virtualPages;
 }

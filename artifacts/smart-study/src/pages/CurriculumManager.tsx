@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Upload, Trash2, BookOpen, CheckCircle2, AlertCircle,
   Loader2, ChevronLeft, Database, FileText, Clock,
+  StickyNote, GraduationCap,
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import {
@@ -28,6 +29,20 @@ const LEVEL_LABELS: Record<string, string> = {
   secondary: 'الثانوية',
 };
 
+type DocType = 'book' | 'note' | 'exam';
+
+const DOC_TYPE_OPTIONS: { value: DocType; label: string; icon: typeof BookOpen; color: string }[] = [
+  { value: 'book', label: 'كتاب مدرسي', icon: BookOpen, color: '#00c6ff' },
+  { value: 'note', label: 'ملاحظات', icon: StickyNote, color: '#34d399' },
+  { value: 'exam', label: 'امتحان', icon: GraduationCap, color: '#f59e0b' },
+];
+
+const DOC_TYPE_LABELS: Record<DocType, { label: string; color: string }> = {
+  book: { label: 'كتاب', color: '#7dd3fc' },
+  note: { label: 'ملاحظات', color: '#6ee7b7' },
+  exam: { label: 'امتحان', color: '#fcd34d' },
+};
+
 type UploadState =
   | { phase: 'idle' }
   | { phase: 'uploading' }
@@ -37,11 +52,13 @@ type UploadState =
 
 export default function CurriculumManager() {
   const setPage = useAppStore((s) => s.setPage);
+  const studentProfile = useAppStore((s) => s.studentProfile);
 
   const [docs, setDocs] = useState<CurriculumDocMeta[]>([]);
   const [loadingDocs, setLoadingDocs] = useState(true);
 
-  const [country, setCountry] = useState('');
+  const [docType, setDocType] = useState<DocType>('book');
+  const [country, setCountry] = useState(studentProfile?.country ?? '');
   const [grade, setGrade] = useState('');
   const [subject, setSubject] = useState('');
   const [file, setFile] = useState<File | null>(null);
@@ -109,7 +126,7 @@ export default function CurriculumManager() {
     if (!country || !grade || !subject || !file) return;
     setUploadState({ phase: 'uploading' });
     try {
-      const { jobId } = await uploadCurriculumPdf(file, { country, grade, subject });
+      const { jobId } = await uploadCurriculumPdf(file, { country, grade, subject, docType });
       setUploadState({ phase: 'processing', jobId, progress: { current: 0, total: 0 } });
       startPolling(jobId);
     } catch (err) {
@@ -124,10 +141,10 @@ export default function CurriculumManager() {
 
   const gradeLabel = (g: string) => GRADE_OPTIONS.find((o) => o.value === g)?.label ?? g;
 
-  const subjectLabel = (country: string, grade: string, subjectId: string) => {
-    const level = GRADE_OPTIONS.find((g) => g.value === grade)?.level ?? '';
+  const subjectLabel = (docCountry: string, docGrade: string, subjectId: string) => {
+    const level = GRADE_OPTIONS.find((g) => g.value === docGrade)?.level ?? '';
     return getSubjects(
-      country as 'egypt' | 'sudan' | '',
+      docCountry as 'egypt' | 'sudan' | '',
       level as 'primary' | 'preparatory' | 'secondary' | '',
       ''
     ).find((s) => s.id === subjectId)?.label ?? subjectId;
@@ -139,6 +156,14 @@ export default function CurriculumManager() {
     uploadState.phase === 'processing' && uploadState.progress.total > 0
       ? Math.round((uploadState.progress.current / uploadState.progress.total) * 100)
       : uploadState.phase === 'uploading' ? 5 : 0;
+
+  const activeDocTypeOption = DOC_TYPE_OPTIONS.find((d) => d.value === docType)!;
+
+  // Group docs by type for display
+  const filterLabel = { book: 'الكتب', note: 'الملاحظات', exam: 'الامتحانات' };
+  const booksDone = docs.filter((d) => d.status === 'done' && (!d.docType || d.docType === 'book')).length;
+  const notesDone = docs.filter((d) => d.status === 'done' && d.docType === 'note').length;
+  const examsDone = docs.filter((d) => d.status === 'done' && d.docType === 'exam').length;
 
   return (
     <div className="flex min-h-screen flex-col" style={{ backgroundColor: '#0a0f1e' }}>
@@ -159,15 +184,24 @@ export default function CurriculumManager() {
           <ChevronLeft size={18} className="text-slate-400" />
         </button>
         <div>
-          <h1 className="text-base font-bold text-white">إدارة المناهج</h1>
+          <h1 className="text-base font-bold text-white">إدارة المواد الدراسية</h1>
           <p className="text-[11px] text-slate-500">الرفع والمعالجة تتم على الخادم — لا قيود على الحجم</p>
         </div>
-        <div
-          className="mr-auto flex items-center gap-1.5 rounded-xl px-3 py-1.5"
-          style={{ background: 'rgba(0,198,255,0.07)', border: '1px solid rgba(0,198,255,0.15)' }}
-        >
-          <Database size={11} className="text-[#00c6ff]" />
-          <span className="text-[11px] text-[#00c6ff]">{docs.filter(d => d.status === 'done').length} كتاب</span>
+        <div className="mr-auto flex items-center gap-1.5 flex-shrink-0">
+          {[
+            { count: booksDone, label: 'كتب', color: '#00c6ff' },
+            { count: notesDone, label: 'ملاح.', color: '#34d399' },
+            { count: examsDone, label: 'امت.', color: '#f59e0b' },
+          ].map(({ count, label, color }) => count > 0 && (
+            <div
+              key={label}
+              className="flex items-center gap-1 rounded-xl px-2 py-1"
+              style={{ background: `${color}12`, border: `1px solid ${color}25` }}
+            >
+              <Database size={9} style={{ color }} />
+              <span className="text-[10px]" style={{ color }}>{count} {label}</span>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -178,10 +212,33 @@ export default function CurriculumManager() {
           className="rounded-2xl p-4 space-y-4"
           style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)' }}
         >
-          <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-            <Upload size={14} className="text-[#00c6ff]" />
-            رفع كتاب مدرسي PDF
-          </h2>
+          {/* Doc type tabs */}
+          <div className="space-y-2">
+            <label className="text-[11px] text-slate-500">نوع الملف</label>
+            <div className="grid grid-cols-3 gap-2">
+              {DOC_TYPE_OPTIONS.map((opt) => {
+                const Icon = opt.icon;
+                const isActive = docType === opt.value;
+                return (
+                  <motion.button
+                    key={opt.value}
+                    whileTap={{ scale: 0.96 }}
+                    onClick={() => !isUploading && setDocType(opt.value)}
+                    disabled={isUploading}
+                    className="flex flex-col items-center gap-1 rounded-xl py-2.5 px-2 text-[11px] font-medium transition-all disabled:opacity-40"
+                    style={{
+                      background: isActive ? `${opt.color}18` : 'rgba(255,255,255,0.04)',
+                      border: isActive ? `1px solid ${opt.color}40` : '1px solid rgba(255,255,255,0.07)',
+                      color: isActive ? opt.color : '#64748b',
+                    }}
+                  >
+                    <Icon size={14} />
+                    {opt.label}
+                  </motion.button>
+                );
+              })}
+            </div>
+          </div>
 
           <div className="grid grid-cols-2 gap-2">
             <div className="space-y-1">
@@ -234,24 +291,30 @@ export default function CurriculumManager() {
             onDrop={handleFileDrop}
             onDragOver={(e) => e.preventDefault()}
             onClick={() => !isUploading && fileInputRef.current?.click()}
-            className="flex flex-col items-center justify-center gap-2 rounded-2xl py-6 cursor-pointer transition-all"
+            className="flex flex-col items-center justify-center gap-2 rounded-2xl py-6 transition-all"
             style={{
-              border: file ? '2px solid rgba(0,198,255,0.5)' : '2px dashed rgba(255,255,255,0.1)',
-              background: file ? 'rgba(0,198,255,0.05)' : 'rgba(255,255,255,0.02)',
+              border: file ? `2px solid ${activeDocTypeOption.color}80` : '2px dashed rgba(255,255,255,0.1)',
+              background: file ? `${activeDocTypeOption.color}08` : 'rgba(255,255,255,0.02)',
               cursor: isUploading ? 'not-allowed' : 'pointer',
             }}
           >
             {file ? (
               <>
-                <FileText size={24} className="text-[#00c6ff]" />
-                <p className="text-sm text-[#00c6ff] font-medium">{file.name}</p>
+                <FileText size={24} style={{ color: activeDocTypeOption.color }} />
+                <p className="text-sm font-medium" style={{ color: activeDocTypeOption.color }}>{file.name}</p>
                 <p className="text-[11px] text-slate-500">{(file.size / 1024 / 1024).toFixed(1)} MB</p>
               </>
             ) : (
               <>
                 <Upload size={24} className="text-slate-600" />
-                <p className="text-sm text-slate-400">اسحب ملف PDF هنا أو اضغط للاختيار</p>
-                <p className="text-[11px] text-slate-600">الحد الأقصى: 150 MB · المعالجة تتم على الخادم</p>
+                <p className="text-sm text-slate-400">
+                  اسحب ملف PDF هنا أو اضغط للاختيار
+                </p>
+                <p className="text-[11px] text-slate-600">
+                  {docType === 'note' ? 'ملاحظاتك PDF · حتى 150 MB' :
+                   docType === 'exam' ? 'نموذج امتحان PDF · حتى 150 MB' :
+                   'كتاب مدرسي PDF · حتى 150 MB · OCR للمسوحات الضوئية'}
+                </p>
               </>
             )}
           </div>
@@ -275,7 +338,7 @@ export default function CurriculumManager() {
                 <div className="flex items-center justify-between text-xs text-slate-400">
                   <span className="flex items-center gap-1.5">
                     <Loader2 size={12} className="animate-spin text-[#00c6ff]" />
-                    {uploadState.phase === 'uploading' ? 'جاري الرفع...' : 'الخادم يعالج الكتاب...'}
+                    {uploadState.phase === 'uploading' ? 'جاري الرفع...' : 'الخادم يعالج الملف...'}
                   </span>
                   {uploadState.phase === 'processing' && uploadState.progress.total > 0 && (
                     <span>{uploadState.progress.current} / {uploadState.progress.total} صفحة</span>
@@ -284,7 +347,7 @@ export default function CurriculumManager() {
                 <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.06)' }}>
                   <motion.div
                     className="h-full rounded-full"
-                    style={{ background: 'linear-gradient(90deg, #0090ff, #00c6ff)' }}
+                    style={{ background: `linear-gradient(90deg, ${activeDocTypeOption.color}99, ${activeDocTypeOption.color})` }}
                     animate={{ width: `${progressPercent || 20}%` }}
                     transition={{ duration: 0.5 }}
                   />
@@ -319,13 +382,13 @@ export default function CurriculumManager() {
             onClick={handleUpload}
             disabled={!country || !grade || !subject || !file || isUploading}
             className="w-full rounded-2xl py-3 text-sm font-semibold text-white transition-all disabled:opacity-40"
-            style={{ background: 'linear-gradient(135deg, #0090ff, #00c6ff)' }}
+            style={{ background: `linear-gradient(135deg, ${activeDocTypeOption.color}99, ${activeDocTypeOption.color})` }}
           >
-            {isUploading ? 'جاري المعالجة...' : 'رفع ومعالجة على الخادم'}
+            {isUploading ? 'جاري المعالجة...' : `رفع ${activeDocTypeOption.label} ومعالجته`}
           </button>
         </div>
 
-        {/* Uploaded Books */}
+        {/* Uploaded Docs */}
         {loadingDocs ? (
           <div className="flex items-center justify-center py-8">
             <Loader2 size={20} className="animate-spin text-slate-600" />
@@ -333,69 +396,78 @@ export default function CurriculumManager() {
         ) : docs.length > 0 ? (
           <div className="space-y-3">
             <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-              الكتب المرفوعة ({docs.length})
+              الملفات المرفوعة ({docs.length})
             </h2>
-            {docs.map((doc) => (
-              <motion.div
-                key={doc.id}
-                layout
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="flex items-start gap-3 rounded-2xl p-3"
-                style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}
-              >
-                <div
-                  className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
-                  style={{
-                    background: doc.status === 'done' ? 'rgba(0,198,255,0.1)' : 'rgba(251,191,36,0.1)',
-                    border: `1px solid ${doc.status === 'done' ? 'rgba(0,198,255,0.2)' : 'rgba(251,191,36,0.2)'}`,
-                  }}
+            {docs.map((doc) => {
+              const dt = (doc.docType as DocType | undefined) ?? 'book';
+              const dtInfo = DOC_TYPE_LABELS[dt] ?? DOC_TYPE_LABELS.book;
+              return (
+                <motion.div
+                  key={doc.id}
+                  layout
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="flex items-start gap-3 rounded-2xl p-3"
+                  style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}
                 >
-                  {doc.status === 'done'
-                    ? <BookOpen size={16} className="text-[#00c6ff]" />
-                    : doc.status === 'error'
-                    ? <AlertCircle size={16} className="text-red-400" />
-                    : <Clock size={16} className="text-yellow-400 animate-pulse" />
-                  }
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-white truncate">{doc.filename}</p>
-                  <div className="flex flex-wrap gap-1.5 mt-1">
-                    <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(0,198,255,0.08)', color: '#7dd3fc' }}>
-                      {doc.country === 'egypt' ? '🇪🇬 مصر' : '🇸🇩 السودان'}
-                    </span>
-                    <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(255,255,255,0.05)', color: '#94a3b8' }}>
-                      {gradeLabel(doc.grade)}
-                    </span>
-                    <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(255,255,255,0.05)', color: '#94a3b8' }}>
-                      {subjectLabel(doc.country, doc.grade, doc.subject)}
-                    </span>
-                    {doc.status === 'done' && (
-                      <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(52,211,153,0.08)', color: '#34d399' }}>
-                        {doc.totalPages} صفحة · {doc.chunkCount} قسم
-                      </span>
-                    )}
-                    {doc.status === 'processing' && (
-                      <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(251,191,36,0.08)', color: '#fbbf24' }}>
-                        جاري المعالجة...
-                      </span>
-                    )}
-                    {doc.status === 'error' && (
-                      <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(248,113,113,0.08)', color: '#f87171' }}>
-                        فشل: {doc.errorMessage?.slice(0, 30)}
-                      </span>
-                    )}
+                  <div
+                    className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
+                    style={{
+                      background: doc.status === 'done' ? `${dtInfo.color}18` : 'rgba(251,191,36,0.1)',
+                      border: `1px solid ${doc.status === 'done' ? dtInfo.color + '35' : 'rgba(251,191,36,0.2)'}`,
+                    }}
+                  >
+                    {doc.status === 'done'
+                      ? dt === 'note' ? <StickyNote size={16} style={{ color: dtInfo.color }} />
+                        : dt === 'exam' ? <GraduationCap size={16} style={{ color: dtInfo.color }} />
+                        : <BookOpen size={16} style={{ color: dtInfo.color }} />
+                      : doc.status === 'error'
+                      ? <AlertCircle size={16} className="text-red-400" />
+                      : <Clock size={16} className="text-yellow-400 animate-pulse" />
+                    }
                   </div>
-                </div>
-                <button
-                  onClick={() => handleDelete(doc.id)}
-                  className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl"
-                  style={{ background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.15)' }}
-                >
-                  <Trash2 size={13} className="text-red-400" />
-                </button>
-              </motion.div>
-            ))}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-white truncate">{doc.filename}</p>
+                    <div className="flex flex-wrap gap-1.5 mt-1">
+                      <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: `${dtInfo.color}12`, color: dtInfo.color }}>
+                        {dtInfo.label}
+                      </span>
+                      <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(0,198,255,0.08)', color: '#7dd3fc' }}>
+                        {doc.country === 'egypt' ? '🇪🇬 مصر' : '🇸🇩 السودان'}
+                      </span>
+                      <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(255,255,255,0.05)', color: '#94a3b8' }}>
+                        {gradeLabel(doc.grade)}
+                      </span>
+                      <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(255,255,255,0.05)', color: '#94a3b8' }}>
+                        {subjectLabel(doc.country, doc.grade, doc.subject)}
+                      </span>
+                      {doc.status === 'done' && (
+                        <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(52,211,153,0.08)', color: '#34d399' }}>
+                          {doc.totalPages} صفحة · {doc.chunkCount} قسم
+                        </span>
+                      )}
+                      {doc.status === 'processing' && (
+                        <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(251,191,36,0.08)', color: '#fbbf24' }}>
+                          جاري المعالجة...
+                        </span>
+                      )}
+                      {doc.status === 'error' && (
+                        <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(248,113,113,0.08)', color: '#f87171' }}>
+                          فشل: {doc.errorMessage?.slice(0, 30)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleDelete(doc.id)}
+                    className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl"
+                    style={{ background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.15)' }}
+                  >
+                    <Trash2 size={13} className="text-red-400" />
+                  </button>
+                </motion.div>
+              );
+            })}
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center py-12 text-center gap-3">
@@ -405,8 +477,8 @@ export default function CurriculumManager() {
             >
               <BookOpen size={24} className="text-slate-600" />
             </div>
-            <p className="text-sm text-slate-500">لا توجد كتب مرفوعة بعد</p>
-            <p className="text-xs text-slate-600">ارفع أول كتاب مدرسي لتفعيل التدريس المبني على المنهج</p>
+            <p className="text-sm text-slate-500">لا توجد ملفات مرفوعة بعد</p>
+            <p className="text-xs text-slate-600">ارفع كتاباً أو ملاحظات أو امتحاناً لتفعيل التدريس المبني على المنهج</p>
           </div>
         )}
       </div>

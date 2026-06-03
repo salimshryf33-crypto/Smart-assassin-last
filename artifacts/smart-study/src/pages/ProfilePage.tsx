@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { User, Flame, BookOpen, Timer, Edit3, Check, Target, GraduationCap, X, Settings, LogOut, Zap } from 'lucide-react';
+import { User, Flame, BookOpen, Timer, Edit3, Check, Target, GraduationCap, X, Settings, LogOut, Zap, Globe, MapPin } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import { useAuth } from '../contexts/AuthContext';
 import { saveUserProfile } from '../lib/firestore';
@@ -10,6 +10,38 @@ import GlassCard from '../components/ui/GlassCard';
 
 const AVATARS = ['🧠', '🎓', '🚀', '⚡', '🌟', '🔥', '💡', '🎯'];
 const CURRICULA = ['STEM', 'Arts & Humanities', 'Business', 'Medicine', 'Law', 'Engineering', 'Computer Science', 'Social Sciences'];
+
+// ─── Student context helpers ──────────────────────────────────────────────────
+
+const COUNTRY_LABELS: Record<string, string> = {
+  egypt: '🇪🇬 مصر',
+  sudan: '🇸🇩 السودان',
+};
+
+const LEVEL_LABELS: Record<string, string> = {
+  primary: 'المرحلة الابتدائية',
+  preparatory: 'المرحلة الإعدادية',
+  secondary: 'المرحلة الثانوية',
+};
+
+const TRACK_LABELS: Record<string, string> = {
+  scientific: 'علمي',
+  literary: 'أدبي',
+};
+
+function buildStudentContextLine(
+  country: string,
+  level: string,
+  track: string
+): string {
+  const parts: string[] = [];
+  if (country && COUNTRY_LABELS[country]) parts.push(COUNTRY_LABELS[country]);
+  if (level && LEVEL_LABELS[level]) parts.push(LEVEL_LABELS[level]);
+  if (track && TRACK_LABELS[track]) parts.push(TRACK_LABELS[track]);
+  return parts.join(' · ');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function StatCard({ icon: Icon, value, label, color }: { icon: typeof Flame; value: string | number; label: string; color: string }) {
   return (
@@ -39,15 +71,20 @@ export default function ProfilePage() {
   const [editCurriculum, setEditCurriculum] = useState(userProfile.curriculum ?? '');
   const [editAvatar, setEditAvatar] = useState(userProfile.avatar || '🧠');
 
-  // ─── Single source of truth: gamification.currentStreak ────────────────────
   const currentStreak = gamification.currentStreak ?? 0;
   const longestStreak = gamification.longestStreak ?? 0;
   const xp = gamification.xp ?? 0;
 
-  // ─── 28-day grid from streakHistory (real Firestore data) ──────────────────
   const today = getDateForCountry(studentProfile?.country ?? 'egypt');
   const last28 = getLast28Days(today);
   const historySet = new Set<string>(Array.isArray(gamification.streakHistory) ? gamification.streakHistory : []);
+
+  // ─── Student context derived from profile ──────────────────────────────────
+  const country = studentProfile?.country ?? '';
+  const level = studentProfile?.level ?? '';
+  const track = studentProfile?.track ?? '';
+  const hasStudentProfile = !!(country || level);
+  const studentContextLine = buildStudentContextLine(country, level, track);
 
   const handleSave = () => {
     const updates = { name: editName, studyGoal: editGoal, curriculum: editCurriculum, avatar: editAvatar };
@@ -108,6 +145,7 @@ export default function ProfilePage() {
           </div>
         </div>
 
+        {/* Profile Card */}
         <GlassCard className="mb-5 p-5" neon>
           <div className="flex items-center gap-4">
             <motion.div
@@ -123,19 +161,48 @@ export default function ProfilePage() {
             </motion.div>
             <div className="flex-1 min-w-0">
               <h2 className="text-xl font-bold text-white truncate">{userProfile.name}</h2>
-              <div className="mt-1 flex items-center gap-1.5">
-                <GraduationCap size={13} className="text-[#00c6ff]" />
-                <span className="text-xs text-slate-400">{userProfile.curriculum || 'No curriculum set'}</span>
-              </div>
+
+              {/* Student context — dynamic from studentProfile */}
+              {hasStudentProfile ? (
+                <div className="mt-1 flex items-center gap-1.5">
+                  <GraduationCap size={13} className="text-[#00c6ff] flex-shrink-0" />
+                  <span className="text-xs text-slate-300 truncate">{studentContextLine}</span>
+                </div>
+              ) : (
+                <div className="mt-1 flex items-center gap-1.5">
+                  <GraduationCap size={13} className="text-slate-600 flex-shrink-0" />
+                  <span className="text-xs text-slate-500">لم يتم تحديد المنهج بعد</span>
+                </div>
+              )}
+
+              {/* Study goal */}
               <div className="mt-1.5 flex items-center gap-1.5">
-                <Target size={13} className="text-amber-400" />
-                <span className="text-xs text-slate-400 truncate">{userProfile.studyGoal || 'No goal set'}</span>
+                <Target size={13} className="text-amber-400 flex-shrink-0" />
+                <span className="text-xs text-slate-400 truncate">
+                  {userProfile.studyGoal || 'لم يتم تحديد هدف بعد'}
+                </span>
               </div>
+
+              {/* Track badge (secondary level only) */}
+              {track && (
+                <div className="mt-2">
+                  <span
+                    className="rounded-lg px-2 py-0.5 text-[10px] font-medium"
+                    style={{
+                      background: track === 'scientific' ? 'rgba(0,198,255,0.1)' : 'rgba(245,158,11,0.1)',
+                      color: track === 'scientific' ? '#7dd3fc' : '#fcd34d',
+                      border: track === 'scientific' ? '1px solid rgba(0,198,255,0.2)' : '1px solid rgba(245,158,11,0.2)',
+                    }}
+                  >
+                    {TRACK_LABELS[track]}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         </GlassCard>
 
-        {/* Stats — all from gamification (single source of truth) */}
+        {/* Stats */}
         <div className="mb-5 flex gap-3">
           <StatCard icon={Flame} value={currentStreak} label="Day Streak" color="#f59e0b" />
           <StatCard icon={Zap} value={xp} label="XP" color="#00c6ff" />
@@ -143,7 +210,7 @@ export default function ProfilePage() {
           <StatCard icon={Check} value={completedTasks} label="Tasks Done" color="#f87171" />
         </div>
 
-        {/* 28-day grid — driven by streakHistory from Firestore */}
+        {/* 28-day streak grid */}
         <GlassCard className="mb-5 p-4" delay={0.1}>
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-white">Study Streak</h3>
@@ -187,6 +254,7 @@ export default function ProfilePage() {
           <p className="mt-2 text-xs text-slate-500">Last 28 days · Complete all 3 daily tasks to earn a streak day</p>
         </GlassCard>
 
+        {/* Knowledge Areas */}
         <GlassCard className="p-4" delay={0.15}>
           <h3 className="mb-3 text-sm font-semibold text-white">Knowledge Areas</h3>
           <div className="space-y-3">
@@ -219,6 +287,7 @@ export default function ProfilePage() {
         </GlassCard>
       </div>
 
+      {/* Edit Modal */}
       <AnimatePresence>
         {editing && (
           <motion.div
