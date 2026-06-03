@@ -171,6 +171,38 @@ export async function updateTaskFS(uid: string, task: Task) {
   await setDoc(doc(tasksCol(uid), task.id), task);
 }
 
+// ─── Account deletion ─────────────────────────────────────────
+/**
+ * Delete all Firestore data for a user before deleting their Auth account.
+ * Sub-collections are deleted in batches first, then the root user document.
+ * Firestore does NOT auto-delete sub-collections when a parent doc is deleted,
+ * so explicit deletion here prevents orphaned data.
+ */
+export async function deleteUserData(uid: string): Promise<void> {
+  // Batch 1: flashcards + tasks (can be large)
+  const [fcSnap, taskSnap] = await Promise.all([
+    getDocs(flashcardsCol(uid)),
+    getDocs(tasksCol(uid)),
+  ]);
+  if (fcSnap.size + taskSnap.size > 0) {
+    const batch1 = writeBatch(db);
+    fcSnap.docs.forEach((d) => batch1.delete(d.ref));
+    taskSnap.docs.forEach((d) => batch1.delete(d.ref));
+    await batch1.commit();
+  }
+
+  // Batch 2: messages
+  const msgSnap = await getDocs(messagesCol(uid));
+  if (msgSnap.size > 0) {
+    const batch2 = writeBatch(db);
+    msgSnap.docs.forEach((d) => batch2.delete(d.ref));
+    await batch2.commit();
+  }
+
+  // Finally: delete the root user document (XP, streak, profile, settings)
+  await deleteDoc(userDoc(uid));
+}
+
 // ─── Initialize new user document ────────────────────────────
 export async function initUserDocument(
   uid: string,

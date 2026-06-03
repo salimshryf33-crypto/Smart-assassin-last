@@ -34,8 +34,25 @@ export default function LoginScreen() {
     try {
       await signInWithGoogle();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!msg.includes('popup-closed')) setError('فشل تسجيل الدخول بـ Google. حاول مجدداً.');
+      const code = (err as { code?: string })?.code ?? '';
+      const message = (err as Error)?.message ?? String(err);
+      console.error('[LoginScreen] Google sign-in failed — code:', code, '| message:', message, '| full:', err);
+
+      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+        // User dismissed the popup — silent, no error shown
+      } else if (code === 'auth/unauthorized-domain') {
+        setError('النطاق غير مصرح به في Firebase. تواصل مع الدعم. (unauthorized-domain)');
+      } else if (code === 'auth/network-request-failed') {
+        setError('خطأ في الشبكة. تحقق من الاتصال وحاول مجدداً.');
+      } else if (code === 'auth/too-many-requests') {
+        setError('محاولات كثيرة. انتظر قليلاً وحاول مجدداً.');
+      } else if (code === 'auth/user-disabled') {
+        setError('هذا الحساب معطّل. تواصل مع الدعم.');
+      } else if (code) {
+        setError(`فشل تسجيل الدخول بـ Google. (${code})`);
+      } else {
+        setError('فشل تسجيل الدخول بـ Google. حاول مجدداً.');
+      }
     } finally {
       setLoading(false);
     }
@@ -54,13 +71,26 @@ export default function LoginScreen() {
         await signUpWithEmail(email, password, name);
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('user-not-found') || msg.includes('wrong-password') || msg.includes('invalid-credential')) {
+      const code = (err as { code?: string })?.code ?? '';
+      const message = (err as Error)?.message ?? String(err);
+      console.error('[LoginScreen] Email auth failed — code:', code, '| message:', message);
+
+      if (
+        code === 'auth/user-not-found' ||
+        code === 'auth/wrong-password' ||
+        code === 'auth/invalid-credential'
+      ) {
         setError('البريد الإلكتروني أو كلمة المرور غير صحيحة.');
-      } else if (msg.includes('email-already-in-use')) {
+      } else if (code === 'auth/email-already-in-use') {
         setError('هذا البريد مستخدم بالفعل. سجّل الدخول.');
-      } else if (msg.includes('weak-password')) {
+      } else if (code === 'auth/weak-password') {
         setError('كلمة المرور ضعيفة — استخدم 6 أحرف على الأقل.');
+      } else if (code === 'auth/network-request-failed') {
+        setError('خطأ في الشبكة. تحقق من الاتصال وحاول مجدداً.');
+      } else if (code === 'auth/too-many-requests') {
+        setError('محاولات كثيرة. انتظر قليلاً وحاول مجدداً.');
+      } else if (code) {
+        setError(`حدث خطأ. (${code})`);
       } else {
         setError('حدث خطأ. حاول مجدداً.');
       }

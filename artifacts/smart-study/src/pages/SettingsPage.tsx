@@ -1,5 +1,6 @@
-import { motion } from 'framer-motion';
-import { ChevronLeft, Globe, BookOpen, Type, Bell, Info, Moon, ChevronRight, Check, Database, Key, CheckCircle2 } from 'lucide-react';
+import { useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { ChevronLeft, Globe, BookOpen, Type, Bell, Info, Moon, ChevronRight, Check, Database, Key, CheckCircle2, Trash2, AlertTriangle } from 'lucide-react';
 import { useAppStore, Settings } from '../store/useAppStore';
 import { useAuth } from '../contexts/AuthContext';
 import { saveSettings } from '../lib/firestore';
@@ -61,12 +62,95 @@ function SettingRow({
   );
 }
 
+// ─── Delete Account Modal ──────────────────────────────────────────────────────
+
+function DeleteAccountModal({
+  onConfirm,
+  onCancel,
+  loading,
+  error,
+}: {
+  onConfirm: () => void;
+  onCancel: () => void;
+  loading: boolean;
+  error: string;
+}) {
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 flex items-center justify-center px-6"
+      style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(8px)' }}
+    >
+      <motion.div
+        initial={{ scale: 0.9, opacity: 0, y: 20 }}
+        animate={{ scale: 1, opacity: 1, y: 0 }}
+        exit={{ scale: 0.9, opacity: 0 }}
+        className="w-full max-w-sm rounded-3xl p-6"
+        style={{
+          background: 'linear-gradient(135deg, #0d1424 0%, #111827 100%)',
+          border: '1px solid rgba(248,113,113,0.2)',
+          boxShadow: '0 0 40px rgba(248,113,113,0.1)',
+        }}
+      >
+        <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl mx-auto"
+          style={{ background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.2)' }}>
+          <AlertTriangle size={22} className="text-red-400" />
+        </div>
+        <h2 className="text-center text-lg font-bold text-white mb-1">حذف الحساب نهائياً</h2>
+        <p className="text-center text-xs text-slate-400 mb-5 leading-relaxed">
+          سيتم حذف جميع بياناتك نهائياً بما فيها البطاقات والنقاط والتقدم الدراسي.
+          <span className="text-red-400 font-semibold"> لا يمكن التراجع عن هذه الخطوة.</span>
+        </p>
+
+        {error && (
+          <div className="mb-4 rounded-xl px-3 py-2.5 text-xs text-red-400"
+            style={{ background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.2)' }}>
+            {error}
+          </div>
+        )}
+
+        <div className="flex flex-col gap-2">
+          <motion.button
+            whileTap={{ scale: 0.97 }}
+            onClick={onConfirm}
+            disabled={loading}
+            className="w-full rounded-2xl py-3.5 text-sm font-bold text-white transition-all"
+            style={{
+              background: loading ? 'rgba(248,113,113,0.1)' : 'linear-gradient(135deg, #dc2626, #b91c1c)',
+              boxShadow: loading ? 'none' : '0 8px 20px rgba(220,38,38,0.3)',
+            }}
+          >
+            {loading ? 'جارٍ الحذف...' : 'نعم، احذف حسابي'}
+          </motion.button>
+          <motion.button
+            whileTap={{ scale: 0.97 }}
+            onClick={onCancel}
+            disabled={loading}
+            className="w-full rounded-2xl py-3.5 text-sm font-semibold text-slate-400 transition-all"
+            style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
+          >
+            إلغاء
+          </motion.button>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+}
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
+
 const LANGUAGES = ['English', 'Spanish', 'French', 'German', 'Japanese', 'Arabic'];
 const FONT_SIZES = ['small', 'medium', 'large'] as const;
 
 export default function SettingsPage() {
   const { settings, updateSettings, setPage } = useAppStore();
-  const { user } = useAuth();
+  const { user, deleteAccount } = useAuth();
+
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
 
   const handleUpdateSettings = (updates: Partial<Settings>) => {
     updateSettings(updates);
@@ -77,8 +161,38 @@ export default function SettingsPage() {
     }
   };
 
+  const handleDeleteAccount = async () => {
+    setDeleteLoading(true);
+    setDeleteError('');
+    try {
+      await deleteAccount();
+      // onAuthStateChanged will reset store and navigate to login automatically
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code ?? '';
+      if (code === 'auth/requires-recent-login') {
+        setDeleteError('لأسباب أمنية، يرجى تسجيل الخروج وإعادة الدخول ثم المحاولة مجدداً.');
+      } else if (code) {
+        setDeleteError(`فشل الحذف. (${code})`);
+      } else {
+        setDeleteError('فشل الحذف. حاول مجدداً.');
+      }
+      setDeleteLoading(false);
+    }
+  };
+
   return (
     <PageWrapper>
+      <AnimatePresence>
+        {showDeleteModal && (
+          <DeleteAccountModal
+            onConfirm={handleDeleteAccount}
+            onCancel={() => { setShowDeleteModal(false); setDeleteError(''); }}
+            loading={deleteLoading}
+            error={deleteError}
+          />
+        )}
+      </AnimatePresence>
+
       <div className="px-5 pt-14 pb-32">
         <div className="mb-6 flex items-center gap-3">
           <motion.button
@@ -281,6 +395,30 @@ export default function SettingsPage() {
                 description="Version 1.0.0 · Phase 1 MVP"
                 right={<ChevronRight size={14} className="text-slate-600" />}
               />
+            </GlassCard>
+          </div>
+
+          {/* Danger Zone */}
+          <div>
+            <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-red-500/70">Danger Zone</p>
+            <GlassCard className="overflow-hidden"
+              style={{ border: '1px solid rgba(248,113,113,0.15)' } as React.CSSProperties}>
+              <motion.button
+                whileTap={{ scale: 0.98 }}
+                onClick={() => setShowDeleteModal(true)}
+                className="flex w-full items-center gap-3 px-4 py-3.5 text-left"
+              >
+                <div
+                  className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
+                  style={{ background: 'rgba(248,113,113,0.1)' }}
+                >
+                  <Trash2 size={16} className="text-red-400" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-red-400">حذف الحساب</p>
+                  <p className="text-[11px] text-slate-500">حذف نهائي لجميع البيانات</p>
+                </div>
+              </motion.button>
             </GlassCard>
           </div>
         </div>
