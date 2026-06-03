@@ -1,11 +1,13 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronLeft, Globe, BookOpen, Type, Bell, Info, Moon, ChevronRight, Check, Database, Key, CheckCircle2, Trash2, AlertTriangle } from 'lucide-react';
+import { ChevronLeft, Globe, BookOpen, Type, Bell, Info, Moon, ChevronRight, Check, Database, Key, CheckCircle2, Trash2, AlertTriangle, Lock } from 'lucide-react';
 import { useAppStore, Settings } from '../store/useAppStore';
 import { useAuth } from '../contexts/AuthContext';
 import { saveSettings } from '../lib/firestore';
 import PageWrapper from '../components/layout/PageWrapper';
 import GlassCard from '../components/ui/GlassCard';
+
+// ─── Toggle Switch ─────────────────────────────────────────────────────────────
 
 function ToggleSwitch({ enabled, onChange }: { enabled: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -14,9 +16,7 @@ function ToggleSwitch({ enabled, onChange }: { enabled: boolean; onChange: (v: b
       onClick={() => onChange(!enabled)}
       className="relative flex h-7 w-12 items-center rounded-full transition-colors duration-300 flex-shrink-0"
       style={{
-        background: enabled
-          ? 'linear-gradient(135deg, #0090ff, #00c6ff)'
-          : 'rgba(255,255,255,0.1)',
+        background: enabled ? 'linear-gradient(135deg, #0090ff, #00c6ff)' : 'rgba(255,255,255,0.1)',
         boxShadow: enabled ? '0 0 12px rgba(0,198,255,0.3)' : 'none',
       }}
     >
@@ -29,6 +29,8 @@ function ToggleSwitch({ enabled, onChange }: { enabled: boolean; onChange: (v: b
     </motion.button>
   );
 }
+
+// ─── Setting Row ──────────────────────────────────────────────────────────────
 
 function SettingRow({
   icon: Icon,
@@ -47,10 +49,7 @@ function SettingRow({
 }) {
   return (
     <div className="flex items-center gap-3 py-3.5 px-4">
-      <div
-        className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
-        style={{ background: iconBg }}
-      >
+      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl" style={{ background: iconBg }}>
         <Icon size={16} style={{ color: iconColor }} />
       </div>
       <div className="flex-1 min-w-0">
@@ -63,18 +62,71 @@ function SettingRow({
 }
 
 // ─── Delete Account Modal ──────────────────────────────────────────────────────
+//
+// Three-stage flow:
+//   confirm        → shows the permanent-deletion warning + confirm button
+//   needs-password → email users whose session expired: shows password input for re-auth
+//   error          → unrecoverable error (shown inside the modal, not a separate screen)
+//
+// Google users never see the needs-password stage — reauthenticateWithPopup
+// is called automatically inside deleteAccount() and the popup opens on its own.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+type ModalStage = 'confirm' | 'needs-password';
 
 function DeleteAccountModal({
-  onConfirm,
   onCancel,
-  loading,
-  error,
+  user,
+  deleteAccount,
 }: {
-  onConfirm: () => void;
   onCancel: () => void;
-  loading: boolean;
-  error: string;
+  user: { providerData: { providerId: string }[] } | null;
+  deleteAccount: (reauthPassword?: string) => Promise<void>;
 }) {
+  const [stage, setStage] = useState<ModalStage>('confirm');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [password, setPassword] = useState('');
+
+  const isGoogleUser = user?.providerData[0]?.providerId === 'google.com';
+
+  const attempt = async (reauthPassword?: string) => {
+    setLoading(true);
+    setError('');
+    try {
+      await deleteAccount(reauthPassword);
+      // onAuthStateChanged in AuthContext resets the store → app navigates to LoginScreen
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code ?? '';
+      if (code === 'auth/needs-reauth-password') {
+        // Email user whose session expired — collect password and retry
+        setStage('needs-password');
+        setError('');
+      } else if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+        setError('كلمة المرور غير صحيحة. حاول مجدداً.');
+      } else if (code === 'auth/too-many-requests') {
+        setError('محاولات كثيرة. انتظر قليلاً وحاول مجدداً.');
+      } else if (code === 'auth/network-request-failed') {
+        setError('خطأ في الشبكة. تحقق من الاتصال وحاول مجدداً.');
+      } else if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+        setError('أُغلقت نافذة تسجيل الدخول. حاول مجدداً.');
+      } else if (code) {
+        setError(`فشل الحذف. (${code})`);
+      } else {
+        setError('فشل الحذف. حاول مجدداً.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleConfirm = () => attempt();
+  const handlePasswordConfirm = () => {
+    if (!password.trim()) { setError('يرجى إدخال كلمة المرور.'); return; }
+    attempt(password);
+  };
+
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -94,46 +146,108 @@ function DeleteAccountModal({
           boxShadow: '0 0 40px rgba(248,113,113,0.1)',
         }}
       >
-        <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl mx-auto"
-          style={{ background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.2)' }}>
+        <div
+          className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl mx-auto"
+          style={{ background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.2)' }}
+        >
           <AlertTriangle size={22} className="text-red-400" />
         </div>
-        <h2 className="text-center text-lg font-bold text-white mb-1">حذف الحساب نهائياً</h2>
-        <p className="text-center text-xs text-slate-400 mb-5 leading-relaxed">
-          سيتم حذف جميع بياناتك نهائياً بما فيها البطاقات والنقاط والتقدم الدراسي.
-          <span className="text-red-400 font-semibold"> لا يمكن التراجع عن هذه الخطوة.</span>
-        </p>
 
-        {error && (
-          <div className="mb-4 rounded-xl px-3 py-2.5 text-xs text-red-400"
-            style={{ background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.2)' }}>
-            {error}
-          </div>
-        )}
-
-        <div className="flex flex-col gap-2">
-          <motion.button
-            whileTap={{ scale: 0.97 }}
-            onClick={onConfirm}
-            disabled={loading}
-            className="w-full rounded-2xl py-3.5 text-sm font-bold text-white transition-all"
-            style={{
-              background: loading ? 'rgba(248,113,113,0.1)' : 'linear-gradient(135deg, #dc2626, #b91c1c)',
-              boxShadow: loading ? 'none' : '0 8px 20px rgba(220,38,38,0.3)',
-            }}
-          >
-            {loading ? 'جارٍ الحذف...' : 'نعم، احذف حسابي'}
-          </motion.button>
-          <motion.button
-            whileTap={{ scale: 0.97 }}
-            onClick={onCancel}
-            disabled={loading}
-            className="w-full rounded-2xl py-3.5 text-sm font-semibold text-slate-400 transition-all"
-            style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
-          >
-            إلغاء
-          </motion.button>
-        </div>
+        <AnimatePresence mode="wait">
+          {stage === 'confirm' ? (
+            <motion.div key="confirm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+              <h2 className="text-center text-lg font-bold text-white mb-1">حذف الحساب نهائياً</h2>
+              <p className="text-center text-xs text-slate-400 mb-5 leading-relaxed">
+                سيتم حذف جميع بياناتك نهائياً — البطاقات والنقاط والتقدم الدراسي والمحادثات.
+                <span className="text-red-400 font-semibold"> لا يمكن التراجع عن هذه الخطوة.</span>
+              </p>
+              {isGoogleUser && (
+                <p className="text-center text-[10px] text-slate-600 mb-4">
+                  ستظهر نافذة Google لتأكيد هويتك إذا انتهت جلستك.
+                </p>
+              )}
+              {error && (
+                <div className="mb-4 rounded-xl px-3 py-2.5 text-xs text-red-400"
+                  style={{ background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.2)' }}>
+                  {error}
+                </div>
+              )}
+              <div className="flex flex-col gap-2">
+                <motion.button
+                  whileTap={{ scale: 0.97 }}
+                  onClick={handleConfirm}
+                  disabled={loading}
+                  className="w-full rounded-2xl py-3.5 text-sm font-bold text-white transition-all"
+                  style={{
+                    background: loading ? 'rgba(248,113,113,0.1)' : 'linear-gradient(135deg, #dc2626, #b91c1c)',
+                    boxShadow: loading ? 'none' : '0 8px 20px rgba(220,38,38,0.3)',
+                  }}
+                >
+                  {loading ? 'جارٍ الحذف...' : 'نعم، احذف حسابي'}
+                </motion.button>
+                <motion.button
+                  whileTap={{ scale: 0.97 }}
+                  onClick={onCancel}
+                  disabled={loading}
+                  className="w-full rounded-2xl py-3.5 text-sm font-semibold text-slate-400"
+                  style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
+                >
+                  إلغاء
+                </motion.button>
+              </div>
+            </motion.div>
+          ) : (
+            <motion.div key="reauth" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+              <h2 className="text-center text-lg font-bold text-white mb-1">تأكيد الهوية</h2>
+              <p className="text-center text-xs text-slate-400 mb-4 leading-relaxed">
+                لأسباب أمنية، يرجى إدخال كلمة مرورك لتأكيد حذف الحساب.
+              </p>
+              <div className="relative mb-3">
+                <Lock size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-600" />
+                <input
+                  type="password"
+                  placeholder="كلمة المرور"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handlePasswordConfirm()}
+                  className="w-full rounded-2xl py-3.5 pl-10 pr-4 text-sm text-white placeholder-slate-600 outline-none"
+                  style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)' }}
+                  dir="rtl"
+                  autoFocus
+                />
+              </div>
+              {error && (
+                <div className="mb-3 rounded-xl px-3 py-2.5 text-xs text-red-400"
+                  style={{ background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.2)' }}>
+                  {error}
+                </div>
+              )}
+              <div className="flex flex-col gap-2">
+                <motion.button
+                  whileTap={{ scale: 0.97 }}
+                  onClick={handlePasswordConfirm}
+                  disabled={loading}
+                  className="w-full rounded-2xl py-3.5 text-sm font-bold text-white transition-all"
+                  style={{
+                    background: loading ? 'rgba(248,113,113,0.1)' : 'linear-gradient(135deg, #dc2626, #b91c1c)',
+                    boxShadow: loading ? 'none' : '0 8px 20px rgba(220,38,38,0.3)',
+                  }}
+                >
+                  {loading ? 'جارٍ الحذف...' : 'تأكيد الحذف'}
+                </motion.button>
+                <motion.button
+                  whileTap={{ scale: 0.97 }}
+                  onClick={onCancel}
+                  disabled={loading}
+                  className="w-full rounded-2xl py-3.5 text-sm font-semibold text-slate-400"
+                  style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
+                >
+                  إلغاء
+                </motion.button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </motion.div>
     </motion.div>
   );
@@ -147,10 +261,7 @@ const FONT_SIZES = ['small', 'medium', 'large'] as const;
 export default function SettingsPage() {
   const { settings, updateSettings, setPage } = useAppStore();
   const { user, deleteAccount } = useAuth();
-
   const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [deleteLoading, setDeleteLoading] = useState(false);
-  const [deleteError, setDeleteError] = useState('');
 
   const handleUpdateSettings = (updates: Partial<Settings>) => {
     updateSettings(updates);
@@ -161,34 +272,14 @@ export default function SettingsPage() {
     }
   };
 
-  const handleDeleteAccount = async () => {
-    setDeleteLoading(true);
-    setDeleteError('');
-    try {
-      await deleteAccount();
-      // onAuthStateChanged will reset store and navigate to login automatically
-    } catch (err: unknown) {
-      const code = (err as { code?: string })?.code ?? '';
-      if (code === 'auth/requires-recent-login') {
-        setDeleteError('لأسباب أمنية، يرجى تسجيل الخروج وإعادة الدخول ثم المحاولة مجدداً.');
-      } else if (code) {
-        setDeleteError(`فشل الحذف. (${code})`);
-      } else {
-        setDeleteError('فشل الحذف. حاول مجدداً.');
-      }
-      setDeleteLoading(false);
-    }
-  };
-
   return (
     <PageWrapper>
       <AnimatePresence>
         {showDeleteModal && (
           <DeleteAccountModal
-            onConfirm={handleDeleteAccount}
-            onCancel={() => { setShowDeleteModal(false); setDeleteError(''); }}
-            loading={deleteLoading}
-            error={deleteError}
+            onCancel={() => setShowDeleteModal(false)}
+            user={user}
+            deleteAccount={deleteAccount}
           />
         )}
       </AnimatePresence>
@@ -210,6 +301,7 @@ export default function SettingsPage() {
         </div>
 
         <div className="space-y-4">
+          {/* Appearance */}
           <div>
             <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Appearance</p>
             <GlassCard className="overflow-hidden divide-y divide-white/[0.04]">
@@ -228,10 +320,7 @@ export default function SettingsPage() {
               />
               <div className="px-4 py-3.5">
                 <div className="flex items-center gap-3 mb-3">
-                  <div
-                    className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
-                    style={{ background: 'rgba(245,158,11,0.1)' }}
-                  >
+                  <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl" style={{ background: 'rgba(245,158,11,0.1)' }}>
                     <Type size={16} style={{ color: '#f59e0b' }} />
                   </div>
                   <div className="flex-1">
@@ -261,15 +350,13 @@ export default function SettingsPage() {
             </GlassCard>
           </div>
 
+          {/* Study */}
           <div>
             <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Study</p>
             <GlassCard className="overflow-hidden divide-y divide-white/[0.04]">
               <div className="px-4 py-3.5">
                 <div className="flex items-center gap-3 mb-3">
-                  <div
-                    className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
-                    style={{ background: 'rgba(0,198,255,0.1)' }}
-                  >
+                  <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl" style={{ background: 'rgba(0,198,255,0.1)' }}>
                     <BookOpen size={16} style={{ color: '#00c6ff' }} />
                   </div>
                   <div className="flex-1">
@@ -298,6 +385,7 @@ export default function SettingsPage() {
             </GlassCard>
           </div>
 
+          {/* Language */}
           <div>
             <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Language</p>
             <GlassCard className="overflow-hidden divide-y divide-white/[0.04]">
@@ -313,14 +401,13 @@ export default function SettingsPage() {
                   <span className={`flex-1 text-sm ${settings.language === lang ? 'text-white font-medium' : 'text-slate-400'}`}>
                     {lang}
                   </span>
-                  {settings.language === lang && (
-                    <Check size={14} className="text-[#00c6ff]" />
-                  )}
+                  {settings.language === lang && <Check size={14} className="text-[#00c6ff]" />}
                 </motion.button>
               ))}
             </GlassCard>
           </div>
 
+          {/* Notifications */}
           <div>
             <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Notifications</p>
             <GlassCard className="overflow-hidden divide-y divide-white/[0.04]">
@@ -340,6 +427,7 @@ export default function SettingsPage() {
             </GlassCard>
           </div>
 
+          {/* Curriculum manager */}
           <div>
             <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-slate-500">المنهج الدراسي</p>
             <GlassCard className="overflow-hidden divide-y divide-white/[0.04]">
@@ -348,10 +436,7 @@ export default function SettingsPage() {
                 onClick={() => setPage('curriculum-manager')}
                 className="flex w-full items-center gap-3 px-4 py-3.5 text-left"
               >
-                <div
-                  className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
-                  style={{ background: 'rgba(0,198,255,0.1)' }}
-                >
+                <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl" style={{ background: 'rgba(0,198,255,0.1)' }}>
                   <Database size={16} style={{ color: '#00c6ff' }} />
                 </div>
                 <div className="flex-1 min-w-0">
@@ -363,27 +448,24 @@ export default function SettingsPage() {
             </GlassCard>
           </div>
 
+          {/* AI Integration */}
           <div>
             <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-slate-500">AI Integration</p>
             <GlassCard className="overflow-hidden divide-y divide-white/[0.04]">
               <div className="flex items-center gap-3 px-4 py-3.5">
-                <div
-                  className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
-                  style={{ background: 'rgba(245,158,11,0.1)' }}
-                >
+                <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl" style={{ background: 'rgba(245,158,11,0.1)' }}>
                   <Key size={16} style={{ color: '#f59e0b' }} />
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-white">Gemini AI</p>
                   <p className="text-[11px] text-slate-500">مفعّل عبر الخادم</p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 size={16} className="text-emerald-400" />
-                </div>
+                <CheckCircle2 size={16} className="text-emerald-400" />
               </div>
             </GlassCard>
           </div>
 
+          {/* About */}
           <div>
             <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-slate-500">About</p>
             <GlassCard className="overflow-hidden divide-y divide-white/[0.04]">
@@ -401,17 +483,16 @@ export default function SettingsPage() {
           {/* Danger Zone */}
           <div>
             <p className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-red-500/70">Danger Zone</p>
-            <GlassCard className="overflow-hidden"
-              style={{ border: '1px solid rgba(248,113,113,0.15)' } as React.CSSProperties}>
+            <GlassCard
+              className="overflow-hidden"
+              style={{ border: '1px solid rgba(248,113,113,0.15)' } as React.CSSProperties}
+            >
               <motion.button
                 whileTap={{ scale: 0.98 }}
                 onClick={() => setShowDeleteModal(true)}
                 className="flex w-full items-center gap-3 px-4 py-3.5 text-left"
               >
-                <div
-                  className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
-                  style={{ background: 'rgba(248,113,113,0.1)' }}
-                >
+                <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl" style={{ background: 'rgba(248,113,113,0.1)' }}>
                   <Trash2 size={16} className="text-red-400" />
                 </div>
                 <div className="flex-1 min-w-0">

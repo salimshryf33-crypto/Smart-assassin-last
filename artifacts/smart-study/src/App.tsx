@@ -1,4 +1,5 @@
-import { AnimatePresence } from 'framer-motion';
+import { useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import { useAppStore } from './store/useAppStore';
 import { useAuth } from './contexts/AuthContext';
 import BottomNav from './components/layout/BottomNav';
@@ -13,9 +14,11 @@ import SearchPage from './pages/SearchPage';
 import ProfilePage from './pages/ProfilePage';
 import SettingsPage from './pages/SettingsPage';
 import CurriculumManager from './pages/CurriculumManager';
-import { Brain } from 'lucide-react';
+import { Brain, MailWarning, X } from 'lucide-react';
 
 const NO_NAV_PAGES = new Set(['splash', 'profile-setup', 'login', 'curriculum-manager']);
+
+// ─── Loading Screen ───────────────────────────────────────────────────────────
 
 function LoadingScreen() {
   return (
@@ -48,34 +51,111 @@ function LoadingScreen() {
   );
 }
 
+// ─── Email Verification Banner ────────────────────────────────────────────────
+//
+// Shown only to email/password users whose address is not yet verified.
+// Google Sign-In users are always verified and never see this banner.
+// The app remains fully functional — verification is encouraged, not enforced.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+function EmailVerificationBanner() {
+  const { user, resendVerificationEmail } = useAuth();
+  const [dismissed, setDismissed] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+
+  const isEmailUser = user?.providerData[0]?.providerId === 'password';
+  if (!user || !isEmailUser || user.emailVerified || dismissed) return null;
+
+  const handleResend = async () => {
+    if (sending || sent) return;
+    setSending(true);
+    try {
+      await resendVerificationEmail();
+      setSent(true);
+    } catch {
+      // Error already logged in AuthContext; don't crash the banner
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, height: 0 }}
+      animate={{ opacity: 1, height: 'auto' }}
+      exit={{ opacity: 0, height: 0 }}
+      className="flex items-center gap-2.5 px-4 py-2.5 text-[11px] flex-shrink-0"
+      style={{
+        background: 'rgba(245,158,11,0.08)',
+        borderBottom: '1px solid rgba(245,158,11,0.15)',
+      }}
+    >
+      <MailWarning size={13} className="text-amber-400 flex-shrink-0" />
+      <span className="flex-1 text-amber-300/90 leading-relaxed" dir="rtl">
+        يرجى تأكيد بريدك الإلكتروني لتأمين حسابك
+      </span>
+      {sent ? (
+        <span className="text-emerald-400 font-medium flex-shrink-0">✓ تم الإرسال</span>
+      ) : (
+        <button
+          onClick={handleResend}
+          disabled={sending}
+          className="text-[#00c6ff] font-semibold flex-shrink-0 transition-opacity"
+          style={{ opacity: sending ? 0.5 : 1 }}
+        >
+          {sending ? '...' : 'إرسال'}
+        </button>
+      )}
+      <button
+        onClick={() => setDismissed(true)}
+        className="text-slate-600 flex-shrink-0 ml-0.5"
+        aria-label="dismiss"
+      >
+        <X size={12} />
+      </button>
+    </motion.div>
+  );
+}
+
+// ─── App Content (authenticated) ─────────────────────────────────────────────
+
 function AppContent() {
   const currentPage = useAppStore((s) => s.currentPage);
 
   const renderPage = () => {
     switch (currentPage) {
-      case 'splash': return <SplashScreen key="splash" />;
-      case 'profile-setup': return <ProfileSetupScreen key="profile-setup" />;
-      case 'home': return <HomeDashboard key="home" />;
-      case 'flashcards': return <FlashcardsPage key="flashcards" />;
-      case 'focus': return <FocusTimer key="focus" />;
-      case 'chat': return <AIChat key="chat" />;
-      case 'search': return <SearchPage key="search" />;
-      case 'profile': return <ProfilePage key="profile" />;
-      case 'settings': return <SettingsPage key="settings" />;
+      case 'splash':             return <SplashScreen key="splash" />;
+      case 'profile-setup':     return <ProfileSetupScreen key="profile-setup" />;
+      case 'home':              return <HomeDashboard key="home" />;
+      case 'flashcards':        return <FlashcardsPage key="flashcards" />;
+      case 'focus':             return <FocusTimer key="focus" />;
+      case 'chat':              return <AIChat key="chat" />;
+      case 'search':            return <SearchPage key="search" />;
+      case 'profile':           return <ProfilePage key="profile" />;
+      case 'settings':          return <SettingsPage key="settings" />;
       case 'curriculum-manager': return <CurriculumManager key="curriculum-manager" />;
-      default: return <HomeDashboard key="home" />;
+      default:                  return <HomeDashboard key="home" />;
     }
   };
 
   return (
-    <div className="relative max-w-[430px] mx-auto min-h-screen overflow-hidden">
-      <AnimatePresence mode="wait">
-        {renderPage()}
+    <div className="relative max-w-[430px] mx-auto min-h-screen overflow-hidden flex flex-col">
+      <AnimatePresence>
+        <EmailVerificationBanner />
       </AnimatePresence>
-      {!NO_NAV_PAGES.has(currentPage) && <BottomNav />}
+      <div className="flex-1 relative overflow-hidden">
+        <AnimatePresence mode="wait">
+          {renderPage()}
+        </AnimatePresence>
+        {!NO_NAV_PAGES.has(currentPage) && <BottomNav />}
+      </div>
     </div>
   );
 }
+
+// ─── Root App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
   const { user, loading } = useAuth();

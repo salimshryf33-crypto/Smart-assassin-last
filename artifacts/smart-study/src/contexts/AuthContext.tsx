@@ -11,6 +11,10 @@ import {
   signOut,
   updateProfile,
   deleteUser,
+  reauthenticateWithPopup,
+  reauthenticateWithCredential,
+  EmailAuthProvider,
+  sendEmailVerification,
 } from 'firebase/auth';
 import { auth, googleProvider } from '../lib/firebase';
 import {
@@ -25,6 +29,8 @@ import { subscribeToGamification, flushOfflineQueue } from '../lib/gamification'
 import { DEFAULT_DAILY_CHECKLIST } from '../lib/streakEngine';
 import { useAppStore } from '../store/useAppStore';
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
@@ -32,8 +38,22 @@ interface AuthContextValue {
   signInWithEmail: (email: string, password: string) => Promise<void>;
   signUpWithEmail: (email: string, password: string, name: string) => Promise<void>;
   logout: () => Promise<void>;
-  deleteAccount: () => Promise<void>;
+  /**
+   * Permanently deletes all Firestore data then deletes the Firebase Auth user.
+   * On `auth/requires-recent-login`:
+   *   - Google users: automatically triggers reauthenticateWithPopup then retries.
+   *   - Email users: throws `auth/needs-reauth-password` if no password supplied.
+   *                  Caller should collect the password and retry with it.
+   */
+  deleteAccount: (reauthPassword?: string) => Promise<void>;
+  /**
+   * Send / resend a verification email to the current email user.
+   * No-op (safe to call) for Google users.
+   */
+  resendVerificationEmail: () => Promise<void>;
 }
+
+// ─── Context ──────────────────────────────────────────────────────────────────
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
@@ -42,6 +62,8 @@ export function useAuth() {
   if (!ctx) throw new Error('useAuth must be used inside AuthProvider');
   return ctx;
 }
+
+// ─── Provider ─────────────────────────────────────────────────────────────────
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -72,7 +94,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (data.settings) {
         store.updateSettings(data.settings as Parameters<typeof store.updateSettings>[0]);
       }
-      // Hydrate dailyChecklist from Firestore — single source of truth
       if (data.dailyChecklist) {
         store.hydrateDailyChecklist({
           ...DEFAULT_DAILY_CHECKLIST,
@@ -106,8 +127,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     // Handle redirect result on initial load (fallback from signInWithRedirect).
-    // Must NOT be silently swallowed — log errors so auth/unauthorized-domain
-    // and similar failures are visible in the console.
+    // NOT silently swallowed — errors are logged so auth/unauthorized-domain is visible.
     getRedirectResult(auth)
       .then((result) => {
         if (result?.user) {
@@ -126,7 +146,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
-        console.log('[Auth] User signed in — uid:', firebaseUser.uid, '| provider:', firebaseUser.providerData[0]?.providerId);
+        console.log(
+          '[Auth] User signed in — uid:', firebaseUser.uid,
+          '| provider:', firebaseUser.providerData[0]?.providerId,
+          '| emailVerified:', firebaseUser.emailVerified
+        );
         setUser(firebaseUser);
         await initUserDocument(firebaseUser.uid, firebaseUser.displayName, firebaseUser.email);
         await setupRealtimeListeners(firebaseUser.uid);
@@ -145,6 +169,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // ─── Auth Actions ────────────────────────────────────────────────────────────
+
   const signInWithGoogle = async () => {
     try {
       console.log('[Auth] Starting Google sign-in (popup)...');
@@ -153,11 +179,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code ?? '';
       const message = (err as Error)?.message ?? String(err);
-      console.error(
-        '[Auth] signInWithPopup error — code:', code,
-        '| message:', message,
-        '| full:', err
-      );
+      console.error('[Auth] signInWithPopup error — code:', code, '| message:', message, '| full:', err);
       if (
         code === 'auth/popup-blocked' ||
         code === 'auth/popup-closed-by-user' ||
@@ -166,7 +188,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.log('[Auth] Popup blocked/closed — falling back to signInWithRedirect');
         await signInWithRedirect(auth, googleProvider);
       } else {
-        // Re-throw so LoginScreen can surface the correct code-based message
         throw err;
       }
     }
@@ -187,6 +208,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const cred = await createUserWithEmailAndPassword(auth, email, password);
       await updateProfile(cred.user, { displayName: name });
+      // Send verification email immediately after signup.
+      // Non-blocking: if it fails the account was still created successfully.
+      try {
+        await sendEmailVerification(cred.user);
+        console.log('[Auth] Verification email sent to:', email);
+      } catch (verifyErr) {
+        console.warn('[Auth] sendEmailVerification failed (non-fatal):', verifyErr);
+      }
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code ?? 'unknown';
       const message = (err as Error)?.message ?? String(err);
@@ -202,34 +231,101 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   /**
-   * Permanently delete the current user's account and all associated data.
-   * Requires the user to be recently signed in (Firebase re-auth policy).
-   * Order: delete Firestore data first → then delete Auth user.
+   * Resend a verification email to the current signed-in email user.
+   * Safe to call for Google users — exits immediately (they are always verified).
    */
-  const deleteAccount = async () => {
+  const resendVerificationEmail = async () => {
     const currentUser = auth.currentUser;
-    if (!currentUser) {
-      throw Object.assign(new Error('No authenticated user found'), { code: 'auth/no-current-user' });
-    }
-    const uid = currentUser.uid;
-    console.log('[Auth] deleteAccount — deleting Firestore data for uid:', uid);
-    cleanupListeners();
+    if (!currentUser) return;
+    const providerId = currentUser.providerData[0]?.providerId;
+    if (providerId !== 'password') return; // Google users don't need this
+    if (currentUser.emailVerified) return;
     try {
-      await deleteUserData(uid);
-      console.log('[Auth] deleteAccount — Firestore data deleted, deleting Auth user...');
-      await deleteUser(currentUser);
-      resetStore();
-      console.log('[Auth] deleteAccount — account fully deleted');
+      await sendEmailVerification(currentUser);
+      console.log('[Auth] Verification email resent to:', currentUser.email);
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code ?? 'unknown';
-      const message = (err as Error)?.message ?? String(err);
-      console.error('[Auth] deleteAccount error — code:', code, '| message:', message, '| full:', err);
+      console.error('[Auth] resendVerificationEmail error — code:', code, '| full:', err);
       throw err;
     }
   };
 
+  /**
+   * Permanently delete the current user's account and all associated Firestore data.
+   *
+   * Re-authentication handling (Firebase requires recent login for deleteUser):
+   * - Google users: reauthenticateWithPopup is called automatically, then deletion retries.
+   * - Email users: caller must supply `reauthPassword`. If omitted when required,
+   *   throws `auth/needs-reauth-password` as a signal to the UI to collect the password.
+   */
+  const deleteAccount = async (reauthPassword?: string) => {
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      throw Object.assign(new Error('No authenticated user found'), { code: 'auth/no-current-user' });
+    }
+
+    const uid = currentUser.uid;
+    const providerId = currentUser.providerData[0]?.providerId ?? 'password';
+    console.log('[Auth] deleteAccount — uid:', uid, '| provider:', providerId);
+
+    cleanupListeners();
+
+    const performDelete = async () => {
+      await deleteUserData(uid);
+      console.log('[Auth] deleteAccount — Firestore data purged');
+      await deleteUser(currentUser);
+      resetStore();
+      console.log('[Auth] deleteAccount — Auth user deleted, account fully removed');
+    };
+
+    try {
+      await performDelete();
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code ?? '';
+      console.error('[Auth] deleteAccount error — code:', code, '| full:', err);
+
+      if (code === 'auth/requires-recent-login') {
+        // ── Re-authenticate then retry ──────────────────────────────────────
+        if (providerId === 'google.com') {
+          console.log('[Auth] deleteAccount — re-authenticating via Google popup...');
+          await reauthenticateWithPopup(currentUser, googleProvider);
+          console.log('[Auth] deleteAccount — Google re-auth succeeded, retrying deletion...');
+        } else if (providerId === 'password') {
+          if (!reauthPassword) {
+            // Signal to the UI: collect the password and retry with it
+            throw Object.assign(
+              new Error('Password required for re-authentication'),
+              { code: 'auth/needs-reauth-password' }
+            );
+          }
+          const credential = EmailAuthProvider.credential(currentUser.email!, reauthPassword);
+          console.log('[Auth] deleteAccount — re-authenticating with email credential...');
+          await reauthenticateWithCredential(currentUser, credential);
+          console.log('[Auth] deleteAccount — email re-auth succeeded, retrying deletion...');
+        } else {
+          throw err;
+        }
+        // Retry after successful re-auth
+        await performDelete();
+      } else {
+        throw err;
+      }
+    }
+  };
+
   return (
-    <AuthContext.Provider value={{ user, loading, signInWithGoogle, signInWithEmail, signUpWithEmail, logout, deleteAccount }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        loading,
+        signInWithGoogle,
+        signInWithEmail,
+        signUpWithEmail,
+        logout,
+        deleteAccount,
+        resendVerificationEmail,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );
