@@ -26,11 +26,16 @@ export interface CurriculumDocument {
   filename: string;
   totalPages: number;
   chunkCount: number;
-  status: 'queued' | 'processing' | 'done' | 'error';
+  status: 'queued' | 'processing' | 'ocr_running' | 'done' | 'error';
   errorMessage?: string;
   uploadedAt: number;
   processedAt?: number;
   docType?: 'book' | 'note' | 'exam';
+  // ─── Extraction quality metadata ─────────────────────────────────────────
+  extractionMethod?: 'text' | 'virtual' | 'ocr';
+  extractedChars?: number;
+  avgCharsPerPage?: number;
+  extractedPages?: number;
 }
 
 const DATA_DIR = path.join(process.cwd(), 'data', 'curriculum');

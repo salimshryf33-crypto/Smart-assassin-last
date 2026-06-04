@@ -7,11 +7,15 @@ export interface CurriculumDocMeta {
   filename: string;
   totalPages: number;
   chunkCount: number;
-  status: 'queued' | 'processing' | 'done' | 'error';
+  status: 'queued' | 'processing' | 'ocr_running' | 'done' | 'error';
   errorMessage?: string;
   uploadedAt: number;
   processedAt?: number;
   docType?: 'book' | 'note' | 'exam';
+  extractionMethod?: 'text' | 'virtual' | 'ocr';
+  extractedChars?: number;
+  avgCharsPerPage?: number;
+  extractedPages?: number;
 }
 
 export interface CurriculumChunk {
@@ -30,9 +34,15 @@ export interface CurriculumChunk {
 export interface JobStatus {
   jobId: string;
   docId: string;
-  status: 'queued' | 'processing' | 'done' | 'error';
+  status: 'queued' | 'processing' | 'ocr_running' | 'done' | 'error';
   progress: { current: number; total: number };
-  result?: { totalPages: number; chunkCount: number };
+  result?: {
+    totalPages: number;
+    chunkCount: number;
+    extractionMethod?: 'text' | 'virtual' | 'ocr';
+    extractedChars?: number;
+    avgCharsPerPage?: number;
+  };
   error?: string;
 }
 

@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Upload, Trash2, BookOpen, CheckCircle2, AlertCircle,
   Loader2, ChevronLeft, Database, FileText, Clock,
-  StickyNote, GraduationCap,
+  StickyNote, GraduationCap, ScanLine, Zap,
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import {
@@ -47,7 +47,8 @@ type UploadState =
   | { phase: 'idle' }
   | { phase: 'uploading' }
   | { phase: 'processing'; jobId: string; progress: { current: number; total: number } }
-  | { phase: 'done'; result: { totalPages: number; chunkCount: number } }
+  | { phase: 'ocr_running'; jobId: string }
+  | { phase: 'done'; result: { totalPages: number; chunkCount: number; extractionMethod?: 'text' | 'virtual' | 'ocr'; extractedChars?: number; avgCharsPerPage?: number } }
   | { phase: 'error'; message: string };
 
 export default function CurriculumManager() {
@@ -97,6 +98,8 @@ export default function CurriculumManager() {
         const status: JobStatus = await getJobStatus(jobId);
         if (status.status === 'processing' || status.status === 'queued') {
           setUploadState({ phase: 'processing', jobId, progress: status.progress });
+        } else if (status.status === 'ocr_running') {
+          setUploadState({ phase: 'ocr_running', jobId });
         } else if (status.status === 'done' && status.result) {
           stopPolling();
           setUploadState({ phase: 'done', result: status.result });
@@ -150,12 +153,17 @@ export default function CurriculumManager() {
     ).find((s) => s.id === subjectId)?.label ?? subjectId;
   };
 
-  const isUploading = uploadState.phase === 'uploading' || uploadState.phase === 'processing';
+  const isUploading =
+    uploadState.phase === 'uploading' ||
+    uploadState.phase === 'processing' ||
+    uploadState.phase === 'ocr_running';
 
   const progressPercent =
     uploadState.phase === 'processing' && uploadState.progress.total > 0
       ? Math.round((uploadState.progress.current / uploadState.progress.total) * 100)
-      : uploadState.phase === 'uploading' ? 5 : 0;
+      : uploadState.phase === 'ocr_running' ? 65   // indeterminate mid-point
+      : uploadState.phase === 'uploading'   ? 5
+      : 0;
 
   const activeDocTypeOption = DOC_TYPE_OPTIONS.find((d) => d.value === docType)!;
 
@@ -328,7 +336,7 @@ export default function CurriculumManager() {
 
           {/* Status / Progress */}
           <AnimatePresence>
-            {(uploadState.phase === 'uploading' || uploadState.phase === 'processing') && (
+            {(uploadState.phase === 'uploading' || uploadState.phase === 'processing' || uploadState.phase === 'ocr_running') && (
               <motion.div
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: 'auto' }}
@@ -337,17 +345,32 @@ export default function CurriculumManager() {
               >
                 <div className="flex items-center justify-between text-xs text-slate-400">
                   <span className="flex items-center gap-1.5">
-                    <Loader2 size={12} className="animate-spin text-[#00c6ff]" />
-                    {uploadState.phase === 'uploading' ? 'جاري الرفع...' : 'الخادم يعالج الملف...'}
+                    {uploadState.phase === 'ocr_running' ? (
+                      <ScanLine size={12} className="animate-pulse text-amber-400" />
+                    ) : (
+                      <Loader2 size={12} className="animate-spin text-[#00c6ff]" />
+                    )}
+                    {uploadState.phase === 'uploading'
+                      ? 'جاري الرفع...'
+                      : uploadState.phase === 'ocr_running'
+                        ? 'النص متفرق — OCR يستخرج الصفحات...'
+                        : 'الخادم يعالج الملف...'}
                   </span>
                   {uploadState.phase === 'processing' && uploadState.progress.total > 0 && (
                     <span>{uploadState.progress.current} / {uploadState.progress.total} صفحة</span>
+                  )}
+                  {uploadState.phase === 'ocr_running' && (
+                    <span className="text-amber-400/70">Gemini Vision</span>
                   )}
                 </div>
                 <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.06)' }}>
                   <motion.div
                     className="h-full rounded-full"
-                    style={{ background: `linear-gradient(90deg, ${activeDocTypeOption.color}99, ${activeDocTypeOption.color})` }}
+                    style={{
+                      background: uploadState.phase === 'ocr_running'
+                        ? 'linear-gradient(90deg, rgba(245,158,11,0.7), #f59e0b)'
+                        : `linear-gradient(90deg, ${activeDocTypeOption.color}99, ${activeDocTypeOption.color})`,
+                    }}
                     animate={{ width: `${progressPercent || 20}%` }}
                     transition={{ duration: 0.5 }}
                   />
@@ -358,11 +381,32 @@ export default function CurriculumManager() {
             {uploadState.phase === 'done' && (
               <motion.div
                 initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
-                className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm"
-                style={{ background: 'rgba(52,211,153,0.08)', border: '1px solid rgba(52,211,153,0.2)', color: '#34d399' }}
+                className="rounded-xl px-3 py-2.5 space-y-1.5"
+                style={{ background: 'rgba(52,211,153,0.08)', border: '1px solid rgba(52,211,153,0.2)' }}
               >
-                <CheckCircle2 size={14} />
-                تم! {uploadState.result.totalPages} صفحة → {uploadState.result.chunkCount} قسم. Sage جاهز للتدريس.
+                <div className="flex items-center gap-2 text-sm" style={{ color: '#34d399' }}>
+                  <CheckCircle2 size={14} />
+                  تم! {uploadState.result.totalPages} صفحة → {uploadState.result.chunkCount} قسم. Sage جاهز للتدريس.
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {uploadState.result.extractionMethod && (
+                    <span
+                      className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium"
+                      style={uploadState.result.extractionMethod === 'ocr'
+                        ? { background: 'rgba(245,158,11,0.12)', color: '#fbbf24', border: '1px solid rgba(245,158,11,0.2)' }
+                        : { background: 'rgba(0,198,255,0.08)', color: '#7dd3fc', border: '1px solid rgba(0,198,255,0.15)' }
+                      }
+                    >
+                      {uploadState.result.extractionMethod === 'ocr' ? <ScanLine size={9} /> : <Zap size={9} />}
+                      {uploadState.result.extractionMethod === 'ocr' ? 'OCR' : uploadState.result.extractionMethod === 'virtual' ? 'Virtual Split' : 'Text'}
+                    </span>
+                  )}
+                  {uploadState.result.avgCharsPerPage != null && (
+                    <span className="text-[10px] text-slate-500">
+                      ~{uploadState.result.avgCharsPerPage} حرف/صفحة
+                    </span>
+                  )}
+                </div>
               </motion.div>
             )}
 
@@ -442,13 +486,35 @@ export default function CurriculumManager() {
                         {subjectLabel(doc.country, doc.grade, doc.subject)}
                       </span>
                       {doc.status === 'done' && (
-                        <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(52,211,153,0.08)', color: '#34d399' }}>
-                          {doc.totalPages} صفحة · {doc.chunkCount} قسم
-                        </span>
+                        <>
+                          <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(52,211,153,0.08)', color: '#34d399' }}>
+                            {doc.totalPages} صفحة · {doc.chunkCount} قسم
+                          </span>
+                          {doc.extractionMethod && (
+                            <span
+                              className="flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[10px]"
+                              title={`${doc.extractedChars?.toLocaleString()} حرف مستخرج · ${doc.avgCharsPerPage ?? '?'} حرف/صفحة`}
+                              style={doc.extractionMethod === 'ocr'
+                                ? { background: 'rgba(245,158,11,0.1)', color: '#fbbf24', border: '1px solid rgba(245,158,11,0.18)' }
+                                : { background: 'rgba(0,198,255,0.07)', color: '#7dd3fc', border: '1px solid rgba(0,198,255,0.12)' }
+                              }
+                            >
+                              {doc.extractionMethod === 'ocr' ? <ScanLine size={9} /> : <Zap size={9} />}
+                              {doc.extractionMethod === 'ocr' ? 'OCR' : doc.extractionMethod === 'virtual' ? 'Virtual' : 'Text'}
+                              {doc.avgCharsPerPage != null && ` · ${doc.avgCharsPerPage}/p`}
+                            </span>
+                          )}
+                        </>
                       )}
-                      {doc.status === 'processing' && (
+                      {(doc.status === 'processing' || doc.status === 'queued') && (
                         <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(251,191,36,0.08)', color: '#fbbf24' }}>
                           جاري المعالجة...
+                        </span>
+                      )}
+                      {doc.status === 'ocr_running' && (
+                        <span className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(245,158,11,0.1)', color: '#f59e0b' }}>
+                          <ScanLine size={9} className="animate-pulse" />
+                          OCR يعمل...
                         </span>
                       )}
                       {doc.status === 'error' && (

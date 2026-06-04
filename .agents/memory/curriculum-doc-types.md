@@ -1,18 +1,37 @@
 ---
-name: Curriculum Doc Types & OCR
-description: docType field architecture and Gemini OCR fallback for scanned PDFs
+name: Curriculum Doc Types, OCR, and Extraction Quality
+description: docType field, extraction quality validation thresholds, OCR fallback, and extraction metadata
 ---
 
-## Rule
-`docType?: 'book' | 'note' | 'exam'` is optional on `CurriculumDocument` (storage), `Job` (queue), and `CurriculumDocMeta` (frontend API types). Defaults to `'book'` when absent for backward compatibility with pre-existing index.json entries.
+## docType Field
+`docType?: 'book' | 'note' | 'exam'` is optional on `CurriculumDocument` (storage), `Job` (queue), and `CurriculumDocMeta` (frontend types). Defaults to `'book'` for backward compatibility.
 
-**Why:** Curriculum management was expanded to support notes and exam papers in addition to textbooks, each with distinct UI differentiation (color, icon).
+**How to apply:** Pass docType through: routes → enqueueJob → upsertDocMeta (all status transitions: queued/processing/ocr_running/done/error).
 
-**How to apply:** Any new upload endpoint or doc-management UI must accept and pass `docType` through: routes → enqueueJob → upsertDocMeta (all 3 calls: queued/processing/done/error). Frontend uploadCurriculumPdf() includes docType in FormData.
+## Extraction Quality Validation
+Every stage in `pdfExtractor.ts` now validates quality BEFORE exiting. A stage must pass ALL three thresholds or falls through to the next stage / OCR.
 
-## OCR Stage 5
-`pdfExtractor.ts` has a 5-stage extraction pipeline. Stage 5 (Gemini Vision OCR) activates only when Stages 1–4 all produce 0 usable pages (scanned/image-only PDF). Uses `gemini-1.5-flash` inline PDF (base64), limited to 20MB. Page separator: `=== الصفحة N ===`. Falls back to virtual-page split if no page markers returned.
+| Threshold constant | Value | Purpose |
+|--------------------|-------|---------|
+| `MIN_AVG_CHARS_PER_PAGE` | 150 | avg extracted chars per page |
+| `MIN_TOTAL_CHARS` | 2,000 | absolute minimum regardless of page count |
+| `MIN_NON_WS_DENSITY` | 0.20 | non-whitespace fraction of total chars |
 
-**Why:** Egyptian/Sudanese scanned ministry PDFs are common. Text-layer extraction fails for them silently.
+**Why:** A scanned PDF may extract page numbers/headers only (~50 chars/page) and pass a naive `pageTexts.length > 1` check, silently bypassing OCR. Quality validation catches this.
 
-**How to apply:** No extra dependencies needed — uses `process.env.GEMINI_API_KEY` directly via fetch. If key is absent, Stage 5 is skipped and job errors with a clear "image-based PDF" message.
+**How to apply:** `measureQuality(pages)` returns `ExtractionQuality` with `.passed` bool. Every stage (pagerender, form-feed, virtual-split) checks `.passed` before returning. OCR is attempted when all three text stages fail or produce sparse output.
+
+## OCR Pipeline
+- Triggered by `onOcrStart` callback passed to `extractPdf()` from the queue
+- Queue sets job/doc status to `'ocr_running'` (new status) when OCR begins
+- Uses `gemini-1.5-flash` inline PDF base64, max 20MB
+- Page separator: `=== الصفحة N ===`; falls back to virtual-split if no markers
+
+## Extraction Metadata Stored Per Doc
+`CurriculumDocument` now stores: `extractionMethod ('text'|'virtual'|'ocr')`, `extractedChars`, `avgCharsPerPage`, `extractedPages`. Written to `index.json` on successful completion. Shown in `CurriculumManager` UI as method badge + chars/page label.
+
+## Status Values
+`'queued' | 'processing' | 'ocr_running' | 'done' | 'error'`  — both in `CurriculumDocument` and `JobStatus`.
+
+## Known Legacy Issue
+The Physics doc (`14aacefb`) was indexed before quality validation existed: 218 pages, 49.7 chars/page (sparse). Original PDF was deleted after processing. User must re-upload the Physics PDF to trigger OCR reindexing.

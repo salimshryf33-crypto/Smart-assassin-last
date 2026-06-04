@@ -12,7 +12,7 @@ import {
 import { extractPdf } from './pdfExtractor';
 import { chunkText } from './chunker';
 
-export type JobStatus = 'queued' | 'processing' | 'done' | 'error';
+export type JobStatus = 'queued' | 'processing' | 'ocr_running' | 'done' | 'error';
 
 export interface Job {
   id: string;
@@ -26,7 +26,14 @@ export interface Job {
   docType?: 'book' | 'note' | 'exam';
   status: JobStatus;
   progress: { current: number; total: number };
-  result?: { totalPages: number; chunkCount: number; searchable: boolean };
+  result?: {
+    totalPages: number;
+    chunkCount: number;
+    searchable: boolean;
+    extractionMethod: 'text' | 'virtual' | 'ocr';
+    extractedChars: number;
+    avgCharsPerPage: number;
+  };
   error?: string;
   createdAt: number;
 }
@@ -73,7 +80,7 @@ export function getAllJobs(): Job[] {
   return Array.from(jobs.values()).sort((a, b) => b.createdAt - a.createdAt);
 }
 
-// ─── Re-trigger indexing for an existing doc (e.g. after a failed job) ────────
+// ─── Re-trigger indexing for an existing doc ──────────────────────────────────
 export async function reindexDoc(docId: string, filePath: string, meta: {
   country: string; grade: string; subject: string; track: string; filename: string;
 }): Promise<Job> {
@@ -119,20 +126,55 @@ async function processNext() {
   logger.info({ jobId, docId: job.docId, filename: job.filename }, 'Processing curriculum PDF');
 
   try {
-    // ── Stage 1: PDF extraction ─────────────────────────────────────────────
-    const { pageTexts, totalPages } = await extractPdf(job.filePath, (current, total) => {
-      job.progress = { current, total };
-    });
+    // ── Stage 1: PDF extraction with quality validation ──────────────────────
+    const extraction = await extractPdf(
+      job.filePath,
+      (current, total) => { job.progress = { current, total }; },
+      // onOcrStart — fires when text extraction failed quality check and OCR begins
+      () => {
+        logger.info({ jobId, docId: job.docId }, 'Text extraction sparse — switching to OCR');
+        job.status = 'ocr_running';
+        upsertDocMeta({
+          id: job.docId,
+          country: job.country,
+          grade: job.grade,
+          subject: job.subject,
+          track: job.track,
+          filename: job.filename,
+          totalPages: 0,
+          chunkCount: 0,
+          status: 'ocr_running',
+          uploadedAt: job.createdAt,
+          docType: job.docType,
+        });
+      }
+    );
 
-    // ── Stage 2: Validate extraction ────────────────────────────────────────
+    const { pageTexts, totalPages, extractionMethod, quality } = extraction;
+
+    logger.info(
+      {
+        jobId,
+        extractionMethod,
+        extractedPages: quality.pageCount,
+        extractedChars: quality.totalChars,
+        avgCharsPerPage: Math.round(quality.avgCharsPerPage),
+        nonWsDensity: quality.nonWsDensity.toFixed(2),
+        qualityPassed: quality.passed,
+      },
+      'PDF extraction complete'
+    );
+
+    // ── Stage 2: Validate extraction produced usable content ─────────────────
     if (pageTexts.length === 0) {
       throw new Error(
-        `PDF extraction produced 0 pages. The file may be image-based (scanned) ` +
-        `with no text layer. totalPages reported by parser: ${totalPages}.`
+        `PDF extraction produced 0 usable pages after all stages (including OCR). ` +
+        `File may be encrypted, blank, or the OCR service is unavailable. ` +
+        `totalPages=${totalPages}, extractionMethod=${extractionMethod}`
       );
     }
 
-    // ── Stage 3: Chunk generation ───────────────────────────────────────────
+    // ── Stage 3: Chunk generation ────────────────────────────────────────────
     const chunks: CurriculumChunk[] = chunkText(pageTexts, {
       docId: job.docId,
       country: job.country,
@@ -140,10 +182,10 @@ async function processNext() {
       subject: job.subject,
     });
 
-    // ── Stage 4: Validate chunk count ───────────────────────────────────────
+    // ── Stage 4: Validate chunk count ────────────────────────────────────────
     if (chunks.length === 0) {
       throw new Error(
-        `Chunking produced 0 chunks from ${pageTexts.length} pages. ` +
+        `Chunking produced 0 chunks from ${pageTexts.length} pages (method=${extractionMethod}). ` +
         `All pages may be empty or contain only whitespace.`
       );
     }
@@ -151,16 +193,16 @@ async function processNext() {
     const expectedMinChunks = Math.max(1, Math.floor(pageTexts.length / 20));
     if (chunks.length < expectedMinChunks) {
       logger.warn(
-        { jobId, chunkCount: chunks.length, pageTexts: pageTexts.length, expectedMinChunks },
-        'Unusually low chunk count — PDF may have sparse extractable text'
+        { jobId, chunkCount: chunks.length, pageCount: pageTexts.length, expectedMinChunks },
+        'Unusually low chunk count after quality-validated extraction'
       );
     }
 
-    // ── Stage 5: Save chunks + invalidate any stale in-memory state ─────────
+    // ── Stage 5: Save chunks + invalidate stale cache ────────────────────────
     saveChunks(job.docId, chunks);
     invalidateChunkCache(job.docId);
 
-    // ── Stage 6: Register doc as done in the index ──────────────────────────
+    // ── Stage 6: Register doc as done with full extraction metadata ──────────
     upsertDocMeta({
       id: job.docId,
       country: job.country,
@@ -174,16 +216,17 @@ async function processNext() {
       uploadedAt: job.createdAt,
       processedAt: Date.now(),
       docType: job.docType,
+      extractionMethod,
+      extractedChars: quality.totalChars,
+      avgCharsPerPage: Math.round(quality.avgCharsPerPage),
+      extractedPages: quality.pageCount,
     });
 
-    // ── Stage 7: Verify searchability ───────────────────────────────────────
-    // Use the same LEVEL_GRADE_MAP logic that searchChunks uses:
-    // pass the grade directly and rely on the [gradeOrLevel] fallback.
+    // ── Stage 7: Verify searchability ────────────────────────────────────────
     const verifyChunks = searchChunks(job.country, job.grade, job.subject, '', 1);
     const searchable = verifyChunks.length > 0;
 
     if (!searchable) {
-      // This should never happen if save + upsert succeeded, but guard anyway.
       throw new Error(
         `Post-indexing searchability check failed: ` +
         `0 chunks returned for country=${job.country} grade=${job.grade} subject=${job.subject}. ` +
@@ -192,12 +235,27 @@ async function processNext() {
     }
 
     job.status = 'done';
-    job.result = { totalPages, chunkCount: chunks.length, searchable: true };
+    job.result = {
+      totalPages,
+      chunkCount: chunks.length,
+      searchable: true,
+      extractionMethod,
+      extractedChars: quality.totalChars,
+      avgCharsPerPage: Math.round(quality.avgCharsPerPage),
+    };
     job.progress = { current: totalPages, total: totalPages };
 
     logger.info(
-      { jobId, totalPages, chunkCount: chunks.length, searchable: true },
-      'Curriculum PDF processed and verified searchable'
+      {
+        jobId,
+        totalPages,
+        chunkCount: chunks.length,
+        extractionMethod,
+        extractedChars: quality.totalChars,
+        avgCharsPerPage: Math.round(quality.avgCharsPerPage),
+        searchable: true,
+      },
+      'Curriculum PDF processed, quality-validated, and verified searchable'
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -221,7 +279,6 @@ async function processNext() {
       docType: job.docType,
     });
   } finally {
-    // Clean up temp file
     try { if (fs.existsSync(job.filePath)) fs.unlinkSync(job.filePath); } catch { /* ignore */ }
     isProcessing = false;
     if (queue.length > 0) setImmediate(processNext);
