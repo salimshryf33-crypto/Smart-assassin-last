@@ -13,17 +13,21 @@
     "processedAt": 1779963082445
   },
   {
-    "id": "b9f22985-d0a3-4001-b001-f41af40603e4",
+    "id": "48c186f1-d856-4f8a-912b-4afa973fb13e",
     "country": "sudan",
     "grade": "grade12",
     "subject": "physics",
     "track": "",
-    "filename": "ÙÙØ²ÙØ§Ø¡ Ø«Ø§ÙØ« Ø«Ø§ÙÙÙ - Ø§ÙØ³ÙØ¯Ø§Ù.pdf",
-    "totalPages": 0,
-    "chunkCount": 0,
-    "status": "error",
-    "errorMessage": "PDF extraction produced 0 usable pages after all stages (including OCR). File may be encrypted, blank, or the OCR service is unavailable. totalPages=218, extractionMethod=ocr",
-    "uploadedAt": 1780584324655,
-    "docType": "book"
+    "filename": "ÙÙØ²ÙØ§Ø¡ 3.pdf",
+    "totalPages": 215,
+    "chunkCount": 3,
+    "status": "done",
+    "uploadedAt": 1780586926727,
+    "processedAt": 1780587217610,
+    "docType": "book",
+    "extractionMethod": "ocr",
+    "extractedChars": 228247,
+    "avgCharsPerPage": 19021,
+    "extractedPages": 12
   }
 ]
