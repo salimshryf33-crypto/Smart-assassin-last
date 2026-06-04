@@ -55,11 +55,19 @@ const MIN_PAGE_CHARS = 10;
 
 // ─── Quality helpers ──────────────────────────────────────────────────────────
 
-function measureQuality(pages: string[]): ExtractionQuality {
+// pdfPageCount — when provided, overrides the denominator for avgCharsPerPage.
+// Critical for Stages 1-3: if only 6 virtual chunks are produced from a 218-page
+// PDF, dividing by 6 gives a misleadingly high 1880 chars/chunk while the true
+// density per actual page is 11 279 / 218 = 51.7 — which correctly fails.
+// Always pass `totalPages` (from result.numpages) to all text-layer stages.
+function measureQuality(pages: string[], pdfPageCount?: number): ExtractionQuality {
   const totalChars = pages.reduce((s, p) => s + p.length, 0);
   const nonWsChars = pages.reduce((s, p) => s + p.replace(/\s/g, '').length, 0);
   const pageCount  = pages.length;
-  const avgCharsPerPage = pageCount > 0 ? totalChars / pageCount : 0;
+  // Use the larger of actual PDF pages vs. output pages as denominator.
+  // This prevents inflated density when only a fraction of pages had text.
+  const denominator     = (pdfPageCount && pdfPageCount > pageCount) ? pdfPageCount : pageCount;
+  const avgCharsPerPage = denominator > 0 ? totalChars / denominator : 0;
   const nonWsDensity    = totalChars > 0 ? nonWsChars / totalChars : 0;
 
   const passed =
@@ -149,19 +157,20 @@ export async function extractPdf(
     .filter((t) => t.trim().length >= MIN_PAGE_CHARS);
 
   if (renderedPages.length > 1) {
-    const q1 = measureQuality(renderedPages);
+    const q1 = measureQuality(renderedPages, totalPages);
     if (q1.passed) {
       console.log(
         `[pdfExtractor] Stage 1 OK — ${renderedPages.length} pages via pagerender` +
         ` | ${q1.totalChars} chars | ${q1.avgCharsPerPage.toFixed(0)} chars/page` +
-        ` | density=${q1.nonWsDensity.toFixed(2)} (file="${filePath}")`
+        ` (denom=${totalPages} PDF pages) | density=${q1.nonWsDensity.toFixed(2)} (file="${filePath}")`
       );
       return { pageTexts: renderedPages, totalPages, extractionMethod: 'text', quality: q1 };
     }
     console.warn(
-      `[pdfExtractor] Stage 1 SPARSE — ${renderedPages.length} pages but` +
-      ` only ${q1.avgCharsPerPage.toFixed(0)} chars/page (min=${MIN_AVG_CHARS_PER_PAGE})` +
-      `, density=${q1.nonWsDensity.toFixed(2)}, total=${q1.totalChars} — falling through to OCR`
+      `[pdfExtractor] Stage 1 SPARSE — ${renderedPages.length} rendered pages,` +
+      ` ${q1.avgCharsPerPage.toFixed(0)} chars/page over ${totalPages} PDF pages` +
+      ` (min=${MIN_AVG_CHARS_PER_PAGE}), density=${q1.nonWsDensity.toFixed(2)},` +
+      ` total=${q1.totalChars} — falling through to OCR`
     );
   }
 
@@ -174,17 +183,18 @@ export async function extractPdf(
     .filter((p) => p.length >= MIN_PAGE_CHARS);
 
   if (ffPages.length > 1) {
-    const q2 = measureQuality(ffPages);
+    const q2 = measureQuality(ffPages, totalPages);
     if (q2.passed) {
       console.log(
         `[pdfExtractor] Stage 2 OK — ${ffPages.length} pages via form-feed` +
-        ` | ${q2.totalChars} chars | ${q2.avgCharsPerPage.toFixed(0)} chars/page (file="${filePath}")`
+        ` | ${q2.totalChars} chars | ${q2.avgCharsPerPage.toFixed(0)} chars/page` +
+        ` (denom=${totalPages} PDF pages) (file="${filePath}")`
       );
       return { pageTexts: ffPages, totalPages, extractionMethod: 'text', quality: q2 };
     }
     console.warn(
-      `[pdfExtractor] Stage 2 SPARSE — ${ffPages.length} form-feed pages but` +
-      ` only ${q2.avgCharsPerPage.toFixed(0)} chars/page — falling through to OCR`
+      `[pdfExtractor] Stage 2 SPARSE — ${ffPages.length} form-feed pages,` +
+      ` ${q2.avgCharsPerPage.toFixed(0)} chars/page over ${totalPages} PDF pages — falling through to OCR`
     );
   }
 
@@ -206,17 +216,22 @@ export async function extractPdf(
     }
 
     if (virtualPages.length > 0) {
-      const q3 = measureQuality(virtualPages);
+      // Pass totalPages as denominator — the critical fix.
+      // Without this, 11 279 chars / 6 virtual chunks = 1 880 (falsely passes).
+      // With this,    11 279 chars / 218 PDF pages    =    51 (correctly fails → OCR).
+      const q3 = measureQuality(virtualPages, totalPages);
       if (q3.passed) {
         console.log(
           `[pdfExtractor] Stage 3 OK — ${virtualPages.length} virtual pages` +
-          ` | ${q3.totalChars} chars | ${q3.avgCharsPerPage.toFixed(0)} chars/page (file="${filePath}")`
+          ` | ${q3.totalChars} chars | ${q3.avgCharsPerPage.toFixed(0)} chars/page` +
+          ` (denom=${totalPages} PDF pages) (file="${filePath}")`
         );
         return { pageTexts: virtualPages, totalPages, extractionMethod: 'virtual', quality: q3 };
       }
       console.warn(
-        `[pdfExtractor] Stage 3 SPARSE — virtual split produced ${virtualPages.length} pages` +
-        ` but only ${q3.avgCharsPerPage.toFixed(0)} chars/page — falling through to OCR`
+        `[pdfExtractor] Stage 3 SPARSE — virtual split: ${virtualPages.length} chunks,` +
+        ` ${q3.totalChars} chars / ${totalPages} PDF pages =` +
+        ` ${q3.avgCharsPerPage.toFixed(1)} chars/page (min=${MIN_AVG_CHARS_PER_PAGE}) — falling through to OCR`
       );
     }
   }
