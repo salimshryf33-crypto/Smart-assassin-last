@@ -25,5 +25,23 @@
     "uploadedAt": 1780524193262,
     "processedAt": 1780524194887,
     "docType": "book"
+  },
+  {
+    "id": "66e498e6-3ff3-4455-8e37-2d12a2ce211f",
+    "country": "sudan",
+    "grade": "grade12",
+    "subject": "physics",
+    "track": "",
+    "filename": "ÙÙØ²ÙØ§Ø¡ Ø«Ø§ÙØ« Ø«Ø§ÙÙÙ - Ø§ÙØ³ÙØ¯Ø§Ù.pdf",
+    "totalPages": 218,
+    "chunkCount": 2,
+    "status": "done",
+    "uploadedAt": 1780572330782,
+    "processedAt": 1780572332279,
+    "docType": "book",
+    "extractionMethod": "virtual",
+    "extractedChars": 11279,
+    "avgCharsPerPage": 1880,
+    "extractedPages": 6
   }
 ]
