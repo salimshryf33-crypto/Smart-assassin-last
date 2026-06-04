@@ -11,5 +11,19 @@
     "status": "done",
     "uploadedAt": 1779963081730,
     "processedAt": 1779963082445
+  },
+  {
+    "id": "b9f22985-d0a3-4001-b001-f41af40603e4",
+    "country": "sudan",
+    "grade": "grade12",
+    "subject": "physics",
+    "track": "",
+    "filename": "ÙÙØ²ÙØ§Ø¡ Ø«Ø§ÙØ« Ø«Ø§ÙÙÙ - Ø§ÙØ³ÙØ¯Ø§Ù.pdf",
+    "totalPages": 0,
+    "chunkCount": 0,
+    "status": "error",
+    "errorMessage": "PDF extraction produced 0 usable pages after all stages (including OCR). File may be encrypted, blank, or the OCR service is unavailable. totalPages=218, extractionMethod=ocr",
+    "uploadedAt": 1780584324655,
+    "docType": "book"
   }
 ]
