@@ -282,6 +282,20 @@ export async function extractPdf(
 }
 
 // ─── Gemini Vision OCR ────────────────────────────────────────────────────────
+//
+// Model selection criteria (verified against live /v1beta/models list):
+//   • Must appear in generateContent-capable models from ModelService.ListModels
+//   • Must support inline_data with mime_type "application/pdf" (all Gemini 2.x+ do)
+//   • inputTokenLimit ≥ 1 048 576  (large PDFs base64-encoded can exceed 500k tokens)
+//   • outputTokenLimit ≥ 65 536    (full Arabic textbook extraction)
+//   • Stable release preferred (not -preview)
+//
+// Live check (2026-06-04):  gemini-1.5-flash      → ❌ 404 NOT FOUND
+//                           gemini-1.5-flash-latest → ❌ 404 NOT FOUND
+//                           gemini-2.5-flash        → ✅ stable, 1M in / 65k out
+//
+// To change model: update OCR_MODEL below — it is the only place.
+const OCR_MODEL = 'gemini-2.5-flash';
 
 async function ocrPdfWithGemini(
   filePath: string,
@@ -299,8 +313,10 @@ async function ocrPdfWithGemini(
   const base64 = buffer.toString('base64');
   const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
 
+  console.log(`[pdfExtractor] OCR — model=${OCR_MODEL} file="${filePath}" size=${(buffer.length/1024).toFixed(0)}KB`);
+
   const response = await fetch(
-    `${GEMINI_BASE}/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+    `${GEMINI_BASE}/v1beta/models/${OCR_MODEL}:generateContent?key=${apiKey}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

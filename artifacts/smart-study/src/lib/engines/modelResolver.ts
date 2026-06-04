@@ -6,7 +6,9 @@
  * Caches the resolved model in memory after first successful lookup.
  */
 
-const DEFAULT_MODEL = 'gemini-1.5-flash-latest';
+// gemini-1.5-flash-latest is no longer available in the API.
+// gemini-2.5-flash is the current stable replacement (1M token input, 65k output).
+const DEFAULT_MODEL = 'gemini-2.5-flash';
 
 let _cachedModel: string | null = null;
 

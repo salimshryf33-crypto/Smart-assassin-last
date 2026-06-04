@@ -144,7 +144,9 @@ async function discoverModel(): Promise<string> {
       }
     }
   } catch { /* fall through */ }
-  cachedModel = 'gemini-1.5-flash-latest';
+  // gemini-1.5-flash-latest removed from API — gemini-2.5-flash is the
+  // current stable model with 1M token input and generateContent support.
+  cachedModel = 'gemini-2.5-flash';
   return cachedModel;
 }
 
