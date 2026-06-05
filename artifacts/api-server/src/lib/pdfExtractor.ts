@@ -116,6 +116,32 @@ export function fixCharSeparatedArabic(text: string): string {
   return result.join(' ');
 }
 
+// ─── OCR repetition filter ────────────────────────────────────────────────────
+//
+// Gemini sometimes hallucinates by repeating the same line dozens of times
+// when it cannot decode a formula or diagram (e.g. equation pages in Physics).
+// Strategy: if any single line appears more than MAX_LINE_REPEATS times in a
+// page-section, collapse all consecutive duplicates down to one occurrence.
+//
+const MAX_LINE_REPEATS = 3;
+
+export function filterRepetitiveLines(text: string): string {
+  const lines = text.split('\n');
+  const out: string[] = [];
+  const lineCount = new Map<string, number>();
+
+  for (const line of lines) {
+    const key = line.trim();
+    if (!key) { out.push(line); continue; }
+    const count = (lineCount.get(key) ?? 0) + 1;
+    lineCount.set(key, count);
+    if (count <= MAX_LINE_REPEATS) out.push(line);
+    // else: silently drop the excess duplicate
+  }
+
+  return out.join('\n');
+}
+
 // ─── Main extractor ───────────────────────────────────────────────────────────
 
 export async function extractPdf(
@@ -358,12 +384,12 @@ async function ocrPdfWithGemini(
 
   const pages = text
     .split(/===\s*(?:الصفحة|Page)\s*\d+\s*===/i)
-    .map((p: string) => fixCharSeparatedArabic(p.trim()))
+    .map((p: string) => filterRepetitiveLines(fixCharSeparatedArabic(p.trim())))
     .filter((p: string) => p.length >= MIN_PAGE_CHARS);
 
   if (pages.length > 0) return pages;
 
-  const blob = fixCharSeparatedArabic(text.trim());
+  const blob = filterRepetitiveLines(fixCharSeparatedArabic(text.trim()));
   if (blob.length < MIN_PAGE_CHARS) throw new Error('Gemini OCR text too short to be useful.');
 
   const virtualPages: string[] = [];

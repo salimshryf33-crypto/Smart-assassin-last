@@ -16,7 +16,6 @@ function isChapterHeading(text: string): boolean {
 
 function extractKeywords(text: string): string[] {
   const freq: Record<string, number> = {};
-  // Tokenize AFTER normalization so keywords are stored normalized
   tokenize(text).forEach((w) => {
     freq[w] = (freq[w] ?? 0) + 1;
   });
@@ -35,7 +34,38 @@ interface ChunkMeta {
 
 // 4 pages per chunk — fine-grained enough for topic-level retrieval
 const PAGES_PER_CHUNK = 4;
+
+// Maximum chars per stored chunk.
+// When a page-group exceeds this limit the text is SPLIT into sub-chunks
+// (not truncated) so no content is ever lost.
 const MAX_CHUNK_CHARS = 5000;
+
+/**
+ * Split a long text into sub-chunks of at most MAX_CHUNK_CHARS each,
+ * breaking at word boundaries where possible.
+ */
+function splitIntoSubChunks(text: string, maxChars: number): string[] {
+  if (text.length <= maxChars) return [text];
+
+  const parts: string[] = [];
+  let pos = 0;
+
+  while (pos < text.length) {
+    let end = Math.min(pos + maxChars, text.length);
+
+    // Try to break at whitespace so we don't cut mid-word
+    if (end < text.length) {
+      const spaceIdx = text.lastIndexOf(' ', end);
+      if (spaceIdx > pos + maxChars / 2) end = spaceIdx + 1;
+    }
+
+    const slice = text.slice(pos, end).trim();
+    if (slice.length > 0) parts.push(slice);
+    pos = end;
+  }
+
+  return parts;
+}
 
 export function chunkText(pageTexts: string[], meta: ChunkMeta): CurriculumChunk[] {
   const chunks: CurriculumChunk[] = [];
@@ -54,27 +84,29 @@ export function chunkText(pageTexts: string[], meta: ChunkMeta): CurriculumChunk
     const startPage = i + 1;
     const endPage = Math.min(i + PAGES_PER_CHUNK, pageTexts.length);
 
-    const content =
-      combined.length > MAX_CHUNK_CHARS
-        ? combined.slice(0, MAX_CHUNK_CHARS).replace(/\s+\S*$/, '')
-        : combined;
+    // Keywords are extracted from the FULL combined text regardless of how
+    // many sub-chunks it gets split into — gives every sub-chunk the full
+    // topic signal from the original page group.
+    const keywords = extractKeywords(combined);
 
-    // Pre-compute normalized content at index time — avoids per-query normalization
-    const contentNormalized = normalizeArabic(content);
+    // SPLIT instead of truncate: all content is preserved
+    const subChunks = splitIntoSubChunks(combined, MAX_CHUNK_CHARS);
 
-    chunks.push({
-      id: uuidv4(),
-      docId: meta.docId,
-      country: meta.country,
-      grade: meta.grade,
-      subject: meta.subject,
-      chapter: currentChapter,
-      pageRange: `${startPage}-${endPage}`,
-      chunkIndex: chunkIndex++,
-      content,
-      contentNormalized,
-      keywords: extractKeywords(combined), // keywords from full combined text
-    });
+    for (const content of subChunks) {
+      chunks.push({
+        id: uuidv4(),
+        docId: meta.docId,
+        country: meta.country,
+        grade: meta.grade,
+        subject: meta.subject,
+        chapter: currentChapter,
+        pageRange: `${startPage}-${endPage}`,
+        chunkIndex: chunkIndex++,
+        content,
+        contentNormalized: normalizeArabic(content),
+        keywords,
+      });
+    }
   }
 
   return chunks;
