@@ -1,43 +1,48 @@
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 const require = createRequire(import.meta.url);
-
-// pdf-parse@1.x is CJS — must be externalized from esbuild (see build.mjs).
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const pdfParse = require('pdf-parse') as (buffer: Buffer, opts?: Record<string, unknown>) => Promise<{ numpages: number; text: string }>;
 
-// ─── Quality thresholds ────────────────────────────────────────────────────────
-//
-// A PDF passes quality validation only when ALL three conditions are met.
-// If any condition fails the extractor falls through to the next stage (or OCR).
-//
-//   MIN_AVG_CHARS_PER_PAGE  — average extracted chars per PDF page.
-//     Typical Arabic textbook page:  800–2 500 chars.
-//     Scanned page with only headers/footers: < 100 chars.
-//     Threshold set at 150 to catch near-empty extractions while allowing
-//     sparsely-formatted pages (e.g. diagrams with captions).
-//
-//   MIN_TOTAL_CHARS  — absolute floor regardless of page count.
-//     Guards against very short PDFs (e.g. a single cover page).
-//
-//   MIN_NON_WS_DENSITY  — fraction of extracted chars that are non-whitespace.
-//     A page full of spaces/newlines scores 0 here.
-//     Threshold 0.20 means at least 1 in 5 chars must be real content.
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-export const MIN_AVG_CHARS_PER_PAGE = 150;   // chars / page
-export const MIN_TOTAL_CHARS        = 2_000;  // absolute minimum
-export const MIN_NON_WS_DENSITY     = 0.20;   // non-whitespace fraction
+// Text-layer quality thresholds (Stages 1–3 ONLY — never applied to OCR output)
+export const MIN_AVG_CHARS_PER_PAGE = 150;
+export const MIN_TOTAL_CHARS        = 2_000;
+export const MIN_NON_WS_DENSITY     = 0.20;
+
+// Virtual page size used when splitting a text blob into page-like chunks
+const VIRTUAL_PAGE_CHARS = 2_000;
+
+// Minimum chars for a page to be considered non-empty
+const MIN_PAGE_CHARS = 10;
+
+// Image OCR settings
+const OCR_MODEL      = 'gemini-2.5-flash';
+const OCR_DPI        = 150;   // DPI for pdftoppm rendering
+const BATCH_SIZE     = 8;     // pages per Gemini Vision call
+const OCR_MAX_OUTPUT = 16384; // maxOutputTokens per batch
+
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 export type ExtractionMethod = 'text' | 'virtual' | 'ocr';
 
 export interface ExtractionQuality {
   totalChars: number;
   nonWsChars: number;
-  nonWsDensity: number;    // nonWsChars / totalChars  (0–1)
-  pageCount: number;       // pages that passed MIN_PAGE_CHARS filter
-  avgCharsPerPage: number; // totalChars / pageCount
-  passed: boolean;         // true when all three thresholds are met
+  nonWsDensity: number;
+  pageCount: number;
+  avgCharsPerPage: number;
+  passed: boolean;
 }
 
 export interface ExtractionResult {
@@ -47,26 +52,13 @@ export interface ExtractionResult {
   quality: ExtractionQuality;
 }
 
-// Virtual page size when the PDF produces a single text blob
-const VIRTUAL_PAGE_CHARS = 2_000;
+// ─── Quality measurement (text layers only) ───────────────────────────────────
 
-// Minimum chars for a page to be considered non-empty during page filtering
-const MIN_PAGE_CHARS = 10;
-
-// ─── Quality helpers ──────────────────────────────────────────────────────────
-
-// pdfPageCount — when provided, overrides the denominator for avgCharsPerPage.
-// Critical for Stages 1-3: if only 6 virtual chunks are produced from a 218-page
-// PDF, dividing by 6 gives a misleadingly high 1880 chars/chunk while the true
-// density per actual page is 11 279 / 218 = 51.7 — which correctly fails.
-// Always pass `totalPages` (from result.numpages) to all text-layer stages.
 function measureQuality(pages: string[], pdfPageCount?: number): ExtractionQuality {
-  const totalChars = pages.reduce((s, p) => s + p.length, 0);
-  const nonWsChars = pages.reduce((s, p) => s + p.replace(/\s/g, '').length, 0);
-  const pageCount  = pages.length;
-  // Use the larger of actual PDF pages vs. output pages as denominator.
-  // This prevents inflated density when only a fraction of pages had text.
-  const denominator     = (pdfPageCount && pdfPageCount > pageCount) ? pdfPageCount : pageCount;
+  const totalChars  = pages.reduce((s, p) => s + p.length, 0);
+  const nonWsChars  = pages.reduce((s, p) => s + p.replace(/\s/g, '').length, 0);
+  const pageCount   = pages.length;
+  const denominator = (pdfPageCount && pdfPageCount > pageCount) ? pdfPageCount : pageCount;
   const avgCharsPerPage = denominator > 0 ? totalChars / denominator : 0;
   const nonWsDensity    = totalChars > 0 ? nonWsChars / totalChars : 0;
 
@@ -78,12 +70,10 @@ function measureQuality(pages: string[], pdfPageCount?: number): ExtractionQuali
   return { totalChars, nonWsChars, nonWsDensity, pageCount, avgCharsPerPage, passed };
 }
 
-// ─── RTL character-separation fix ─────────────────────────────────────────────
-// Some Arabic PDFs store text with pdfjs emitting each Unicode code point as a
-// separate item: "ة ي ن ا د و س ل ا" instead of "السودانية".
+// ─── RTL character-separation fix ────────────────────────────────────────────
 
 const ARABIC_CHAR_RE = /^[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]$/;
-const MAX_WORD_LEN = 10;
+const MAX_WORD_LEN   = 10;
 
 export function fixCharSeparatedArabic(text: string): string {
   const tokens = text.split(/\s+/).filter(Boolean);
@@ -117,12 +107,9 @@ export function fixCharSeparatedArabic(text: string): string {
 }
 
 // ─── OCR repetition filter ────────────────────────────────────────────────────
-//
-// Gemini sometimes hallucinates by repeating the same line dozens of times
-// when it cannot decode a formula or diagram (e.g. equation pages in Physics).
-// Strategy: if any single line appears more than MAX_LINE_REPEATS times in a
-// page-section, collapse all consecutive duplicates down to one occurrence.
-//
+// Gemini sometimes hallucinates by repeating the same line many times.
+// Collapse any line that appears more than MAX_LINE_REPEATS times in a block.
+
 const MAX_LINE_REPEATS = 3;
 
 export function filterRepetitiveLines(text: string): string {
@@ -136,10 +123,25 @@ export function filterRepetitiveLines(text: string): string {
     const count = (lineCount.get(key) ?? 0) + 1;
     lineCount.set(key, count);
     if (count <= MAX_LINE_REPEATS) out.push(line);
-    // else: silently drop the excess duplicate
   }
 
   return out.join('\n');
+}
+
+// ─── Virtual page splitter ────────────────────────────────────────────────────
+
+function splitToVirtualPages(blob: string): string[] {
+  const pages: string[] = [];
+  for (let i = 0; i < blob.length; i += VIRTUAL_PAGE_CHARS) {
+    let end = Math.min(i + VIRTUAL_PAGE_CHARS, blob.length);
+    if (end < blob.length) {
+      const spaceIdx = blob.lastIndexOf(' ', end);
+      if (spaceIdx > i + VIRTUAL_PAGE_CHARS / 2) end = spaceIdx + 1;
+    }
+    const slice = blob.slice(i, end).trim();
+    if (slice.length >= MIN_PAGE_CHARS) pages.push(slice);
+  }
+  return pages;
 }
 
 // ─── Main extractor ───────────────────────────────────────────────────────────
@@ -153,255 +155,314 @@ export async function extractPdf(
   onProgress?.(0, 0);
 
   const pageTexts: string[] = [];
+  let totalPages = 0;
 
-  const result = await pdfParse(buffer, {
-    max: 0,
-    pagerender: (pageData: unknown) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const page = pageData as any;
-      return page
-        .getTextContent({ normalizeWhitespace: true })
-        .then((content: { items: Array<{ str: string }> }) => {
-          const text = content.items
-            .map((item) => item.str)
-            .join(' ')
-            .replace(/\s{2,}/g, ' ')
-            .trim();
-          pageTexts.push(text || ' ');
-          onProgress?.(pageTexts.length, Math.max(pageTexts.length, 1));
-          return text;
-        });
-    },
-  });
+  // ── Stages 1–3: native text-layer extraction (wrapped — errors fall through to OCR) ──
+  try {
+    const result = await pdfParse(buffer, {
+      max: 0,
+      pagerender: (pageData: unknown) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const page = pageData as any;
+        return page
+          .getTextContent({ normalizeWhitespace: true })
+          .then((content: { items: Array<{ str: string }> }) => {
+            const text = content.items
+              .map((item) => item.str)
+              .join(' ')
+              .replace(/\s{2,}/g, ' ')
+              .trim();
+            pageTexts.push(text || ' ');
+            onProgress?.(pageTexts.length, Math.max(pageTexts.length, 1));
+            return text;
+          });
+      },
+    });
 
-  const totalPages = result.numpages || pageTexts.length;
-  onProgress?.(totalPages, totalPages);
+    totalPages = result.numpages || pageTexts.length;
+    onProgress?.(totalPages, totalPages);
 
-  // ── Stage 1: per-page render ─────────────────────────────────────────────
-  const renderedPages = pageTexts
-    .map(fixCharSeparatedArabic)
-    .filter((t) => t.trim().length >= MIN_PAGE_CHARS);
+    // ── Stage 1: per-page render ────────────────────────────────────────────
+    const renderedPages = pageTexts
+      .map(fixCharSeparatedArabic)
+      .filter((t) => t.trim().length >= MIN_PAGE_CHARS);
 
-  if (renderedPages.length > 1) {
-    const q1 = measureQuality(renderedPages, totalPages);
-    if (q1.passed) {
-      console.log(
-        `[pdfExtractor] Stage 1 OK — ${renderedPages.length} pages via pagerender` +
-        ` | ${q1.totalChars} chars | ${q1.avgCharsPerPage.toFixed(0)} chars/page` +
-        ` (denom=${totalPages} PDF pages) | density=${q1.nonWsDensity.toFixed(2)} (file="${filePath}")`
-      );
-      return { pageTexts: renderedPages, totalPages, extractionMethod: 'text', quality: q1 };
+    if (renderedPages.length > 1) {
+      const q1 = measureQuality(renderedPages, totalPages);
+      if (q1.passed) {
+        console.log(`[pdfExtractor] Stage 1 OK — ${renderedPages.length} pages | ${q1.totalChars} chars | ${q1.avgCharsPerPage.toFixed(0)} chars/page`);
+        return { pageTexts: renderedPages, totalPages, extractionMethod: 'text', quality: q1 };
+      }
+      console.warn(`[pdfExtractor] Stage 1 SPARSE — ${q1.avgCharsPerPage.toFixed(0)} chars/page (min=${MIN_AVG_CHARS_PER_PAGE}), density=${q1.nonWsDensity.toFixed(2)}`);
     }
+
+    // ── Stage 2: form-feed split ────────────────────────────────────────────
+    const ffPages = result.text
+      .split('\f')
+      .map((p) => fixCharSeparatedArabic(p.replace(/\s{3,}/g, '\n').replace(/[ \t]{2,}/g, ' ').trim()))
+      .filter((p) => p.length >= MIN_PAGE_CHARS);
+
+    if (ffPages.length > 1) {
+      const q2 = measureQuality(ffPages, totalPages);
+      if (q2.passed) {
+        console.log(`[pdfExtractor] Stage 2 OK — ${ffPages.length} pages | ${q2.totalChars} chars | ${q2.avgCharsPerPage.toFixed(0)} chars/page`);
+        return { pageTexts: ffPages, totalPages, extractionMethod: 'text', quality: q2 };
+      }
+      console.warn(`[pdfExtractor] Stage 2 SPARSE — ${q2.avgCharsPerPage.toFixed(0)} chars/page`);
+    }
+
+    // ── Stage 3: virtual page split ─────────────────────────────────────────
+    const rawBlob = fixCharSeparatedArabic(
+      (ffPages[0] || pageTexts[0] || result.text || '').trim()
+    );
+
+    if (rawBlob.length >= MIN_TOTAL_CHARS) {
+      const virtualPages = splitToVirtualPages(rawBlob);
+      if (virtualPages.length > 0) {
+        const q3 = measureQuality(virtualPages, totalPages);
+        if (q3.passed) {
+          console.log(`[pdfExtractor] Stage 3 OK — ${virtualPages.length} virtual pages | ${q3.totalChars} chars | ${q3.avgCharsPerPage.toFixed(0)} chars/page`);
+          return { pageTexts: virtualPages, totalPages, extractionMethod: 'virtual', quality: q3 };
+        }
+        console.warn(`[pdfExtractor] Stage 3 SPARSE — ${q3.avgCharsPerPage.toFixed(1)} chars/page`);
+      }
+    }
+  } catch (parseErr) {
+    // pdf-parse can throw on malformed/encrypted PDFs — do not crash.
+    // Fall through to image-based OCR which works directly on the rendered pixels.
     console.warn(
-      `[pdfExtractor] Stage 1 SPARSE — ${renderedPages.length} rendered pages,` +
-      ` ${q1.avgCharsPerPage.toFixed(0)} chars/page over ${totalPages} PDF pages` +
-      ` (min=${MIN_AVG_CHARS_PER_PAGE}), density=${q1.nonWsDensity.toFixed(2)},` +
-      ` total=${q1.totalChars} — falling through to OCR`
+      `[pdfExtractor] pdf-parse error (falling through to image OCR): ` +
+      (parseErr instanceof Error ? parseErr.message : String(parseErr))
     );
   }
 
-  // ── Stage 2: form-feed split fallback ─────────────────────────────────────
-  const ffPages = result.text
-    .split('\f')
-    .map((p) => fixCharSeparatedArabic(
-      p.replace(/\s{3,}/g, '\n').replace(/[ \t]{2,}/g, ' ').trim()
-    ))
-    .filter((p) => p.length >= MIN_PAGE_CHARS);
-
-  if (ffPages.length > 1) {
-    const q2 = measureQuality(ffPages, totalPages);
-    if (q2.passed) {
-      console.log(
-        `[pdfExtractor] Stage 2 OK — ${ffPages.length} pages via form-feed` +
-        ` | ${q2.totalChars} chars | ${q2.avgCharsPerPage.toFixed(0)} chars/page` +
-        ` (denom=${totalPages} PDF pages) (file="${filePath}")`
-      );
-      return { pageTexts: ffPages, totalPages, extractionMethod: 'text', quality: q2 };
-    }
-    console.warn(
-      `[pdfExtractor] Stage 2 SPARSE — ${ffPages.length} form-feed pages,` +
-      ` ${q2.avgCharsPerPage.toFixed(0)} chars/page over ${totalPages} PDF pages — falling through to OCR`
-    );
-  }
-
-  // ── Stage 3: virtual page split ───────────────────────────────────────────
-  const rawBlob = fixCharSeparatedArabic(
-    (ffPages[0] || pageTexts[0] || result.text || '').trim()
-  );
-
-  if (rawBlob.length >= MIN_TOTAL_CHARS) {
-    const virtualPages: string[] = [];
-    for (let i = 0; i < rawBlob.length; i += VIRTUAL_PAGE_CHARS) {
-      let end = Math.min(i + VIRTUAL_PAGE_CHARS, rawBlob.length);
-      if (end < rawBlob.length) {
-        const spaceIdx = rawBlob.lastIndexOf(' ', end);
-        if (spaceIdx > i + VIRTUAL_PAGE_CHARS / 2) end = spaceIdx + 1;
-      }
-      const slice = rawBlob.slice(i, end).trim();
-      if (slice.length >= MIN_PAGE_CHARS) virtualPages.push(slice);
-    }
-
-    if (virtualPages.length > 0) {
-      // Pass totalPages as denominator — the critical fix.
-      // Without this, 11 279 chars / 6 virtual chunks = 1 880 (falsely passes).
-      // With this,    11 279 chars / 218 PDF pages    =    51 (correctly fails → OCR).
-      const q3 = measureQuality(virtualPages, totalPages);
-      if (q3.passed) {
-        console.log(
-          `[pdfExtractor] Stage 3 OK — ${virtualPages.length} virtual pages` +
-          ` | ${q3.totalChars} chars | ${q3.avgCharsPerPage.toFixed(0)} chars/page` +
-          ` (denom=${totalPages} PDF pages) (file="${filePath}")`
-        );
-        return { pageTexts: virtualPages, totalPages, extractionMethod: 'virtual', quality: q3 };
-      }
-      console.warn(
-        `[pdfExtractor] Stage 3 SPARSE — virtual split: ${virtualPages.length} chunks,` +
-        ` ${q3.totalChars} chars / ${totalPages} PDF pages =` +
-        ` ${q3.avgCharsPerPage.toFixed(1)} chars/page (min=${MIN_AVG_CHARS_PER_PAGE}) — falling through to OCR`
-      );
-    }
-  }
-
-  // ── Stage 4 / 5: Gemini Vision OCR for scanned PDFs ─────────────────────
-  console.warn(
-    `[pdfExtractor] All text-layer stages failed or produced sparse results for "${filePath}"` +
-    ` (totalPages=${totalPages}). Attempting Gemini Vision OCR...`
-  );
+  // ── Stage 4: Image-based OCR via pdftoppm + Gemini Vision ────────────────
+  console.warn(`[pdfExtractor] Text-layer stages failed for "${filePath}" (totalPages=${totalPages}). Starting image OCR...`);
 
   const apiKey = process.env.GEMINI_API_KEY;
-  if (apiKey) {
-    onOcrStart?.();
-    try {
-      const ocrPages = await ocrPdfWithGemini(filePath, buffer, apiKey);
-      if (ocrPages.length > 0) {
-        const qOcr = measureQuality(ocrPages);
-        console.log(
-          `[pdfExtractor] OCR OK — ${ocrPages.length} pages extracted` +
-          ` | ${qOcr.totalChars} chars | ${qOcr.avgCharsPerPage.toFixed(0)} chars/page` +
-          ` (file="${filePath}")`
-        );
-        return {
-          pageTexts: ocrPages,
-          totalPages: Math.max(totalPages, ocrPages.length),
-          extractionMethod: 'ocr',
-          quality: qOcr,
-        };
-      }
-    } catch (ocrErr) {
-      console.warn(
-        `[pdfExtractor] OCR failed for "${filePath}": ` +
-        (ocrErr instanceof Error ? ocrErr.message : String(ocrErr))
-      );
-    }
-  } else {
-    console.warn(`[pdfExtractor] No GEMINI_API_KEY — OCR unavailable for "${filePath}"`);
+  if (!apiKey) {
+    console.error('[pdfExtractor] No GEMINI_API_KEY — image OCR unavailable');
+    const qFailed = measureQuality([]);
+    return { pageTexts: [], totalPages, extractionMethod: 'ocr', quality: qFailed };
   }
 
-  // ── Complete failure ─────────────────────────────────────────────────────
-  console.error(
-    `[pdfExtractor] All extraction stages failed for "${filePath}". ` +
-    `PDF is image-based and OCR produced no usable text.`
-  );
+  onOcrStart?.();
+
+  try {
+    const ocrPages = await ocrPdfViaImages(filePath, totalPages, apiKey, onProgress);
+
+    const qOcr = measureQuality(ocrPages);
+
+    // ── CRITICAL: Accept OCR output if totalChars > 0. ──────────────────────
+    // No avgCharsPerPage / density gates for OCR — they are meaningless for
+    // image-based extraction where page grouping is virtual.
+    if (qOcr.totalChars > 0) {
+      console.log(
+        `[pdfExtractor] Image OCR OK — ${ocrPages.length} virtual pages` +
+        ` | ${qOcr.totalChars} chars extracted`
+      );
+      return {
+        pageTexts: ocrPages,
+        totalPages: Math.max(totalPages, ocrPages.length),
+        extractionMethod: 'ocr',
+        quality: qOcr,
+      };
+    }
+
+    console.error('[pdfExtractor] Image OCR produced 0 characters');
+  } catch (ocrErr) {
+    console.error(
+      '[pdfExtractor] Image OCR failed:',
+      ocrErr instanceof Error ? ocrErr.message : String(ocrErr)
+    );
+  }
 
   const qFailed = measureQuality([]);
   return { pageTexts: [], totalPages, extractionMethod: 'ocr', quality: qFailed };
 }
 
-// ─── Gemini Vision OCR ────────────────────────────────────────────────────────
-//
-// Model selection criteria (verified against live /v1beta/models list):
-//   • Must appear in generateContent-capable models from ModelService.ListModels
-//   • Must support inline_data with mime_type "application/pdf" (all Gemini 2.x+ do)
-//   • inputTokenLimit ≥ 1 048 576  (large PDFs base64-encoded can exceed 500k tokens)
-//   • outputTokenLimit ≥ 65 536    (full Arabic textbook extraction)
-//   • Stable release preferred (not -preview)
-//
-// Live check (2026-06-04):  gemini-1.5-flash      → ❌ 404 NOT FOUND
-//                           gemini-1.5-flash-latest → ❌ 404 NOT FOUND
-//                           gemini-2.5-flash        → ✅ stable, 1M in / 65k out
-//
-// To change model: update OCR_MODEL below — it is the only place.
-const OCR_MODEL = 'gemini-2.5-flash';
+// ─── Image-based OCR: pdftoppm → PNG → Gemini Vision ─────────────────────────
 
-async function ocrPdfWithGemini(
+async function ocrPdfViaImages(
   filePath: string,
-  buffer: Buffer,
-  apiKey: string
+  totalPages: number,
+  apiKey: string,
+  onProgress?: (current: number, total: number) => void
 ): Promise<string[]> {
-  const MAX_INLINE_BYTES = 20 * 1024 * 1024;
-  if (buffer.length > MAX_INLINE_BYTES) {
-    throw new Error(
-      `PDF size ${(buffer.length / 1024 / 1024).toFixed(1)} MB exceeds 20 MB inline OCR limit. ` +
-      `Please use a smaller file or a version with a text layer.`
-    );
+
+  // Temp dir for rendered PNG images (cleaned up after each batch)
+  const imgDir = path.join(os.tmpdir(), `sage_ocr_${Date.now()}_${Math.random().toString(36).slice(2)}`);
+  fs.mkdirSync(imgDir, { recursive: true });
+
+  const allBatchTexts: string[] = [];
+  const pagesTotal = totalPages > 0 ? totalPages : 1;
+
+  try {
+    // Process pages in batches of BATCH_SIZE
+    for (let pageStart = 1; pageStart <= pagesTotal; pageStart += BATCH_SIZE) {
+      const pageEnd = Math.min(pageStart + BATCH_SIZE - 1, pagesTotal);
+
+      onProgress?.(pageStart - 1, pagesTotal);
+      console.log(`[pdfExtractor] OCR batch: pages ${pageStart}–${pageEnd} of ${pagesTotal}`);
+
+      // Render this batch of pages to PNG
+      let imagePaths: string[] = [];
+      try {
+        imagePaths = await renderPageBatch(filePath, imgDir, pageStart, pageEnd);
+      } catch (renderErr) {
+        console.warn(
+          `[pdfExtractor] pdftoppm failed for pages ${pageStart}–${pageEnd}:`,
+          renderErr instanceof Error ? renderErr.message : String(renderErr)
+        );
+        continue;
+      }
+
+      if (imagePaths.length === 0) {
+        console.warn(`[pdfExtractor] No images rendered for pages ${pageStart}–${pageEnd}`);
+        continue;
+      }
+
+      // Run Gemini Vision OCR on this batch
+      let batchText = '';
+      try {
+        batchText = await ocrImageBatch(imagePaths, apiKey);
+      } catch (batchErr) {
+        console.warn(
+          `[pdfExtractor] Batch OCR failed for pages ${pageStart}–${pageEnd}, retrying page-by-page:`,
+          batchErr instanceof Error ? batchErr.message : String(batchErr)
+        );
+
+        // Fallback: retry each page individually
+        for (let idx = 0; idx < imagePaths.length; idx++) {
+          try {
+            const pageText = await ocrImageBatch([imagePaths[idx]], apiKey);
+            if (pageText.trim()) batchText += '\n' + pageText;
+          } catch (pageErr) {
+            console.warn(
+              `[pdfExtractor] Single-page OCR failed for page ${pageStart + idx}:`,
+              pageErr instanceof Error ? pageErr.message : String(pageErr)
+            );
+          }
+        }
+      }
+
+      // Clean up rendered images immediately to save disk space
+      for (const img of imagePaths) {
+        try { fs.unlinkSync(img); } catch { /* ignore */ }
+      }
+
+      const cleaned = filterRepetitiveLines(fixCharSeparatedArabic(batchText.trim()));
+      if (cleaned.length >= MIN_PAGE_CHARS) {
+        allBatchTexts.push(cleaned);
+      }
+
+      onProgress?.(pageEnd, pagesTotal);
+    }
+  } finally {
+    // Remove temp dir
+    try { fs.rmSync(imgDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 
-  const base64 = buffer.toString('base64');
-  const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
+  if (allBatchTexts.length === 0) return [];
 
-  console.log(`[pdfExtractor] OCR — model=${OCR_MODEL} file="${filePath}" size=${(buffer.length/1024).toFixed(0)}KB`);
+  // Split each batch blob into virtual pages so the chunker gets granular input
+  const pageTexts: string[] = [];
+  for (const blob of allBatchTexts) {
+    pageTexts.push(...splitToVirtualPages(blob));
+  }
+
+  return pageTexts;
+}
+
+// ─── pdftoppm page renderer ───────────────────────────────────────────────────
+
+async function renderPageBatch(
+  filePath: string,
+  imgDir: string,
+  firstPage: number,
+  lastPage: number
+): Promise<string[]> {
+  const prefix = path.join(imgDir, `p${firstPage}`);
+
+  await execFileAsync(
+    'pdftoppm',
+    [
+      '-png',
+      '-r', String(OCR_DPI),
+      '-f', String(firstPage),
+      '-l', String(lastPage),
+      filePath,
+      prefix,
+    ],
+    { timeout: 120_000 }  // 2 min per batch
+  );
+
+  // pdftoppm names files: <prefix>-1.png, <prefix>-2.png or <prefix>-001.png
+  return fs.readdirSync(imgDir)
+    .filter((f) => f.startsWith(`p${firstPage}`) && f.endsWith('.png'))
+    .sort()
+    .map((f) => path.join(imgDir, f));
+}
+
+// ─── Gemini Vision batch OCR ──────────────────────────────────────────────────
+
+async function ocrImageBatch(
+  imagePaths: string[],
+  apiKey: string
+): Promise<string> {
+  // Build image parts from PNG files
+  const imageParts = imagePaths.map((p) => ({
+    inline_data: {
+      mime_type: 'image/png' as const,
+      data: fs.readFileSync(p).toString('base64'),
+    },
+  }));
+
+  const prompt =
+    'أنت نظام OCR متخصص. مهمتك استخراج النص من الصور المرفقة.\n' +
+    'القواعد:\n' +
+    '- اكتب النص كما يظهر في الصورة تماماً بدون تغيير\n' +
+    '- للمعادلات الرياضية: اكتبها بصيغة نصية وضعية (مثال: F = m × a)\n' +
+    '- للجداول: اكتب محتواها سطراً سطراً\n' +
+    '- لا تضف أي شرح أو تعليق أو عناوين من عندك\n' +
+    '- إذا كانت صورة غير واضحة اكتب ما تستطيع قراءته';
+
+  const body = {
+    contents: [
+      {
+        parts: [
+          { text: prompt },
+          ...imageParts,
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature: 0,
+      maxOutputTokens: OCR_MAX_OUTPUT,
+    },
+  };
 
   const response = await fetch(
     `${GEMINI_BASE}/v1beta/models/${OCR_MODEL}:generateContent?key=${apiKey}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            {
-              text:
-                'هذا ملف PDF ممسوح ضوئياً. استخرج كل النصوص العربية والإنجليزية من جميع صفحاته.\n' +
-                'قسّم الناتج باستخدام الفاصل "=== الصفحة N ===" قبل كل صفحة (حيث N هو رقم الصفحة).\n' +
-                'لا تضف شرحاً أو تعليقاً، فقط النص المستخرج كما هو.',
-            },
-            {
-              inline_data: {
-                mime_type: 'application/pdf',
-                data: base64,
-              },
-            },
-          ],
-        }],
-        generationConfig: { temperature: 0, maxOutputTokens: 65536 },
-      }),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(180_000), // 3 min per batch
     }
   );
 
   if (!response.ok) {
-    const errBody = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    throw new Error(`Gemini OCR API error ${response.status}: ${(errBody as any)?.error?.message ?? JSON.stringify(errBody)}`);
+    const errBody = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as any;
+    throw new Error(
+      `Gemini Vision error ${response.status}: ${errBody?.error?.message ?? JSON.stringify(errBody)}`
+    );
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const data = await response.json() as any;
   const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 
-  if (!text.trim()) {
-    throw new Error('Gemini OCR returned empty text — PDF may be unreadable or encrypted.');
-  }
-
-  const pages = text
-    .split(/===\s*(?:الصفحة|Page)\s*\d+\s*===/i)
-    .map((p: string) => filterRepetitiveLines(fixCharSeparatedArabic(p.trim())))
-    .filter((p: string) => p.length >= MIN_PAGE_CHARS);
-
-  if (pages.length > 0) return pages;
-
-  const blob = filterRepetitiveLines(fixCharSeparatedArabic(text.trim()));
-  if (blob.length < MIN_PAGE_CHARS) throw new Error('Gemini OCR text too short to be useful.');
-
-  const virtualPages: string[] = [];
-  for (let i = 0; i < blob.length; i += VIRTUAL_PAGE_CHARS) {
-    let end = Math.min(i + VIRTUAL_PAGE_CHARS, blob.length);
-    if (end < blob.length) {
-      const spaceIdx = blob.lastIndexOf(' ', end);
-      if (spaceIdx > i + VIRTUAL_PAGE_CHARS / 2) end = spaceIdx + 1;
-    }
-    const slice = blob.slice(i, end).trim();
-    if (slice.length >= MIN_PAGE_CHARS) virtualPages.push(slice);
-  }
-
-  return virtualPages;
+  return text;
 }
