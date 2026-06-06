@@ -5,11 +5,29 @@
     "grade": "grade12",
     "subject": "biology",
     "track": "",
-    "filename": "\u00d8\u00a7\u00d9\u00d8\u00a3\u00d8\u00ad\u00d9\u00d8\u00a7\u00d8\u00a1 - \u00d8\u00ab\u00d8\u00a7\u00d9\u00d8\u00ab \u00d8\u00ab\u00d8\u00a7\u00d9\u00d9\u00d9.pdf",
+    "filename": "Ø§ÙØ£Ø­ÙØ§Ø¡ - Ø«Ø§ÙØ« Ø«Ø§ÙÙÙ.pdf",
     "totalPages": 252,
     "chunkCount": 63,
     "status": "done",
     "uploadedAt": 1779963081730,
     "processedAt": 1779963082445
+  },
+  {
+    "id": "161f4996-d503-4a85-a220-319ac2960c1d",
+    "country": "sudan",
+    "grade": "grade12",
+    "subject": "physics",
+    "track": "",
+    "filename": "ÙÙØ²ÙØ§Ø¡ 3.pdf",
+    "totalPages": 215,
+    "chunkCount": 46,
+    "status": "done",
+    "uploadedAt": 1780733722548,
+    "processedAt": 1780734305617,
+    "docType": "book",
+    "extractionMethod": "ocr",
+    "extractedChars": 164739,
+    "avgCharsPerPage": 1791,
+    "extractedPages": 92
   }
 ]
