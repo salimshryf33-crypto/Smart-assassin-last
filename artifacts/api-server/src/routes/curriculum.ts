@@ -3,7 +3,7 @@ import multer from 'multer';
 import path from 'node:path';
 import fs from 'node:fs';
 import { v4 as uuidv4 } from 'uuid';
-import { enqueueJob, getJob, getAllJobs, reindexDoc } from '../lib/curriculumQueue';
+import { enqueueJob, getJob, getAllJobs, reindexDoc, resumeDoc } from '../lib/curriculumQueue';
 import {
   readIndex,
   deleteDoc,
@@ -13,6 +13,7 @@ import {
   tokenize,
   invalidateChunkCache,
   getDocMeta,
+  getPdfPath,
 } from '../lib/curriculumStorage';
 
 const TMP_DIR = path.join(process.cwd(), 'data', 'tmp');
@@ -26,7 +27,7 @@ const upload = multer({
       cb(null, `${Date.now()}-${safe}`);
     },
   }),
-  limits: { fileSize: 150 * 1024 * 1024 }, // 150 MB
+  limits: { fileSize: 150 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     if (file.mimetype === 'application/pdf') cb(null, true);
     else cb(new Error('Only PDF files are allowed'));
@@ -54,7 +55,8 @@ router.post('/upload', upload.single('pdf'), (req, res) => {
   const docId = uuidv4();
   const jobId = enqueueJob({
     docId,
-    filePath: req.file.path,
+    tmpFilePath: req.file.path,
+    filePath: '',          // set by enqueueJob after copying to permanent storage
     country,
     grade,
     subject,
@@ -81,6 +83,7 @@ router.get('/jobs/:jobId', (req, res) => {
     progress: job.progress,
     result: job.result,
     error: job.error,
+    resumeFromPage: job.resumeFromPage,
   });
 });
 
@@ -94,6 +97,7 @@ router.get('/jobs', (_req, res) => {
     progress: j.progress,
     result: j.result,
     error: j.error,
+    resumeFromPage: j.resumeFromPage,
   })));
 });
 
@@ -103,17 +107,67 @@ router.get('/docs', (_req, res) => {
 });
 
 // DELETE /api/curriculum/docs/:id
+// Deletes the index entry, chunk file, AND the permanently stored PDF.
 router.delete('/docs/:id', (req, res) => {
   deleteDoc(req.params.id);
   req.log.info({ docId: req.params.id }, 'Deleted curriculum doc');
   res.json({ success: true });
 });
 
+// POST /api/curriculum/docs/:docId/resume
+// Resume OCR for a 'partial' document from its last saved page.
+// The original PDF must be present in permanent storage (data/pdfs/<docId>.pdf).
+// No file upload required — uses the stored copy from the original upload.
+router.post('/docs/:docId/resume', async (req, res) => {
+  const { docId } = req.params;
+
+  const doc = getDocMeta(docId);
+  if (!doc) {
+    res.status(404).json({ error: `Document ${docId} not found in index` });
+    return;
+  }
+
+  if (doc.status !== 'partial' && doc.status !== 'error') {
+    res.status(400).json({
+      error: `Document status is '${doc.status}' — only 'partial' or 'error' documents can be resumed`,
+      currentStatus: doc.status,
+      lastRenderedPage: doc.lastRenderedPage,
+    });
+    return;
+  }
+
+  const pdfPath = doc.pdfStoragePath ?? getPdfPath(docId);
+  if (!fs.existsSync(pdfPath)) {
+    res.status(409).json({
+      error: 'PDF file not found in permanent storage. Re-upload the file using POST /api/curriculum/reindex/:id',
+      pdfPath,
+    });
+    return;
+  }
+
+  try {
+    const job = await resumeDoc(docId);
+    req.log.info(
+      { jobId: job.id, docId, resumeFromPage: job.resumeFromPage },
+      'OCR resume queued'
+    );
+    res.status(202).json({
+      jobId: job.id,
+      docId,
+      status: 'queued',
+      resumeFromPage: job.resumeFromPage,
+      message: `Resuming OCR from page ${job.resumeFromPage} (last completed: ${doc.lastRenderedPage ?? 0})`,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 // POST /api/curriculum/reindex/:id
-// Force re-index an existing document that is already in the index.
-// Useful for documents that were uploaded successfully but produced too few chunks.
+// Full re-index: requires a PDF upload, replaces the stored copy and all chunks.
+// If the document is partial/done, the existing chunks will be overwritten.
 router.post('/reindex/:id', upload.single('pdf'), async (req, res) => {
-  const docId = req.params.id;
+  const docId = req.params['id'] as string;
   const existing = getDocMeta(docId);
 
   if (!existing) {
@@ -122,15 +176,30 @@ router.post('/reindex/:id', upload.single('pdf'), async (req, res) => {
     return;
   }
 
-  // If a new PDF file was uploaded, use it; otherwise require the original
   if (!req.file) {
-    res.status(400).json({ error: 'A PDF file is required for reindexing' });
+    // If no new PDF provided, check if we have the stored copy
+    const storedPath = existing.pdfStoragePath ?? getPdfPath(docId);
+    if (!fs.existsSync(storedPath)) {
+      res.status(400).json({
+        error: 'No PDF file uploaded and no stored copy found. Please upload the PDF.',
+      });
+      return;
+    }
+
+    // Re-index from stored copy
+    invalidateChunkCache(docId);
+    const job = await reindexDoc(docId, storedPath, {
+      country: existing.country,
+      grade: existing.grade,
+      subject: existing.subject,
+      track: existing.track,
+      filename: existing.filename,
+    });
+    res.status(202).json({ jobId: job.id, docId, status: 'queued', source: 'stored_pdf' });
     return;
   }
 
-  req.log.info({ docId, filename: req.file.originalname }, 'Reindex requested');
-
-  // Invalidate cache before re-queuing
+  req.log.info({ docId, filename: req.file.originalname }, 'Reindex with new PDF requested');
   invalidateChunkCache(docId);
 
   const job = await reindexDoc(docId, req.file.path, {
@@ -141,7 +210,7 @@ router.post('/reindex/:id', upload.single('pdf'), async (req, res) => {
     filename: req.file.originalname || existing.filename,
   });
 
-  res.status(202).json({ jobId: job.id, docId, status: 'queued' });
+  res.status(202).json({ jobId: job.id, docId, status: 'queued', source: 'new_upload' });
 });
 
 // GET /api/curriculum/search?country=&grade=&subject=&query=&topK=
@@ -151,13 +220,12 @@ router.get('/search', (req, res) => {
     res.status(400).json({ error: 'country, grade, and subject are required' });
     return;
   }
-  // Invalidate cache before search to guarantee freshest data
   invalidateChunkCache();
   const chunks = searchChunks(country, grade, subject, query, topK ? parseInt(topK) : 5);
   res.json({ chunks, count: chunks.length });
 });
 
-// GET /api/curriculum/chunks/:docId  (for debugging/admin)
+// GET /api/curriculum/chunks/:docId
 router.get('/chunks/:docId', (req, res) => {
   invalidateChunkCache(req.params.docId);
   const chunks = loadChunks(req.params.docId);
@@ -165,7 +233,6 @@ router.get('/chunks/:docId', (req, res) => {
 });
 
 // GET /api/curriculum/debug/:docId?chunkIndex=N
-// Shows raw + normalized content of a chunk with hex codes for invisible chars
 router.get('/debug/:docId', (req, res) => {
   const { chunkIndex = '0', query = '' } = req.query as Record<string, string>;
   invalidateChunkCache(req.params.docId);
@@ -208,7 +275,6 @@ router.get('/debug/:docId', (req, res) => {
 });
 
 // GET /api/curriculum/verify/:id
-// Post-upload searchability check: confirms a doc is live in the search index.
 router.get('/verify/:id', (req, res) => {
   const doc = getDocMeta(req.params.id);
   if (!doc) {
@@ -219,7 +285,8 @@ router.get('/verify/:id', (req, res) => {
   invalidateChunkCache(doc.id);
   const chunks = loadChunks(doc.id);
 
-  if (doc.status !== 'done') {
+  // partial docs are searchable for their completed pages
+  if (doc.status !== 'done' && doc.status !== 'partial') {
     res.json({ searchable: false, reason: `Status is '${doc.status}'`, chunkCount: 0, doc });
     return;
   }
@@ -229,14 +296,18 @@ router.get('/verify/:id', (req, res) => {
     return;
   }
 
-  // Run actual search with empty query to confirm index pipeline works
   const results = searchChunks(doc.country, doc.grade, doc.subject, '', 1);
   const searchable = results.length > 0;
 
   res.json({
     searchable,
-    reason: searchable ? 'Document is live in search index' : 'Search returned 0 results despite chunks existing',
+    reason: searchable
+      ? doc.status === 'partial'
+        ? `Partial document is searchable (pages 1–${doc.lastRenderedPage ?? '?'} of ${doc.totalPages}). Resume OCR with POST /api/curriculum/docs/${doc.id}/resume`
+        : 'Document is live in search index'
+      : 'Search returned 0 results despite chunks existing',
     chunkCount: chunks.length,
+    resumable: doc.status === 'partial',
     doc,
   });
 });

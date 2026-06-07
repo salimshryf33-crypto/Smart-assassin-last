@@ -12,7 +12,7 @@ export interface CurriculumChunk {
   pageRange: string;
   chunkIndex: number;
   content: string;
-  contentNormalized: string; // pre-computed for fast Arabic search
+  contentNormalized: string;
   keywords: string[];
   embedding?: number[];
 }
@@ -26,7 +26,7 @@ export interface CurriculumDocument {
   filename: string;
   totalPages: number;
   chunkCount: number;
-  status: 'queued' | 'processing' | 'ocr_running' | 'done' | 'error';
+  status: 'queued' | 'processing' | 'ocr_running' | 'partial' | 'done' | 'error';
   errorMessage?: string;
   uploadedAt: number;
   processedAt?: number;
@@ -36,24 +36,36 @@ export interface CurriculumDocument {
   extractedChars?: number;
   avgCharsPerPage?: number;
   extractedPages?: number;
+  // ─── OCR resume metadata ──────────────────────────────────────────────────
+  // lastRenderedPage: the last PDF page number (1-based) confirmed OCR'd and
+  // saved to disk. Set after every successful batch so a quota failure mid-book
+  // always leaves a valid resume point.
+  lastRenderedPage?: number;
+  // pdfStoragePath: permanent path to the original uploaded PDF.
+  // Set at upload time, never deleted automatically, enables re-index without
+  // requiring the user to re-upload the file.
+  pdfStoragePath?: string;
 }
 
 const DATA_DIR = path.join(process.cwd(), 'data', 'curriculum');
 const DOCS_DIR = path.join(DATA_DIR, 'docs');
 const INDEX_FILE = path.join(DATA_DIR, 'index.json');
 
+// Permanent PDF storage — never auto-deleted
+export const PDF_DIR = path.join(process.cwd(), 'data', 'pdfs');
+
+export function getPdfPath(docId: string): string {
+  return path.join(PDF_DIR, `${docId}.pdf`);
+}
+
 function ensureDirs() {
   fs.mkdirSync(DOCS_DIR, { recursive: true });
+  fs.mkdirSync(PDF_DIR, { recursive: true });
 }
 
 // ─── In-memory chunk cache ────────────────────────────────────────────────────
-// Caches loaded chunks per docId. Invalidated explicitly after every saveChunks.
 const _chunkCache = new Map<string, CurriculumChunk[]>();
 
-/**
- * Invalidate cached chunks for a specific document (or all docs if no id given).
- * Called by curriculumQueue after saveChunks so searches always see fresh data.
- */
 export function invalidateChunkCache(docId?: string) {
   if (docId) {
     _chunkCache.delete(docId);
@@ -92,8 +104,13 @@ export function deleteDoc(id: string) {
   writeIndex(readIndex().filter((d) => d.id !== id));
   const chunksFile = path.join(DOCS_DIR, `${id}.json`);
   if (fs.existsSync(chunksFile)) fs.unlinkSync(chunksFile);
+  // Also delete the permanently stored PDF
+  const pdfFile = getPdfPath(id);
+  if (fs.existsSync(pdfFile)) {
+    try { fs.unlinkSync(pdfFile); } catch { /* ignore */ }
+  }
   invalidateChunkCache(id);
-  logger.info({ docId: id }, 'Deleted curriculum document');
+  logger.info({ docId: id }, 'Deleted curriculum document and stored PDF');
 }
 
 // ─── Chunk I/O ────────────────────────────────────────────────────────────────
@@ -101,12 +118,37 @@ export function deleteDoc(id: string) {
 export function saveChunks(docId: string, chunks: CurriculumChunk[]) {
   ensureDirs();
   fs.writeFileSync(path.join(DOCS_DIR, `${docId}.json`), JSON.stringify(chunks));
-  // Always invalidate cache after a write so the next search reads fresh data
   invalidateChunkCache(docId);
 }
 
+/**
+ * Append new chunks to an existing doc's chunk file.
+ *
+ * Used during OCR resume: new chunks from pages 93–215 are merged with the
+ * existing 46 chunks from pages 1–92. New chunks are renumbered so their
+ * chunkIndex continues from the highest existing index.
+ *
+ * If no existing chunks are found (first save), behaves identically to saveChunks.
+ */
+export function appendChunks(docId: string, newChunks: CurriculumChunk[]) {
+  if (newChunks.length === 0) return;
+
+  const existing = loadChunks(docId);
+  const nextIndex = existing.length > 0
+    ? Math.max(...existing.map((c) => c.chunkIndex)) + 1
+    : 0;
+
+  const renumbered = newChunks.map((c, i) => ({ ...c, chunkIndex: nextIndex + i }));
+  const merged = [...existing, ...renumbered];
+
+  saveChunks(docId, merged);
+  logger.info(
+    { docId, existingCount: existing.length, newCount: newChunks.length, totalCount: merged.length },
+    'Appended chunks to existing doc'
+  );
+}
+
 export function loadChunks(docId: string): CurriculumChunk[] {
-  // Return from cache if available
   const cached = _chunkCache.get(docId);
   if (cached) return cached;
 
@@ -123,45 +165,23 @@ export function loadChunks(docId: string): CurriculumChunk[] {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Arabic normalization
-//
-// This PDF has two known extraction artifacts:
-//   1. U+FFFD (replacement char) inserted INSIDE Arabic words where pdfjs
-//      could not decode a glyph — e.g. "أ?سبابها" instead of "أسبابها"
-//   2. Tashkeel/diacritics separated by spaces from their base letters,
-//      producing single-char tokens that break word boundaries
-//
-// Fix: strip ALL problematic characters so that "?أ?سبابها" → "اسبابها"
-// and matching against query "اسباب" succeeds via substring.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function normalizeArabic(text: string): string {
   return (
     text
-      // Step 1: Unicode compatibility normalization (merge composed chars)
       .normalize('NFKC')
-      // Step 2: Remove BOM
       .replace(/\uFEFF/g, '')
-      // Step 3: Remove zero-width and directional Unicode marks
       .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F]/g, '')
-      // Step 4: *** Remove U+FFFD replacement chars (KEY FIX) ***
-      // These appear inside Arabic words when pdfjs cannot decode a glyph
       .replace(/\uFFFD/g, '')
-      // Step 5: Remove all Arabic tashkeel / diacritics
       .replace(/[\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED]/g, '')
-      // Step 6: Normalize Alef variants → bare Alef
       .replace(/[أإآٱ\u0671\u0672\u0673]/g, 'ا')
-      // Step 7: Normalize Hamza on Waw and Ya
       .replace(/ؤ/g, 'و')
       .replace(/ئ/g, 'ي')
-      // Step 8: Alef Maqsura → Ya (for morphological matching)
       .replace(/ى/g, 'ي')
-      // Step 9: Teh Marbuta → Ha
       .replace(/ة/g, 'ه')
-      // Step 10: Remove Arabic Tatweel (kashida)
       .replace(/\u0640/g, '')
-      // Step 11: Replace any remaining non-Arabic/Latin/digit/space with space
       .replace(/[^\u0600-\u06FF\w\s]/g, ' ')
-      // Step 12: Collapse whitespace
       .replace(/\s{2,}/g, ' ')
       .toLowerCase()
       .trim()
@@ -169,7 +189,7 @@ export function normalizeArabic(text: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tokenizer — splits normalized text into searchable tokens
+// Tokenizer
 // ─────────────────────────────────────────────────────────────────────────────
 
 const STOP_WORDS = new Set([
@@ -188,7 +208,7 @@ export function tokenize(text: string): string[] {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Character trigrams for semantic fallback
+// Character trigrams
 // ─────────────────────────────────────────────────────────────────────────────
 
 function buildTrigrams(normalizedText: string): Set<string> {
@@ -212,14 +232,6 @@ function trigramScore(queryTrigrams: Set<string>, chunkNormalized: string): numb
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Grade / level mapping
-//
-// Supports both directions:
-//   level  → grades  e.g. 'secondary' → {grade10, grade11, grade12}
-//   grade  → itself  e.g. 'grade12'   → {grade12}
-//
-// This means a doc uploaded with grade='grade12' is found when searching
-// with gradeOrLevel='secondary', AND a doc uploaded with grade='secondary'
-// is found when searching with gradeOrLevel='secondary'.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const LEVEL_GRADE_MAP: Record<string, string[]> = {
@@ -231,11 +243,8 @@ export const LEVEL_GRADE_MAP: Record<string, string[]> = {
 function resolveGrades(gradeOrLevel: string): Set<string> {
   const mapped = LEVEL_GRADE_MAP[gradeOrLevel];
   if (mapped) {
-    // It's a level name — include all grades for that level PLUS the level name itself
-    // (handles docs uploaded with grade='secondary' directly)
     return new Set<string>([...mapped, gradeOrLevel]);
   }
-  // It's a specific grade value — also check if it belongs to a level and include the level name
   const levelEntry = Object.entries(LEVEL_GRADE_MAP).find(([, grades]) =>
     grades.includes(gradeOrLevel)
   );
@@ -258,10 +267,11 @@ export function searchChunks(
 ): CurriculumChunk[] {
   const validGrades = resolveGrades(gradeOrLevel);
 
-  // Always read the index fresh from disk — no in-memory index cache
   const docs = readIndex().filter(
     (d) =>
-      d.status === 'done' &&
+      // Include both completed and partial docs — partial docs have valid chunks
+      // for the pages already processed and are fully searchable
+      (d.status === 'done' || d.status === 'partial') &&
       d.country === country &&
       d.subject === subject &&
       validGrades.has(d.grade)
@@ -280,16 +290,13 @@ export function searchChunks(
   if (allChunks.length === 0) return [];
   if (!query.trim()) return allChunks.slice(0, topK);
 
-  // Normalize query
   const qNorm = normalizeArabic(query);
   const qTokens = tokenize(query);
   const qTrigrams = buildTrigrams(qNorm);
 
   console.log(`[search] Normalized query="${qNorm}" tokens=[${qTokens.join(', ')}]`);
 
-  // Score every chunk
   const scored = allChunks.map((chunk) => {
-    // Use pre-computed normalized content if available, else compute on-the-fly
     const cNorm = chunk.contentNormalized ?? normalizeArabic(chunk.content);
     const cTokenSet = new Set(tokenize(chunk.content));
     const chapterNorm = normalizeArabic(chunk.chapter);
@@ -297,51 +304,31 @@ export function searchChunks(
     let score = 0;
 
     for (const qt of qTokens) {
-      // A: exact token match
       if (cTokenSet.has(qt)) score += 4;
-
-      // B: direct substring in full normalized content (handles partial/compound words
-      //    AND words where U+FFFD stripped the alef prefix, e.g. "لطفرات" ⊃ "طفرات")
       if (cNorm.includes(qt)) score += 5;
-
-      // C: query token is substring of any content token (morphological suffix)
       for (const ct of cTokenSet) {
         if (ct.includes(qt)) { score += 2; break; }
       }
-
-      // D: keyword match (normalized stored keywords)
       if (chunk.keywords.some((k) => normalizeArabic(k).includes(qt))) score += 3;
-
-      // E: chapter name match
       if (chapterNorm.includes(qt)) score += 10;
     }
 
-    // F: full normalized query as substring (phrase match — highest signal)
     if (cNorm.includes(qNorm)) score += 20;
     if (chapterNorm.includes(qNorm)) score += 30;
 
-    // G: trigram similarity (always computed — gives partial credit for corrupted text)
     const tSim = trigramScore(qTrigrams, cNorm);
     score += tSim * 15;
 
     return { chunk, score, tSim };
   });
 
-  // Sort and filter.
-  // Rules to prevent false positives:
-  //   • A chunk needs score > 4.0 to appear in results
-  //   • If score comes ENTIRELY from trigrams (no direct token/substring/keyword
-  //     signal from paths A-F), the trigram similarity must be ≥ 0.35 to pass.
-  //     This blocks weak trigram coincidences (e.g. كهر in شبكهرواد matching
-  //     an electricity query) while still allowing trigrams to rescue heavily
-  //     corrupted Arabic text that IS semantically relevant.
   const result = scored
     .sort((a, b) => b.score - a.score)
     .slice(0, topK)
     .filter((r) => {
-      if (r.score <= 4.0) return false; // minimum bar
-      const directScore = r.score - r.tSim * 15; // score excluding trigrams
-      if (directScore < 0.5 && r.tSim < 0.35) return false; // pure-trigram false-positive guard
+      if (r.score <= 4.0) return false;
+      const directScore = r.score - r.tSim * 15;
+      if (directScore < 0.5 && r.tSim < 0.35) return false;
       return true;
     })
     .map((r) => r.chunk);
