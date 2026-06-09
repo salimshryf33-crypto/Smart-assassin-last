@@ -7,7 +7,7 @@ export interface CurriculumDocMeta {
   filename: string;
   totalPages: number;
   chunkCount: number;
-  status: 'queued' | 'processing' | 'ocr_running' | 'done' | 'error';
+  status: 'queued' | 'processing' | 'ocr_running' | 'partial' | 'resuming' | 'done' | 'error';
   errorMessage?: string;
   uploadedAt: number;
   processedAt?: number;
@@ -16,6 +16,10 @@ export interface CurriculumDocMeta {
   extractedChars?: number;
   avgCharsPerPage?: number;
   extractedPages?: number;
+  lastRenderedPage?: number;
+  lastResumeAttempt?: number;
+  resumeAttempts?: number;
+  lastResumeError?: string;
 }
 
 export interface CurriculumChunk {
@@ -34,7 +38,7 @@ export interface CurriculumChunk {
 export interface JobStatus {
   jobId: string;
   docId: string;
-  status: 'queued' | 'processing' | 'ocr_running' | 'done' | 'error';
+  status: 'queued' | 'processing' | 'ocr_running' | 'partial' | 'resuming' | 'done' | 'error';
   progress: { current: number; total: number };
   result?: {
     totalPages: number;

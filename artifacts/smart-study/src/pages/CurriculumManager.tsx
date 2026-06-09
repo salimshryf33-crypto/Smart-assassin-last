@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Upload, Trash2, BookOpen, CheckCircle2, AlertCircle,
   Loader2, ChevronLeft, Database, FileText, Clock,
-  StickyNote, GraduationCap, ScanLine, Zap,
+  StickyNote, GraduationCap, ScanLine, Zap, RefreshCw,
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import {
@@ -86,6 +86,18 @@ export default function CurriculumManager() {
   }, []);
 
   useEffect(() => { refreshDocs(); }, [refreshDocs]);
+
+  // Auto-refresh every 30 s so partial/resuming/processing docs update without user action
+  useEffect(() => {
+    const id = setInterval(() => {
+      const hasLiveDocs = docs.some((d) =>
+        d.status === 'partial' || d.status === 'resuming' ||
+        d.status === 'processing' || d.status === 'ocr_running' || d.status === 'queued'
+      );
+      if (hasLiveDocs) refreshDocs();
+    }, 30_000);
+    return () => clearInterval(id);
+  }, [docs, refreshDocs]);
 
   const stopPolling = () => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
@@ -457,8 +469,19 @@ export default function CurriculumManager() {
                   <div
                     className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl"
                     style={{
-                      background: doc.status === 'done' ? `${dtInfo.color}18` : 'rgba(251,191,36,0.1)',
-                      border: `1px solid ${doc.status === 'done' ? dtInfo.color + '35' : 'rgba(251,191,36,0.2)'}`,
+                      background:
+                        doc.status === 'done' ? `${dtInfo.color}18` :
+                        doc.status === 'error' ? 'rgba(248,113,113,0.1)' :
+                        doc.status === 'partial' ? 'rgba(251,191,36,0.08)' :
+                        doc.status === 'resuming' ? 'rgba(139,92,246,0.1)' :
+                        'rgba(251,191,36,0.1)',
+                      border: `1px solid ${
+                        doc.status === 'done' ? dtInfo.color + '35' :
+                        doc.status === 'error' ? 'rgba(248,113,113,0.25)' :
+                        doc.status === 'partial' ? 'rgba(251,191,36,0.2)' :
+                        doc.status === 'resuming' ? 'rgba(139,92,246,0.25)' :
+                        'rgba(251,191,36,0.2)'
+                      }`,
                     }}
                   >
                     {doc.status === 'done'
@@ -467,7 +490,13 @@ export default function CurriculumManager() {
                         : <BookOpen size={16} style={{ color: dtInfo.color }} />
                       : doc.status === 'error'
                       ? <AlertCircle size={16} className="text-red-400" />
-                      : <Clock size={16} className="text-yellow-400 animate-pulse" />
+                      : doc.status === 'partial'
+                      ? <Clock size={16} className="text-yellow-400" />
+                      : doc.status === 'resuming'
+                      ? <RefreshCw size={16} className="text-violet-400 animate-spin" />
+                      : doc.status === 'ocr_running'
+                      ? <ScanLine size={16} className="text-amber-400 animate-pulse" />
+                      : <Loader2 size={16} className="text-yellow-400 animate-spin" />
                     }
                   </div>
                   <div className="flex-1 min-w-0">
@@ -507,7 +536,8 @@ export default function CurriculumManager() {
                         </>
                       )}
                       {(doc.status === 'processing' || doc.status === 'queued') && (
-                        <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(251,191,36,0.08)', color: '#fbbf24' }}>
+                        <span className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(251,191,36,0.08)', color: '#fbbf24' }}>
+                          <Loader2 size={9} className="animate-spin" />
                           جاري المعالجة...
                         </span>
                       )}
@@ -515,6 +545,31 @@ export default function CurriculumManager() {
                         <span className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(245,158,11,0.1)', color: '#f59e0b' }}>
                           <ScanLine size={9} className="animate-pulse" />
                           OCR يعمل...
+                        </span>
+                      )}
+                      {doc.status === 'partial' && (
+                        <span className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(251,191,36,0.08)', color: '#fbbf24', border: '1px solid rgba(251,191,36,0.2)' }}>
+                          <Clock size={9} />
+                          جزئي — في انتظار الحصة
+                          {doc.lastRenderedPage != null && doc.totalPages > 0 && (
+                            <span className="opacity-60 mr-0.5">({doc.lastRenderedPage}/{doc.totalPages} ص)</span>
+                          )}
+                        </span>
+                      )}
+                      {doc.status === 'partial' && (doc.resumeAttempts ?? 0) > 0 && (
+                        <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(139,92,246,0.08)', color: '#a78bfa' }}>
+                          محاولة {doc.resumeAttempts}
+                          {doc.lastResumeAttempt && (
+                            <span className="opacity-60 mr-0.5">
+                              · {new Date(doc.lastResumeAttempt).toLocaleTimeString('ar', { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          )}
+                        </span>
+                      )}
+                      {doc.status === 'resuming' && (
+                        <span className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(139,92,246,0.1)', color: '#a78bfa', border: '1px solid rgba(139,92,246,0.2)' }}>
+                          <RefreshCw size={9} className="animate-spin" />
+                          جاري الاستئناف التلقائي...
                         </span>
                       )}
                       {doc.status === 'error' && (

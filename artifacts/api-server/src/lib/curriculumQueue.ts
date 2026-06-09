@@ -56,6 +56,19 @@ const jobs = new Map<string, Job>();
 const queue: string[] = [];
 let isProcessing = false;
 
+/** Returns true if a job for this docId is currently queued or processing. */
+export function hasActiveJob(docId: string): boolean {
+  for (const job of jobs.values()) {
+    if (
+      job.docId === docId &&
+      (job.status === 'queued' || job.status === 'processing' || job.status === 'ocr_running')
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // ─── Enqueue a new upload job ─────────────────────────────────────────────────
 //
 // The uploaded PDF is copied to permanent storage (data/pdfs/<docId>.pdf)

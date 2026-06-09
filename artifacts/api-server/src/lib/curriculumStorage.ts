@@ -26,7 +26,7 @@ export interface CurriculumDocument {
   filename: string;
   totalPages: number;
   chunkCount: number;
-  status: 'queued' | 'processing' | 'ocr_running' | 'partial' | 'done' | 'error';
+  status: 'queued' | 'processing' | 'ocr_running' | 'partial' | 'resuming' | 'done' | 'error';
   errorMessage?: string;
   uploadedAt: number;
   processedAt?: number;
@@ -45,6 +45,11 @@ export interface CurriculumDocument {
   // Set at upload time, never deleted automatically, enables re-index without
   // requiring the user to re-upload the file.
   pdfStoragePath?: string;
+  // ─── Auto-resume scheduler metadata ──────────────────────────────────────
+  // Populated by the background scheduler so admins can see retry history.
+  lastResumeAttempt?: number;
+  resumeAttempts?: number;
+  lastResumeError?: string;
 }
 
 const DATA_DIR = path.join(process.cwd(), 'data', 'curriculum');
