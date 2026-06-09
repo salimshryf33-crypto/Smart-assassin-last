@@ -2,29 +2,64 @@ import fs from 'node:fs';
 import { logger } from './logger';
 import { readIndex, upsertDocMeta, getDocMeta, getPdfPath } from './curriculumStorage';
 import { resumeDoc, hasActiveJob } from './curriculumQueue';
+import { restorePdfFromDb } from './pdfPersistence';
 
 const STARTUP_DELAY_MS = 8_000;
 const INTERVAL_MS = 15 * 60 * 1_000;
 
 async function runScheduler(): Promise<void> {
-  const partialDocs = readIndex().filter((doc) => {
-    if (doc.status !== 'partial') return false;
-    if (hasActiveJob(doc.id)) return false;
-    const pdfPath = doc.pdfStoragePath ?? getPdfPath(doc.id);
-    return fs.existsSync(pdfPath);
-  });
+  const partialDocs = readIndex().filter((doc) =>
+    doc.status === 'partial' && !hasActiveJob(doc.id)
+  );
 
   if (partialDocs.length === 0) {
-    logger.debug('ResumeScheduler: no resumable partial docs');
+    logger.debug('ResumeScheduler: no partial docs');
+    return;
+  }
+
+  // ── Ensure PDF is on disk (restore from DB if needed) ────────────────────
+  const resumable: typeof partialDocs = [];
+  for (const doc of partialDocs) {
+    const pdfPath = getPdfPath(doc.id); // always canonical absolute path
+    if (fs.existsSync(pdfPath)) {
+      resumable.push(doc);
+    } else {
+      // PDF missing from disk — try to restore from the persistent DB copy
+      try {
+        const restored = await restorePdfFromDb(doc.id, pdfPath);
+        if (restored) {
+          logger.info(
+            { docId: doc.id, pdfPath },
+            'ResumeScheduler: PDF restored from database to disk'
+          );
+          resumable.push(doc);
+        } else {
+          logger.warn(
+            { docId: doc.id, pdfPath },
+            'ResumeScheduler: PDF missing from both disk and database — cannot resume. ' +
+            'User must re-upload the file.'
+          );
+        }
+      } catch (restoreErr) {
+        logger.error(
+          { docId: doc.id, err: restoreErr },
+          'ResumeScheduler: failed to restore PDF from database'
+        );
+      }
+    }
+  }
+
+  if (resumable.length === 0) {
+    logger.debug('ResumeScheduler: no resumable partial docs (PDFs unavailable)');
     return;
   }
 
   logger.info(
-    { count: partialDocs.length, docs: partialDocs.map((d) => d.id) },
+    { count: resumable.length, docs: resumable.map((d) => d.id) },
     'ResumeScheduler: found partial docs — attempting auto-resume'
   );
 
-  for (const doc of partialDocs) {
+  for (const doc of resumable) {
     const now = Date.now();
 
     const fresh = getDocMeta(doc.id);

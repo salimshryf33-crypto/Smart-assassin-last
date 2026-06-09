@@ -17,6 +17,7 @@ import {
 } from './curriculumStorage';
 import { extractPdf, QuotaExhaustedError } from './pdfExtractor';
 import { chunkText } from './chunker';
+import { savePdfToDb } from './pdfPersistence';
 
 export type JobStatus = 'queued' | 'processing' | 'ocr_running' | 'partial' | 'done' | 'error';
 
@@ -88,6 +89,11 @@ export function enqueueJob(data: Omit<Job, 'id' | 'status' | 'progress' | 'creat
   // Remove the multer tmp file
   try { fs.unlinkSync(tmpFilePath); } catch { /* ignore */ }
 
+  // Persist PDF bytes to the database so they survive container restarts
+  savePdfToDb(data.docId, permanentPath).catch((err) =>
+    logger.error({ err, docId: data.docId }, 'enqueueJob: failed to persist PDF to database')
+  );
+
   const job: Job = {
     ...rest,
     filePath: permanentPath,
@@ -142,6 +148,11 @@ export async function reindexDoc(docId: string, newFilePath: string, meta: {
     try { fs.unlinkSync(newFilePath); } catch { /* ignore */ }
   }
 
+  // Persist the new PDF to the database (replaces any prior copy via UPSERT)
+  savePdfToDb(docId, permanentPath).catch((err) =>
+    logger.error({ err, docId }, 'reindexDoc: failed to persist PDF to database')
+  );
+
   const id = uuidv4();
   const job: Job = {
     id,
@@ -181,7 +192,9 @@ export async function resumeDoc(docId: string): Promise<Job> {
     );
   }
 
-  const pdfPath = doc.pdfStoragePath ?? getPdfPath(docId);
+  // Always use the canonical absolute path — the stored pdfStoragePath may be
+  // a legacy relative path from an earlier server run and cannot be trusted.
+  const pdfPath = getPdfPath(docId);
   if (!fs.existsSync(pdfPath)) {
     throw new Error(
       `PDF file not found at '${pdfPath}'. ` +

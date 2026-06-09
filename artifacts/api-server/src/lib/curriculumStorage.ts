@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { logger } from './logger';
+import { deletePdfFromDb } from './pdfPersistence';
 
 export interface CurriculumChunk {
   id: string;
@@ -109,13 +110,17 @@ export function deleteDoc(id: string) {
   writeIndex(readIndex().filter((d) => d.id !== id));
   const chunksFile = path.join(DOCS_DIR, `${id}.json`);
   if (fs.existsSync(chunksFile)) fs.unlinkSync(chunksFile);
-  // Also delete the permanently stored PDF
+  // Delete the permanently stored PDF from disk
   const pdfFile = getPdfPath(id);
   if (fs.existsSync(pdfFile)) {
     try { fs.unlinkSync(pdfFile); } catch { /* ignore */ }
   }
+  // Delete the PDF from the persistent database copy
+  deletePdfFromDb(id).catch((err) =>
+    logger.error({ err, docId: id }, 'deleteDoc: failed to remove PDF from database')
+  );
   invalidateChunkCache(id);
-  logger.info({ docId: id }, 'Deleted curriculum document and stored PDF');
+  logger.info({ docId: id }, 'Deleted curriculum document, disk PDF, and database PDF');
 }
 
 // ─── Chunk I/O ────────────────────────────────────────────────────────────────
