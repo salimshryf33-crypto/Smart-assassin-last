@@ -6,27 +6,28 @@
  * Requires FIREBASE_SERVICE_ACCOUNT env var (full service-account JSON).
  */
 
-import * as admin from 'firebase-admin';
+import { initializeApp, getApps, cert, type App } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import { logger } from './logger';
 
-let _app: admin.app.App | null = null;
+let _app: App | null = null;
 
-function getAdminApp(): admin.app.App {
+function getAdminApp(): App {
   if (_app) return _app;
 
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
   if (!raw) throw new Error('FIREBASE_SERVICE_ACCOUNT env var is not set');
 
-  let credential: admin.ServiceAccount;
+  let serviceAccount: object;
   try {
-    credential = JSON.parse(raw) as admin.ServiceAccount;
+    serviceAccount = JSON.parse(raw);
   } catch {
     throw new Error('FIREBASE_SERVICE_ACCOUNT is not valid JSON');
   }
 
-  _app = admin.apps.length
-    ? admin.apps[0]!
-    : admin.initializeApp({ credential: admin.credential.cert(credential) });
+  _app = getApps().length
+    ? getApps()[0]!
+    : initializeApp({ credential: cert(serviceAccount as Parameters<typeof cert>[0]) });
 
   logger.info('FirebaseAdmin: initialized');
   return _app;
@@ -37,8 +38,8 @@ function getAdminApp(): admin.app.App {
  * Pass `true` to grant admin, `false` to revoke.
  */
 export async function setAdminClaim(uid: string, value: boolean): Promise<void> {
-  const app = getAdminApp();
-  await app.auth().setCustomUserClaims(uid, { admin: value });
+  getAdminApp();
+  await getAuth().setCustomUserClaims(uid, { admin: value });
   logger.info({ uid, admin: value }, 'FirebaseAdmin: custom claim updated');
 }
 
@@ -46,7 +47,7 @@ export async function setAdminClaim(uid: string, value: boolean): Promise<void> 
  * Retrieve current custom claims for a user (for verification).
  */
 export async function getUserClaims(uid: string): Promise<Record<string, unknown>> {
-  const app = getAdminApp();
-  const user = await app.auth().getUser(uid);
+  getAdminApp();
+  const user = await getAuth().getUser(uid);
   return (user.customClaims ?? {}) as Record<string, unknown>;
 }

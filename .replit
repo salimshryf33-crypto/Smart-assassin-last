@@ -72,3 +72,4 @@ channel = "stable-25_05"
 
 [userenv.shared]
 FIREBASE_PROJECT_ID = "sage-78209"
+ADMIN_UIDS = "JlLBDDgQpkRtgJ3efZ8Lp7yhijr2"
