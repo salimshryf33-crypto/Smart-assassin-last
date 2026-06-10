@@ -24,7 +24,7 @@
     "filename": "ÙÙØ²ÙØ§Ø¡ 3.pdf",
     "totalPages": 0,
     "chunkCount": 12,
-    "status": "partial",
+    "status": "error",
     "uploadedAt": 1780998729253,
     "docType": "book",
     "pdfStoragePath": "/home/runner/workspace/artifacts/api-server/data/pdfs/aeab0878-dd6e-4b44-8632-d633418ac70e.pdf",
@@ -32,9 +32,10 @@
     "extractionMethod": "ocr",
     "extractedChars": 40418,
     "extractedPages": 0,
-    "lastResumeAttempt": 1781077262399,
-    "resumeAttempts": 8,
+    "lastResumeAttempt": 1781091902765,
+    "resumeAttempts": 9,
     "visibility": "public",
-    "bookTitle": "ÙÙØ²ÙØ§Ø¡ 3"
+    "bookTitle": "ÙÙØ²ÙØ§Ø¡ 3",
+    "errorMessage": "PDF extraction produced 0 usable pages after all stages (including OCR). File may be encrypted, blank, or the OCR service is unavailable. totalPages=215, extractionMethod=ocr"
   }
 ]
