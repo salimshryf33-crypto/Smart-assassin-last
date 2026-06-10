@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Upload, Trash2, BookOpen, CheckCircle2, AlertCircle,
   Loader2, ChevronLeft, Database, FileText, Clock,
-  StickyNote, GraduationCap, ScanLine, Zap, RefreshCw,
+  StickyNote, GraduationCap, ScanLine, Zap, RefreshCw, Play,
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import {
@@ -11,6 +11,7 @@ import {
   getJobStatus,
   getCurriculumDocs,
   deleteCurriculumDoc,
+  resumeCurriculumDoc,
   getMe,
   type CurriculumDocMeta,
   type JobStatus,
@@ -71,6 +72,8 @@ export default function CurriculumManager() {
   const [bookTitle, setBookTitle] = useState('');
   const [file, setFile]       = useState<File | null>(null);
   const [uploadState, setUploadState] = useState<UploadState>({ phase: 'idle' });
+
+  const [resumingDocIds, setResumingDocIds] = useState<Set<string>>(new Set());
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -177,6 +180,28 @@ export default function CurriculumManager() {
     } catch (err) {
       setUploadState({ phase: 'error', message: err instanceof Error ? err.message : 'فشل الحذف' });
     }
+  };
+
+  const handleResume = async (docId: string) => {
+    setResumingDocIds((prev) => new Set(prev).add(docId));
+    try {
+      await resumeCurriculumDoc(docId);
+      await refreshDocs();
+    } catch (err) {
+      setUploadState({ phase: 'error', message: err instanceof Error ? err.message : 'فشل الاستئناف' });
+    } finally {
+      setResumingDocIds((prev) => { const s = new Set(prev); s.delete(docId); return s; });
+    }
+  };
+
+  const classifyOcrError = (doc: CurriculumDocMeta): { label: string; color: string } | null => {
+    const msg = (doc.errorMessage ?? doc.lastResumeError ?? '').toLowerCase();
+    if (!msg) return null;
+    if (msg.includes('429') || msg.includes('quota')) return { label: 'استنزفت حصة Gemini (429)', color: '#f87171' };
+    if (msg.includes('503') || msg.includes('unavailable') || msg.includes('overloaded')) return { label: 'Gemini مشغول — ازدحام (503)', color: '#fb923c' };
+    if (msg.includes('pdf') && (msg.includes('not found') || msg.includes('missing'))) return { label: 'ملف PDF مفقود', color: '#f87171' };
+    if (msg.includes('no gemini_api_key') || msg.includes('gemini_api_key')) return { label: 'مفتاح API مفقود', color: '#f87171' };
+    return { label: 'فشل OCR', color: '#f87171' };
   };
 
   const gradeLabel = (g: string) => GRADE_OPTIONS.find((o) => o.value === g)?.label ?? g;
@@ -602,15 +627,29 @@ export default function CurriculumManager() {
                           OCR يعمل...
                         </span>
                       )}
-                      {doc.status === 'partial' && (
-                        <span className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(251,191,36,0.08)', color: '#fbbf24', border: '1px solid rgba(251,191,36,0.2)' }}>
-                          <Clock size={9} />
-                          جزئي — في انتظار الحصة
-                          {doc.lastRenderedPage != null && doc.totalPages > 0 && (
-                            <span className="opacity-60 mr-0.5">({doc.lastRenderedPage}/{doc.totalPages} ص)</span>
-                          )}
-                        </span>
-                      )}
+                      {doc.status === 'partial' && (() => {
+                        const errInfo = classifyOcrError(doc);
+                        const pct = doc.lastRenderedPage != null && doc.totalPages > 0
+                          ? Math.round((doc.lastRenderedPage / doc.totalPages) * 100)
+                          : null;
+                        return (
+                          <>
+                            <span className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(251,191,36,0.08)', color: '#fbbf24', border: '1px solid rgba(251,191,36,0.2)' }}>
+                              <Clock size={9} />
+                              جزئي
+                              {doc.lastRenderedPage != null && doc.totalPages > 0
+                                ? <span className="opacity-80 mr-0.5">{doc.lastRenderedPage}/{doc.totalPages} ص{pct != null ? ` (${pct}%)` : ''}</span>
+                                : doc.lastRenderedPage != null && <span className="opacity-60 mr-0.5">ص {doc.lastRenderedPage}</span>
+                              }
+                            </span>
+                            {errInfo && (
+                              <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(248,113,113,0.07)', color: errInfo.color, border: `1px solid ${errInfo.color}30` }}>
+                                {errInfo.label}
+                              </span>
+                            )}
+                          </>
+                        );
+                      })()}
                       {doc.status === 'partial' && (doc.resumeAttempts ?? 0) > 0 && (
                         <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(139,92,246,0.08)', color: '#a78bfa' }}>
                           محاولة {doc.resumeAttempts}
@@ -627,20 +666,39 @@ export default function CurriculumManager() {
                           جاري الاستئناف التلقائي...
                         </span>
                       )}
-                      {doc.status === 'error' && (
-                        <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(248,113,113,0.08)', color: '#f87171' }}>
-                          فشل: {doc.errorMessage?.slice(0, 30)}
-                        </span>
-                      )}
+                      {doc.status === 'error' && (() => {
+                        const errInfo = classifyOcrError(doc);
+                        return (
+                          <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(248,113,113,0.07)', color: errInfo?.color ?? '#f87171', border: `1px solid ${errInfo?.color ?? '#f87171'}30` }}>
+                            {errInfo?.label ?? `فشل: ${doc.errorMessage?.slice(0, 30)}`}
+                          </span>
+                        );
+                      })()}
                     </div>
                   </div>
-                  <button
-                    onClick={() => handleDelete(doc.id)}
-                    className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl"
-                    style={{ background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.15)' }}
-                  >
-                    <Trash2 size={13} className="text-red-400" />
-                  </button>
+                  <div className="flex flex-col gap-1.5 flex-shrink-0">
+                    {isAdmin && (doc.status === 'partial' || doc.status === 'error') && (
+                      <button
+                        onClick={() => handleResume(doc.id)}
+                        disabled={resumingDocIds.has(doc.id)}
+                        title="استئناف OCR من آخر صفحة"
+                        className="flex h-8 w-8 items-center justify-center rounded-xl disabled:opacity-40"
+                        style={{ background: 'rgba(139,92,246,0.12)', border: '1px solid rgba(139,92,246,0.25)' }}
+                      >
+                        {resumingDocIds.has(doc.id)
+                          ? <Loader2 size={13} className="text-violet-400 animate-spin" />
+                          : <Play size={12} className="text-violet-400" />
+                        }
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleDelete(doc.id)}
+                      className="flex h-8 w-8 items-center justify-center rounded-xl"
+                      style={{ background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.15)' }}
+                    >
+                      <Trash2 size={13} className="text-red-400" />
+                    </button>
+                  </div>
                 </motion.div>
               );
             })}

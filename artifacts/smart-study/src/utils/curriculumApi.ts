@@ -167,6 +167,23 @@ export async function deleteCurriculumDoc(id: string): Promise<void> {
  * @param bookTitle  Mode B — restrict to one specific book title.
  *                   Omit for Mode A (all books in the subject).
  */
+export async function resumeCurriculumDoc(docId: string): Promise<{
+  jobId: string;
+  docId: string;
+  status: string;
+  resumeFromPage: number;
+}> {
+  const res = await fetch(`${BASE}/docs/${docId}/resume`, {
+    method: 'POST',
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? 'Resume failed');
+  }
+  return res.json();
+}
+
 export async function searchCurriculumApi(
   country: string,
   grade: string,

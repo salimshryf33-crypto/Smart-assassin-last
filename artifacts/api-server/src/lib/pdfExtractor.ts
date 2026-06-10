@@ -20,10 +20,12 @@ export const MIN_NON_WS_DENSITY     = 0.20;
 const VIRTUAL_PAGE_CHARS = 2_000;
 const MIN_PAGE_CHARS     = 10;
 
-const OCR_MODEL      = 'gemini-2.5-flash';
-const OCR_DPI        = 150;
-const BATCH_SIZE     = 8;
-const OCR_MAX_OUTPUT = 16384;
+const OCR_MODEL          = 'gemini-2.5-flash';
+const OCR_FALLBACK_MODEL = 'gemini-1.5-flash';
+const OCR_DPI            = 150;
+const BATCH_SIZE         = 8;
+const OCR_MAX_OUTPUT     = 16384;
+const SERVICE_503_THRESHOLD = 3;
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
 
@@ -42,6 +44,20 @@ export class QuotaExhaustedError extends Error {
   ) {
     super(message);
     this.name = 'QuotaExhaustedError';
+  }
+}
+
+// ─── Service unavailable error ────────────────────────────────────────────────
+//
+// Thrown when Gemini returns HTTP 503 (service overloaded / demand exceeded).
+// Distinct from QuotaExhaustedError (429) so the caller can apply a different
+// recovery strategy: after SERVICE_503_THRESHOLD consecutive 503s, the OCR
+// loop switches to the fallback model (gemini-1.5-flash) instead of giving up.
+
+export class ServiceUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ServiceUnavailableError';
   }
 }
 
@@ -347,12 +363,18 @@ async function ocrPdfViaImages(
   // lastRenderedPage reflects no progress from this run.
   let lastRenderedPage = startFromPage - 1;
 
+  // ── Model selection with 503-based fallback ───────────────────────────────
+  // Start with the primary model. After SERVICE_503_THRESHOLD consecutive 503
+  // responses, switch to OCR_FALLBACK_MODEL and stay on it for the remainder.
+  let currentModel = OCR_MODEL;
+  let consecutive503s = 0;
+
   try {
     for (let pageStart = startFromPage; pageStart <= pagesTotal; pageStart += BATCH_SIZE) {
       const pageEnd = Math.min(pageStart + BATCH_SIZE - 1, pagesTotal);
 
       onProgress?.(pageStart - 1, pagesTotal);
-      console.log(`[pdfExtractor] OCR batch: pages ${pageStart}–${pageEnd} of ${pagesTotal}`);
+      console.log(`[pdfExtractor] OCR batch: pages ${pageStart}–${pageEnd} of ${pagesTotal} (model=${currentModel})`);
 
       // Render this batch of pages to PNG
       let imagePaths: string[] = [];
@@ -374,41 +396,65 @@ async function ocrPdfViaImages(
       // Run Gemini Vision OCR on this batch
       let batchText = '';
       try {
-        batchText = await ocrImageBatch(imagePaths, apiKey);
+        batchText = await ocrImageBatch(imagePaths, apiKey, currentModel);
+        consecutive503s = 0; // reset on success
       } catch (batchErr) {
-        // Quota errors must NOT be retried — propagate immediately so the
-        // caller can save progress and mark the doc as partial.
+        // 429 quota exhausted — propagate immediately so the caller can save progress.
         if (batchErr instanceof QuotaExhaustedError) {
-          // Attach the accumulated texts so far before rethrowing
-          throw new QuotaExhaustedError(
-            lastRenderedPage,
-            allBatchTexts,
-            batchErr.message,
-          );
+          throw new QuotaExhaustedError(lastRenderedPage, allBatchTexts, batchErr.message);
         }
 
-        console.warn(
-          `[pdfExtractor] Batch OCR failed for pages ${pageStart}–${pageEnd}, retrying page-by-page:`,
-          batchErr instanceof Error ? batchErr.message : String(batchErr)
-        );
+        // 503 service overloaded — count and potentially switch to fallback model.
+        if (batchErr instanceof ServiceUnavailableError) {
+          consecutive503s++;
+          console.warn(
+            `[pdfExtractor] Gemini 503 for pages ${pageStart}–${pageEnd}` +
+            ` (${consecutive503s}/${SERVICE_503_THRESHOLD}, model=${currentModel}): ${batchErr.message}`
+          );
 
-        // Fallback: retry each page individually
-        for (let idx = 0; idx < imagePaths.length; idx++) {
-          try {
-            const pageText = await ocrImageBatch([imagePaths[idx]], apiKey);
-            if (pageText.trim()) batchText += '\n' + pageText;
-          } catch (pageErr) {
-            if (pageErr instanceof QuotaExhaustedError) {
-              throw new QuotaExhaustedError(
-                lastRenderedPage,
-                allBatchTexts,
-                pageErr.message,
+          if (currentModel === OCR_MODEL && consecutive503s >= SERVICE_503_THRESHOLD) {
+            // Switch to fallback model and immediately retry this batch
+            currentModel = OCR_FALLBACK_MODEL;
+            consecutive503s = 0;
+            console.warn(
+              `[pdfExtractor] Switching to fallback model ${OCR_FALLBACK_MODEL} after ${SERVICE_503_THRESHOLD} consecutive 503s — retrying batch`
+            );
+            try {
+              batchText = await ocrImageBatch(imagePaths, apiKey, currentModel);
+              console.log(`[pdfExtractor] Fallback model succeeded for pages ${pageStart}–${pageEnd}`);
+            } catch (retryErr) {
+              if (retryErr instanceof QuotaExhaustedError) {
+                throw new QuotaExhaustedError(lastRenderedPage, allBatchTexts, retryErr.message);
+              }
+              console.warn(
+                `[pdfExtractor] Fallback model also failed for pages ${pageStart}–${pageEnd}, skipping batch:`,
+                retryErr instanceof Error ? retryErr.message : String(retryErr)
               );
             }
-            console.warn(
-              `[pdfExtractor] Single-page OCR failed for page ${pageStart + idx}:`,
-              pageErr instanceof Error ? pageErr.message : String(pageErr)
-            );
+          } else {
+            // Not yet at threshold — skip this batch and keep counting
+            continue;
+          }
+        } else {
+          // Other non-quota, non-503 errors: retry each page individually
+          console.warn(
+            `[pdfExtractor] Batch OCR failed for pages ${pageStart}–${pageEnd}, retrying page-by-page:`,
+            batchErr instanceof Error ? batchErr.message : String(batchErr)
+          );
+
+          for (let idx = 0; idx < imagePaths.length; idx++) {
+            try {
+              const pageText = await ocrImageBatch([imagePaths[idx]], apiKey, currentModel);
+              if (pageText.trim()) batchText += '\n' + pageText;
+            } catch (pageErr) {
+              if (pageErr instanceof QuotaExhaustedError) {
+                throw new QuotaExhaustedError(lastRenderedPage, allBatchTexts, pageErr.message);
+              }
+              console.warn(
+                `[pdfExtractor] Single-page OCR failed for page ${pageStart + idx}:`,
+                pageErr instanceof Error ? pageErr.message : String(pageErr)
+              );
+            }
           }
         }
       }
@@ -480,7 +526,8 @@ async function renderPageBatch(
 
 async function ocrImageBatch(
   imagePaths: string[],
-  apiKey: string
+  apiKey: string,
+  model = OCR_MODEL,
 ): Promise<string> {
   const imageParts = imagePaths.map((p) => ({
     inline_data: {
@@ -514,7 +561,7 @@ async function ocrImageBatch(
   };
 
   const response = await fetch(
-    `${GEMINI_BASE}/v1beta/models/${OCR_MODEL}:generateContent?key=${apiKey}`,
+    `${GEMINI_BASE}/v1beta/models/${model}:generateContent?key=${apiKey}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -526,11 +573,16 @@ async function ocrImageBatch(
   if (!response.ok) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const errBody = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as any;
-    const message = `Gemini Vision error ${response.status}: ${errBody?.error?.message ?? JSON.stringify(errBody)}`;
+    const message = `Gemini Vision error ${response.status} (model=${model}): ${errBody?.error?.message ?? JSON.stringify(errBody)}`;
 
-    // 429 = quota exhausted — throw a typed error so the queue can save progress
+    // 429 = quota exhausted — propagate immediately so the queue saves partial progress
     if (response.status === 429) {
       throw new QuotaExhaustedError(0, [], message);
+    }
+
+    // 503 = service overloaded — distinct error so the caller can switch models
+    if (response.status === 503) {
+      throw new ServiceUnavailableError(message);
     }
 
     throw new Error(message);
