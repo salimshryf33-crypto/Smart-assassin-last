@@ -11,6 +11,7 @@ import {
   getJobStatus,
   getCurriculumDocs,
   deleteCurriculumDoc,
+  getMe,
   type CurriculumDocMeta,
   type JobStatus,
 } from '../utils/curriculumApi';
@@ -58,11 +59,17 @@ export default function CurriculumManager() {
   const [docs, setDocs] = useState<CurriculumDocMeta[]>([]);
   const [loadingDocs, setLoadingDocs] = useState(true);
 
+  const [isAdmin, setIsAdmin]     = useState(false);
+  const [adminChecked, setAdminChecked] = useState(false);
+
   const [docType, setDocType] = useState<DocType>('book');
-  const [country, setCountry] = useState(studentProfile?.country ?? '');
-  const [grade, setGrade] = useState('');
+  const [country, setCountry] = useState<'' | 'egypt' | 'sudan'>(
+    (studentProfile?.country as '' | 'egypt' | 'sudan') ?? ''
+  );
+  const [grade, setGrade]     = useState('');
   const [subject, setSubject] = useState('');
-  const [file, setFile] = useState<File | null>(null);
+  const [bookTitle, setBookTitle] = useState('');
+  const [file, setFile]       = useState<File | null>(null);
   const [uploadState, setUploadState] = useState<UploadState>({ phase: 'idle' });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -75,6 +82,16 @@ export default function CurriculumManager() {
     levelForGrade as 'primary' | 'preparatory' | 'secondary' | '',
     ''
   );
+
+  // Fetch admin status once on mount
+  useEffect(() => {
+    getMe().then((me) => {
+      setIsAdmin(me?.isAdmin ?? false);
+      setAdminChecked(true);
+      // Default to 'note' for non-admins since they can't upload books
+      if (!me?.isAdmin) setDocType('note');
+    });
+  }, []);
 
   const refreshDocs = useCallback(async () => {
     try {
@@ -119,6 +136,7 @@ export default function CurriculumManager() {
           setFile(null);
           setGrade('');
           setSubject('');
+          setBookTitle('');
           if (fileInputRef.current) fileInputRef.current.value = '';
         } else if (status.status === 'error') {
           stopPolling();
@@ -141,7 +159,10 @@ export default function CurriculumManager() {
     if (!country || !grade || !subject || !file) return;
     setUploadState({ phase: 'uploading' });
     try {
-      const { jobId } = await uploadCurriculumPdf(file, { country, grade, subject, docType });
+      const { jobId } = await uploadCurriculumPdf(file, {
+        country, grade, subject, docType,
+        bookTitle: bookTitle.trim() || undefined,
+      });
       setUploadState({ phase: 'processing', jobId, progress: { current: 0, total: 0 } });
       startPolling(jobId);
     } catch (err) {
@@ -150,8 +171,12 @@ export default function CurriculumManager() {
   };
 
   const handleDelete = async (id: string) => {
-    await deleteCurriculumDoc(id);
-    await refreshDocs();
+    try {
+      await deleteCurriculumDoc(id);
+      await refreshDocs();
+    } catch (err) {
+      setUploadState({ phase: 'error', message: err instanceof Error ? err.message : 'فشل الحذف' });
+    }
   };
 
   const gradeLabel = (g: string) => GRADE_OPTIONS.find((o) => o.value === g)?.label ?? g;
@@ -235,8 +260,8 @@ export default function CurriculumManager() {
           {/* Doc type tabs */}
           <div className="space-y-2">
             <label className="text-[11px] text-slate-500">نوع الملف</label>
-            <div className="grid grid-cols-3 gap-2">
-              {DOC_TYPE_OPTIONS.map((opt) => {
+            <div className={`grid gap-2 ${isAdmin ? 'grid-cols-3' : 'grid-cols-2'}`}>
+              {DOC_TYPE_OPTIONS.filter((opt) => isAdmin || opt.value !== 'book').map((opt) => {
                 const Icon = opt.icon;
                 const isActive = docType === opt.value;
                 return (
@@ -265,7 +290,7 @@ export default function CurriculumManager() {
               <label className="text-[11px] text-slate-500">الدولة</label>
               <select
                 value={country}
-                onChange={(e) => { setCountry(e.target.value); setGrade(''); setSubject(''); }}
+                onChange={(e) => { setCountry(e.target.value as '' | 'egypt' | 'sudan'); setGrade(''); setSubject(''); }}
                 disabled={isUploading}
                 className="w-full rounded-xl px-3 py-2 text-sm text-white outline-none disabled:opacity-40"
                 style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)' }}
@@ -304,6 +329,26 @@ export default function CurriculumManager() {
               <option value="">اختر...</option>
               {availableSubjects.map((s) => <option key={s.id} value={s.id}>{s.icon} {s.label}</option>)}
             </select>
+
+          {/* Book title — admins uploading 'book', or any doc type (optional label) */}
+          {docType === 'book' && (
+            <div className="space-y-1 mt-2">
+              <label className="text-[11px] text-slate-500">
+                عنوان الكتاب
+                <span className="opacity-50 mr-1">(مثال: النحو والصرف · فيزياء 3)</span>
+              </label>
+              <input
+                type="text"
+                dir="rtl"
+                value={bookTitle}
+                onChange={(e) => setBookTitle(e.target.value)}
+                disabled={isUploading}
+                placeholder="يملأ تلقائياً من اسم الملف إن تُرك فارغاً"
+                className="w-full rounded-xl px-3 py-2 text-sm text-white placeholder-slate-600 outline-none disabled:opacity-40"
+                style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)' }}
+              />
+            </div>
+          )}
           </div>
 
           {/* Drop zone */}
@@ -514,6 +559,16 @@ export default function CurriculumManager() {
                       <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(255,255,255,0.05)', color: '#94a3b8' }}>
                         {subjectLabel(doc.country, doc.grade, doc.subject)}
                       </span>
+                      {doc.bookTitle && (
+                        <span className="rounded-md px-1.5 py-0.5 text-[10px] max-w-[120px] truncate" style={{ background: 'rgba(0,198,255,0.07)', color: '#7dd3fc', border: '1px solid rgba(0,198,255,0.12)' }}>
+                          {doc.bookTitle}
+                        </span>
+                      )}
+                      {doc.visibility === 'private' && (
+                        <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(139,92,246,0.08)', color: '#a78bfa', border: '1px solid rgba(139,92,246,0.15)' }}>
+                          خاص
+                        </span>
+                      )}
                       {doc.status === 'done' && (
                         <>
                           <span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'rgba(52,211,153,0.08)', color: '#34d399' }}>

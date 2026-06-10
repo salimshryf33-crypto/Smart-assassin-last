@@ -3,6 +3,8 @@ import path from 'node:path';
 import { logger } from './logger';
 import { deletePdfFromDb } from './pdfPersistence';
 
+// ─── Chunk ────────────────────────────────────────────────────────────────────
+
 export interface CurriculumChunk {
   id: string;
   docId: string;
@@ -18,6 +20,8 @@ export interface CurriculumChunk {
   embedding?: number[];
 }
 
+// ─── Document ─────────────────────────────────────────────────────────────────
+
 export interface CurriculumDocument {
   id: string;
   country: string;
@@ -32,32 +36,48 @@ export interface CurriculumDocument {
   uploadedAt: number;
   processedAt?: number;
   docType?: 'book' | 'note' | 'exam';
-  // ─── Extraction quality metadata ─────────────────────────────────────────
+
+  // ─── Ownership & visibility ───────────────────────────────────────────────
+  /**
+   * Firebase UID of the uploader.
+   * null / undefined = system-managed public content (admin-uploaded books).
+   */
+  ownerId?: string | null;
+  /**
+   * 'public'  → visible to all authenticated users (curriculum books).
+   * 'private' → visible only to the owner (personal notes / exams).
+   * Defaults to 'public' for all legacy docs and books without explicit value.
+   */
+  visibility: 'public' | 'private';
+  /**
+   * Human-readable book title — distinguishes multiple books under the same
+   * subject, e.g. "النحو والصرف" vs "الأدب والنصوص" vs "فيزياء 3".
+   * Defaults to filename stem when not provided at upload time.
+   */
+  bookTitle?: string;
+
+  // ─── Extraction quality ───────────────────────────────────────────────────
   extractionMethod?: 'text' | 'virtual' | 'ocr';
   extractedChars?: number;
   avgCharsPerPage?: number;
   extractedPages?: number;
-  // ─── OCR resume metadata ──────────────────────────────────────────────────
-  // lastRenderedPage: the last PDF page number (1-based) confirmed OCR'd and
-  // saved to disk. Set after every successful batch so a quota failure mid-book
-  // always leaves a valid resume point.
+
+  // ─── OCR resume ───────────────────────────────────────────────────────────
   lastRenderedPage?: number;
-  // pdfStoragePath: permanent path to the original uploaded PDF.
-  // Set at upload time, never deleted automatically, enables re-index without
-  // requiring the user to re-upload the file.
   pdfStoragePath?: string;
-  // ─── Auto-resume scheduler metadata ──────────────────────────────────────
-  // Populated by the background scheduler so admins can see retry history.
+
+  // ─── Auto-resume scheduler ────────────────────────────────────────────────
   lastResumeAttempt?: number;
   resumeAttempts?: number;
   lastResumeError?: string;
 }
 
-const DATA_DIR = path.join(process.cwd(), 'data', 'curriculum');
-const DOCS_DIR = path.join(DATA_DIR, 'docs');
+// ─── Paths ────────────────────────────────────────────────────────────────────
+
+const DATA_DIR  = path.join(process.cwd(), 'data', 'curriculum');
+const DOCS_DIR  = path.join(DATA_DIR, 'docs');
 const INDEX_FILE = path.join(DATA_DIR, 'index.json');
 
-// Permanent PDF storage — never auto-deleted
 export const PDF_DIR = path.join(process.cwd(), 'data', 'pdfs');
 
 export function getPdfPath(docId: string): string {
@@ -66,21 +86,19 @@ export function getPdfPath(docId: string): string {
 
 function ensureDirs() {
   fs.mkdirSync(DOCS_DIR, { recursive: true });
-  fs.mkdirSync(PDF_DIR, { recursive: true });
+  fs.mkdirSync(PDF_DIR,  { recursive: true });
 }
 
-// ─── In-memory chunk cache ────────────────────────────────────────────────────
+// ─── Chunk cache ──────────────────────────────────────────────────────────────
+
 const _chunkCache = new Map<string, CurriculumChunk[]>();
 
 export function invalidateChunkCache(docId?: string) {
-  if (docId) {
-    _chunkCache.delete(docId);
-  } else {
-    _chunkCache.clear();
-  }
+  if (docId) _chunkCache.delete(docId);
+  else       _chunkCache.clear();
 }
 
-// ─── Index helpers ────────────────────────────────────────────────────────────
+// ─── Index I/O ────────────────────────────────────────────────────────────────
 
 export function readIndex(): CurriculumDocument[] {
   ensureDirs();
@@ -97,9 +115,35 @@ function writeIndex(docs: CurriculumDocument[]) {
   fs.writeFileSync(INDEX_FILE, JSON.stringify(docs, null, 2));
 }
 
-export function upsertDocMeta(doc: CurriculumDocument) {
-  const idx = readIndex().filter((d) => d.id !== doc.id);
-  writeIndex([...idx, doc]);
+/**
+ * Input type for upsertDocMeta — same as CurriculumDocument but with
+ * `visibility` optional (defaults to existing value or 'public').
+ * This lets callers that only update status/progress omit visibility safely.
+ */
+export type UpsertDocInput = Omit<CurriculumDocument, 'visibility'> & {
+  visibility?: 'public' | 'private';
+};
+
+/**
+ * Upsert a document in the index.
+ *
+ * Ownership fields (ownerId, visibility, bookTitle) are **preserved from the
+ * existing record** when not explicitly provided, so callers that only update
+ * status / OCR progress don't need to carry these fields through every code
+ * path — they will never accidentally be cleared.
+ */
+export function upsertDocMeta(doc: UpsertDocInput): void {
+  const all      = readIndex();
+  const existing = all.find((d) => d.id === doc.id);
+
+  const merged: CurriculumDocument = {
+    ...doc,
+    ownerId:    doc.ownerId    !== undefined ? doc.ownerId    : existing?.ownerId,
+    visibility: doc.visibility ?? existing?.visibility ?? 'public',
+    bookTitle:  doc.bookTitle  ?? existing?.bookTitle,
+  };
+
+  writeIndex([...all.filter((d) => d.id !== merged.id), merged]);
 }
 
 export function getDocMeta(id: string): CurriculumDocument | null {
@@ -108,19 +152,70 @@ export function getDocMeta(id: string): CurriculumDocument | null {
 
 export function deleteDoc(id: string) {
   writeIndex(readIndex().filter((d) => d.id !== id));
+
   const chunksFile = path.join(DOCS_DIR, `${id}.json`);
   if (fs.existsSync(chunksFile)) fs.unlinkSync(chunksFile);
-  // Delete the permanently stored PDF from disk
+
   const pdfFile = getPdfPath(id);
   if (fs.existsSync(pdfFile)) {
     try { fs.unlinkSync(pdfFile); } catch { /* ignore */ }
   }
-  // Delete the PDF from the persistent database copy
+
   deletePdfFromDb(id).catch((err) =>
-    logger.error({ err, docId: id }, 'deleteDoc: failed to remove PDF from database')
+    logger.error({ err, docId: id }, 'deleteDoc: failed to remove PDF from DB')
   );
+
   invalidateChunkCache(id);
-  logger.info({ docId: id }, 'Deleted curriculum document, disk PDF, and database PDF');
+  logger.info({ docId: id }, 'Deleted curriculum doc, disk PDF, and DB PDF');
+}
+
+// ─── Startup migration ────────────────────────────────────────────────────────
+
+/**
+ * One-time safe migration: adds `visibility` and `bookTitle` defaults to
+ * legacy documents that pre-date the ownership system.
+ *
+ * Rules:
+ *   visibility → 'public'  for books (or unknown type)
+ *              → 'private' for notes / exams
+ *   bookTitle  → filename stem (strips .pdf extension)
+ *   ownerId    → left undefined (legacy public content has no owner)
+ *
+ * Safe to call on every startup — no-op when all docs already have the fields.
+ */
+export function migrateIndex(): void {
+  const docs = readIndex();
+  if (docs.length === 0) return;
+
+  let changed = false;
+
+  const migrated = docs.map((d): CurriculumDocument => {
+    let updated = false;
+    const next = { ...d } as CurriculumDocument;
+
+    if (!next.visibility) {
+      next.visibility =
+        next.docType === 'note' || next.docType === 'exam' ? 'private' : 'public';
+      updated = true;
+    }
+
+    if (next.bookTitle === undefined || next.bookTitle === '') {
+      next.bookTitle =
+        next.filename.replace(/\.pdf$/i, '').trim() || next.filename;
+      updated = true;
+    }
+
+    if (updated) changed = true;
+    return next;
+  });
+
+  if (changed) {
+    writeIndex(migrated);
+    logger.info(
+      { count: migrated.length },
+      'migrateIndex: added visibility/bookTitle defaults to legacy docs'
+    );
+  }
 }
 
 // ─── Chunk I/O ────────────────────────────────────────────────────────────────
@@ -132,29 +227,24 @@ export function saveChunks(docId: string, chunks: CurriculumChunk[]) {
 }
 
 /**
- * Append new chunks to an existing doc's chunk file.
- *
- * Used during OCR resume: new chunks from pages 93–215 are merged with the
- * existing 46 chunks from pages 1–92. New chunks are renumbered so their
- * chunkIndex continues from the highest existing index.
- *
- * If no existing chunks are found (first save), behaves identically to saveChunks.
+ * Append new chunks to an existing doc (OCR resume path).
+ * Renumbers new chunks to continue from the highest existing index.
  */
 export function appendChunks(docId: string, newChunks: CurriculumChunk[]) {
   if (newChunks.length === 0) return;
 
-  const existing = loadChunks(docId);
+  const existing  = loadChunks(docId);
   const nextIndex = existing.length > 0
     ? Math.max(...existing.map((c) => c.chunkIndex)) + 1
     : 0;
 
   const renumbered = newChunks.map((c, i) => ({ ...c, chunkIndex: nextIndex + i }));
-  const merged = [...existing, ...renumbered];
+  const merged     = [...existing, ...renumbered];
 
   saveChunks(docId, merged);
   logger.info(
     { docId, existingCount: existing.length, newCount: newChunks.length, totalCount: merged.length },
-    'Appended chunks to existing doc'
+    'appendChunks: merged new chunks'
   );
 }
 
@@ -173,9 +263,7 @@ export function loadChunks(docId: string): CurriculumChunk[] {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Arabic normalization
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Arabic normalisation ─────────────────────────────────────────────────────
 
 export function normalizeArabic(text: string): string {
   return (
@@ -198,15 +286,13 @@ export function normalizeArabic(text: string): string {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Tokenizer
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Tokeniser ────────────────────────────────────────────────────────────────
 
 const STOP_WORDS = new Set([
   'في', 'من', 'إلى', 'على', 'أن', 'هذا', 'هذه', 'التي', 'الذي', 'كان',
   'بين', 'ما', 'هو', 'هي', 'لا', 'عن', 'مع', 'بعد', 'قبل', 'كل', 'عند',
   'كانت', 'يكون', 'وهو', 'وهي', 'ذلك', 'تلك', 'هناك', 'حيث', 'وقد', 'قد',
-  'ان', 'هذا', 'هذه', 'الذي', 'التي', 'كان', 'كانت', 'ليس', 'لكن', 'اذا',
+  'ان', 'الذي', 'التي', 'ليس', 'لكن', 'اذا',
   'the', 'and', 'of', 'to', 'a', 'in', 'is', 'are', 'was', 'for', 'with',
   'as', 'by', 'at', 'an', 'or', 'it', 'be', 'has', 'had',
 ]);
@@ -217,16 +303,12 @@ export function tokenize(text: string): string[] {
     .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Character trigrams
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Trigrams ─────────────────────────────────────────────────────────────────
 
 function buildTrigrams(normalizedText: string): Set<string> {
   const s = normalizedText.replace(/\s+/g, '');
   const result = new Set<string>();
-  for (let i = 0; i + 2 < s.length; i++) {
-    result.add(s.slice(i, i + 3));
-  }
+  for (let i = 0; i + 2 < s.length; i++) result.add(s.slice(i, i + 3));
   return result;
 }
 
@@ -234,96 +316,104 @@ function trigramScore(queryTrigrams: Set<string>, chunkNormalized: string): numb
   if (queryTrigrams.size === 0) return 0;
   const target = buildTrigrams(chunkNormalized);
   let hits = 0;
-  for (const t of queryTrigrams) {
-    if (target.has(t)) hits++;
-  }
+  for (const t of queryTrigrams) if (target.has(t)) hits++;
   return hits / queryTrigrams.size;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Grade / level mapping
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Grade / level mapping ────────────────────────────────────────────────────
 
 export const LEVEL_GRADE_MAP: Record<string, string[]> = {
-  primary: ['grade1', 'grade2', 'grade3', 'grade4', 'grade5', 'grade6'],
+  primary:     ['grade1', 'grade2', 'grade3', 'grade4', 'grade5', 'grade6'],
   preparatory: ['grade7', 'grade8', 'grade9'],
-  secondary: ['grade10', 'grade11', 'grade12'],
+  secondary:   ['grade10', 'grade11', 'grade12'],
 };
 
 function resolveGrades(gradeOrLevel: string): Set<string> {
   const mapped = LEVEL_GRADE_MAP[gradeOrLevel];
-  if (mapped) {
-    return new Set<string>([...mapped, gradeOrLevel]);
-  }
-  const levelEntry = Object.entries(LEVEL_GRADE_MAP).find(([, grades]) =>
+  if (mapped) return new Set<string>([...mapped, gradeOrLevel]);
+
+  const entry = Object.entries(LEVEL_GRADE_MAP).find(([, grades]) =>
     grades.includes(gradeOrLevel)
   );
-  if (levelEntry) {
-    return new Set<string>([gradeOrLevel, levelEntry[0], ...levelEntry[1]]);
-  }
+  if (entry) return new Set<string>([gradeOrLevel, entry[0], ...entry[1]]);
   return new Set<string>([gradeOrLevel]);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Main search
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Search ───────────────────────────────────────────────────────────────────
+
+export interface SearchOptions {
+  /**
+   * Mode B — restrict to a specific book title.
+   * Omit for Mode A (search all books in the subject).
+   */
+  bookTitle?: string;
+  /**
+   * Firebase UID of the requesting user.
+   * Required to include private (note/exam) docs in results.
+   * Omit for public-only search (AI chat default).
+   */
+  userId?: string;
+}
 
 export function searchChunks(
   country: string,
   gradeOrLevel: string,
   subject: string,
   query: string,
-  topK = 5
+  topK = 5,
+  opts: SearchOptions = {}
 ): CurriculumChunk[] {
   const validGrades = resolveGrades(gradeOrLevel);
 
   const docs = readIndex().filter(
     (d) =>
-      // Include both completed and partial docs — partial docs have valid chunks
-      // for the pages already processed and are fully searchable
       (d.status === 'done' || d.status === 'partial') &&
-      d.country === country &&
-      d.subject === subject &&
-      validGrades.has(d.grade)
+      d.country  === country &&
+      d.subject  === subject &&
+      validGrades.has(d.grade) &&
+      // Visibility gate: public docs always visible;
+      // private docs only visible to their owner.
+      (d.visibility !== 'private' ||
+        (opts.userId !== undefined && d.ownerId === opts.userId)) &&
+      // Mode B: book-specific filter
+      (!opts.bookTitle || d.bookTitle === opts.bookTitle)
   );
 
   if (docs.length === 0) {
     console.log(
-      `[search] No docs — country=${country} grade/level=${gradeOrLevel}` +
-      ` (validGrades=[${[...validGrades].join(',')}]) subject=${subject}`
+      `[search] No docs — country=${country} grade=${gradeOrLevel}` +
+      ` subject=${subject} bookTitle=${opts.bookTitle ?? '*'} userId=${opts.userId ?? 'anon'}`
     );
     return [];
   }
 
   const allChunks = docs.flatMap((d) => loadChunks(d.id));
-  console.log(`[search] ${allChunks.length} chunks from ${docs.length} doc(s). Query="${query}"`);
-  if (allChunks.length === 0) return [];
-  if (!query.trim()) return allChunks.slice(0, topK);
+  console.log(
+    `[search] ${allChunks.length} chunks from ${docs.length} doc(s). ` +
+    `query="${query}" bookTitle=${opts.bookTitle ?? '*'}`
+  );
 
-  const qNorm = normalizeArabic(query);
-  const qTokens = tokenize(query);
+  if (allChunks.length === 0) return [];
+  if (!query.trim())         return allChunks.slice(0, topK);
+
+  const qNorm     = normalizeArabic(query);
+  const qTokens   = tokenize(query);
   const qTrigrams = buildTrigrams(qNorm);
 
-  console.log(`[search] Normalized query="${qNorm}" tokens=[${qTokens.join(', ')}]`);
-
   const scored = allChunks.map((chunk) => {
-    const cNorm = chunk.contentNormalized ?? normalizeArabic(chunk.content);
-    const cTokenSet = new Set(tokenize(chunk.content));
+    const cNorm      = chunk.contentNormalized ?? normalizeArabic(chunk.content);
+    const cTokenSet  = new Set(tokenize(chunk.content));
     const chapterNorm = normalizeArabic(chunk.chapter);
 
     let score = 0;
-
     for (const qt of qTokens) {
-      if (cTokenSet.has(qt)) score += 4;
-      if (cNorm.includes(qt)) score += 5;
-      for (const ct of cTokenSet) {
-        if (ct.includes(qt)) { score += 2; break; }
-      }
+      if (cTokenSet.has(qt))                                            score += 4;
+      if (cNorm.includes(qt))                                           score += 5;
+      for (const ct of cTokenSet) { if (ct.includes(qt)) { score += 2; break; } }
       if (chunk.keywords.some((k) => normalizeArabic(k).includes(qt))) score += 3;
-      if (chapterNorm.includes(qt)) score += 10;
+      if (chapterNorm.includes(qt))                                     score += 10;
     }
-
-    if (cNorm.includes(qNorm)) score += 20;
+    if (cNorm.includes(qNorm))      score += 20;
     if (chapterNorm.includes(qNorm)) score += 30;
 
     const tSim = trigramScore(qTrigrams, cNorm);
@@ -344,11 +434,14 @@ export function searchChunks(
     .map((r) => r.chunk);
 
   console.log(
-    `[search] Top results:`,
+    `[search] top results:`,
     scored
       .sort((a, b) => b.score - a.score)
       .slice(0, Math.min(5, topK))
-      .map((r) => `chunk#${r.chunk.chunkIndex} pages=${r.chunk.pageRange} score=${r.score.toFixed(2)} tSim=${r.tSim.toFixed(3)}`)
+      .map((r) =>
+        `chunk#${r.chunk.chunkIndex} pages=${r.chunk.pageRange} ` +
+        `score=${r.score.toFixed(2)} tSim=${r.tSim.toFixed(3)}`
+      )
   );
 
   return result;

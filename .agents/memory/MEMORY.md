@@ -1,3 +1,4 @@
+- [Curriculum Ownership System](curriculum-ownership.md) — auth middleware (no firebase-admin), admin roles, visibility gating, bookTitle, dedup 409, Mode A/B search, Express5 string|string[] fix.
 - [Flashcard Pipeline Architecture](flashcard-pipeline.md) — AI-powered flashcard generation from chat; SM-2 SRS; Jaccard dedup; daily limit 10; understanding checks.
 - [Streak Engine Architecture](streak-engine.md) — 3-condition daily checklist (task + AI chat + flashcard); atomic Firestore transactions; timezone-aware Egypt/Sudan.
 - [Curriculum Doc Types](curriculum-doc-types.md) — docType field (book/note/exam) threads through storage→queue→routes→API→UI; OCR Stage 5 uses Gemini inline PDF (≤20MB).

@@ -1,6 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { startResumeScheduler } from "./lib/resumeScheduler";
+import { migrateIndex } from "./lib/curriculumStorage";
 
 const rawPort = process.env["PORT"];
 
@@ -23,5 +24,9 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+
+  // Run safe startup migration (adds visibility/bookTitle defaults to legacy docs)
+  migrateIndex();
+
   startResumeScheduler();
 });

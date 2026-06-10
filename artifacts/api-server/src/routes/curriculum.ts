@@ -15,6 +15,7 @@ import {
   getDocMeta,
   getPdfPath,
 } from '../lib/curriculumStorage';
+import { requireAuth, requireAdmin, isAdmin } from '../middleware/auth';
 
 const TMP_DIR = path.join(process.cwd(), 'data', 'tmp');
 fs.mkdirSync(TMP_DIR, { recursive: true });
@@ -36,42 +37,130 @@ const upload = multer({
 
 const router = Router();
 
-// POST /api/curriculum/upload
-router.post('/upload', upload.single('pdf'), (req, res) => {
+/** Safely coerce Express's `string | string[]` param value to a single string. */
+const str = (v: string | string[] | undefined): string =>
+  Array.isArray(v) ? v[0] ?? '' : v ?? '';
+
+// ─── GET /api/curriculum/me ───────────────────────────────────────────────────
+// Returns the caller's UID and admin flag.  Used by the frontend to adapt UI.
+router.get('/me', requireAuth, (req, res) => {
+  res.json({ uid: req.user!.uid, isAdmin: isAdmin(req.user!) });
+});
+
+// ─── POST /api/curriculum/upload ─────────────────────────────────────────────
+// Books   → admin only   (visibility = public, ownerId = null)
+// Notes   → any user     (visibility = private, ownerId = uid)
+// Exams   → any user     (visibility = private, ownerId = uid)
+router.post('/upload', requireAuth, upload.single('pdf'), (req, res) => {
   if (!req.file) {
     res.status(400).json({ error: 'No PDF file uploaded' });
     return;
   }
 
-  const { country, grade, subject, track = '', docType = 'book' } = req.body as Record<string, string>;
+  const {
+    country, grade, subject,
+    track = '',
+    docType = 'book',
+    bookTitle = '',
+  } = req.body as Record<string, string>;
+
   if (!country || !grade || !subject) {
     fs.unlinkSync(req.file.path);
     res.status(400).json({ error: 'country, grade, and subject are required' });
     return;
   }
 
-  const validDocType = ['book', 'note', 'exam'].includes(docType) ? docType as 'book' | 'note' | 'exam' : 'book';
+  const validDocType =
+    ['book', 'note', 'exam'].includes(docType)
+      ? (docType as 'book' | 'note' | 'exam')
+      : 'book';
+
+  const caller     = req.user!;
+  const adminCaller = isAdmin(caller);
+
+  // Only admins can upload curriculum books
+  if (validDocType === 'book' && !adminCaller) {
+    fs.unlinkSync(req.file.path);
+    res.status(403).json({ error: 'Admin access required to upload curriculum books' });
+    return;
+  }
+
+  const isPublic   = validDocType === 'book';
+  const visibility = isPublic ? 'public' : 'private';
+  const ownerId    = isPublic ? null : caller.uid;
+
+  // Derive bookTitle: use provided value or filename stem
+  const resolvedTitle =
+    bookTitle.trim() ||
+    req.file.originalname.replace(/\.pdf$/i, '').trim() ||
+    req.file.originalname;
+
+  // ── Duplicate protection for public books ──────────────────────────────────
+  if (validDocType === 'book') {
+    const duplicate = readIndex().find(
+      (d) =>
+        d.docType === 'book' &&
+        d.visibility === 'public' &&
+        d.country  === country &&
+        d.grade    === grade &&
+        d.subject  === subject &&
+        d.bookTitle === resolvedTitle
+    );
+    if (duplicate) {
+      fs.unlinkSync(req.file.path);
+      res.status(409).json({
+        error: `A book titled "${resolvedTitle}" already exists for this subject.`,
+        existingDocId: duplicate.id,
+        hint: 'Use POST /api/curriculum/reindex/:id to update it.',
+      });
+      return;
+    }
+  }
 
   const docId = uuidv4();
   const jobId = enqueueJob({
     docId,
     tmpFilePath: req.file.path,
-    filePath: '',          // set by enqueueJob after copying to permanent storage
+    filePath: '',
     country,
     grade,
     subject,
     track,
     filename: req.file.originalname,
     docType: validDocType,
+    ownerId,
+    visibility,
+    bookTitle: resolvedTitle,
   });
 
-  req.log.info({ jobId, docId, filename: req.file.originalname }, 'Curriculum upload queued');
+  req.log.info(
+    { jobId, docId, filename: req.file.originalname, docType: validDocType, visibility, bookTitle: resolvedTitle },
+    'Curriculum upload queued'
+  );
   res.status(202).json({ jobId, docId, status: 'queued' });
 });
 
-// GET /api/curriculum/jobs/:jobId
-router.get('/jobs/:jobId', (req, res) => {
-  const job = getJob(req.params.jobId);
+// ─── GET /api/curriculum/jobs ─────────────────────────────────────────────────
+// Admin only — full job list.
+router.get('/jobs', requireAuth, requireAdmin, (_req, res) => {
+  res.json(
+    getAllJobs().map((j) => ({
+      jobId: j.id,
+      docId: j.docId,
+      filename: j.filename,
+      status: j.status,
+      progress: j.progress,
+      result: j.result,
+      error: j.error,
+      resumeFromPage: j.resumeFromPage,
+    }))
+  );
+});
+
+// ─── GET /api/curriculum/jobs/:jobId ─────────────────────────────────────────
+// Any authenticated user can poll their own job.
+router.get('/jobs/:jobId', requireAuth, (req, res) => {
+  const job = getJob(str(req.params.jobId));
   if (!job) {
     res.status(404).json({ error: 'Job not found' });
     return;
@@ -87,51 +176,56 @@ router.get('/jobs/:jobId', (req, res) => {
   });
 });
 
-// GET /api/curriculum/jobs
-router.get('/jobs', (_req, res) => {
-  res.json(getAllJobs().map((j) => ({
-    jobId: j.id,
-    docId: j.docId,
-    filename: j.filename,
-    status: j.status,
-    progress: j.progress,
-    result: j.result,
-    error: j.error,
-    resumeFromPage: j.resumeFromPage,
-  })));
+// ─── GET /api/curriculum/docs ─────────────────────────────────────────────────
+// Returns: all public docs + caller's own private docs.
+router.get('/docs', requireAuth, (req, res) => {
+  const uid  = req.user!.uid;
+  const docs = readIndex().filter(
+    (d) => d.visibility !== 'private' || d.ownerId === uid
+  );
+  res.json(docs);
 });
 
-// GET /api/curriculum/docs
-router.get('/docs', (_req, res) => {
-  res.json(readIndex());
-});
+// ─── DELETE /api/curriculum/docs/:id ─────────────────────────────────────────
+// Admin: delete any doc.  User: delete only their own private docs.
+router.delete('/docs/:id', requireAuth, (req, res) => {
+  const docId = str(req.params.id);
+  const doc   = getDocMeta(docId);
+  const user  = req.user!;
 
-// DELETE /api/curriculum/docs/:id
-// Deletes the index entry, chunk file, AND the permanently stored PDF.
-router.delete('/docs/:id', (req, res) => {
-  deleteDoc(req.params.id);
-  req.log.info({ docId: req.params.id }, 'Deleted curriculum doc');
-  res.json({ success: true });
-});
-
-// POST /api/curriculum/docs/:docId/resume
-// Resume OCR for a 'partial' document from its last saved page.
-// The original PDF must be present in permanent storage (data/pdfs/<docId>.pdf).
-// No file upload required — uses the stored copy from the original upload.
-router.post('/docs/:docId/resume', async (req, res) => {
-  const { docId } = req.params;
-
-  const doc = getDocMeta(docId);
   if (!doc) {
-    res.status(404).json({ error: `Document ${docId} not found in index` });
+    res.status(404).json({ error: 'Document not found' });
     return;
   }
 
+  const canDelete =
+    isAdmin(user) ||
+    (doc.visibility === 'private' && doc.ownerId === user.uid);
+
+  if (!canDelete) {
+    res.status(403).json({ error: 'You do not have permission to delete this document' });
+    return;
+  }
+
+  deleteDoc(docId);
+  req.log.info({ docId, deletedBy: user.uid }, 'Deleted curriculum doc');
+  res.json({ success: true });
+});
+
+// ─── POST /api/curriculum/docs/:docId/resume ─────────────────────────────────
+// Admin only — resume OCR for partial docs.
+router.post('/docs/:docId/resume', requireAuth, requireAdmin, async (req, res) => {
+  const docId = str(req.params.docId);
+  const doc   = getDocMeta(docId);
+
+  if (!doc) {
+    res.status(404).json({ error: `Document ${docId} not found` });
+    return;
+  }
   if (doc.status !== 'partial' && doc.status !== 'error') {
     res.status(400).json({
-      error: `Document status is '${doc.status}' — only 'partial' or 'error' documents can be resumed`,
+      error: `Status is '${doc.status}' — only 'partial' or 'error' docs can be resumed`,
       currentStatus: doc.status,
-      lastRenderedPage: doc.lastRenderedPage,
     });
     return;
   }
@@ -139,7 +233,7 @@ router.post('/docs/:docId/resume', async (req, res) => {
   const pdfPath = doc.pdfStoragePath ?? getPdfPath(docId);
   if (!fs.existsSync(pdfPath)) {
     res.status(409).json({
-      error: 'PDF file not found in permanent storage. Re-upload the file using POST /api/curriculum/reindex/:id',
+      error: 'PDF not found in permanent storage. Re-upload via POST /api/curriculum/reindex/:id',
       pdfPath,
     });
     return;
@@ -156,154 +250,163 @@ router.post('/docs/:docId/resume', async (req, res) => {
       docId,
       status: 'queued',
       resumeFromPage: job.resumeFromPage,
-      message: `Resuming OCR from page ${job.resumeFromPage} (last completed: ${doc.lastRenderedPage ?? 0})`,
+      message: `Resuming OCR from page ${job.resumeFromPage} (last: ${doc.lastRenderedPage ?? 0})`,
     });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });
 
-// POST /api/curriculum/reindex/:id
-// Full re-index: requires a PDF upload, replaces the stored copy and all chunks.
-// If the document is partial/done, the existing chunks will be overwritten.
-router.post('/reindex/:id', upload.single('pdf'), async (req, res) => {
-  const docId = req.params['id'] as string;
+// ─── POST /api/curriculum/reindex/:id ────────────────────────────────────────
+// Admin only — full re-index with optional new PDF.
+router.post('/reindex/:id', requireAuth, requireAdmin, upload.single('pdf'), async (req, res) => {
+  const docId    = str(req.params.id);
   const existing = getDocMeta(docId);
 
   if (!existing) {
     if (req.file) fs.unlinkSync(req.file.path);
-    res.status(404).json({ error: 'Document not found in index' });
+    res.status(404).json({ error: 'Document not found' });
     return;
   }
 
   if (!req.file) {
-    // If no new PDF provided, check if we have the stored copy
     const storedPath = existing.pdfStoragePath ?? getPdfPath(docId);
     if (!fs.existsSync(storedPath)) {
-      res.status(400).json({
-        error: 'No PDF file uploaded and no stored copy found. Please upload the PDF.',
-      });
+      res.status(400).json({ error: 'No PDF uploaded and no stored copy found.' });
       return;
     }
-
-    // Re-index from stored copy
     invalidateChunkCache(docId);
     const job = await reindexDoc(docId, storedPath, {
-      country: existing.country,
-      grade: existing.grade,
-      subject: existing.subject,
-      track: existing.track,
+      country: existing.country, grade: existing.grade,
+      subject: existing.subject, track: existing.track,
       filename: existing.filename,
     });
     res.status(202).json({ jobId: job.id, docId, status: 'queued', source: 'stored_pdf' });
     return;
   }
 
-  req.log.info({ docId, filename: req.file.originalname }, 'Reindex with new PDF requested');
+  req.log.info({ docId, filename: req.file.originalname }, 'Reindex with new PDF');
   invalidateChunkCache(docId);
-
   const job = await reindexDoc(docId, req.file.path, {
-    country: existing.country,
-    grade: existing.grade,
-    subject: existing.subject,
-    track: existing.track,
+    country: existing.country, grade: existing.grade,
+    subject: existing.subject, track: existing.track,
     filename: req.file.originalname || existing.filename,
   });
-
   res.status(202).json({ jobId: job.id, docId, status: 'queued', source: 'new_upload' });
 });
 
-// GET /api/curriculum/search?country=&grade=&subject=&query=&topK=
-router.get('/search', (req, res) => {
-  const { country, grade, subject, query = '', topK } = req.query as Record<string, string>;
+// ─── GET /api/curriculum/search ───────────────────────────────────────────────
+// Mode A (subject-wide): omit bookTitle param.
+// Mode B (book-specific): include bookTitle param.
+// Always includes caller's private docs alongside public ones.
+router.get('/search', requireAuth, (req, res) => {
+  const { country, grade, subject, query = '', topK, bookTitle } =
+    req.query as Record<string, string>;
+
   if (!country || !grade || !subject) {
     res.status(400).json({ error: 'country, grade, and subject are required' });
     return;
   }
+
   invalidateChunkCache();
-  const chunks = searchChunks(country, grade, subject, query, topK ? parseInt(topK) : 5);
+  const chunks = searchChunks(
+    country, grade, subject, query,
+    topK ? parseInt(topK) : 5,
+    { bookTitle: bookTitle || undefined, userId: req.user!.uid }
+  );
   res.json({ chunks, count: chunks.length });
 });
 
-// GET /api/curriculum/chunks/:docId
-router.get('/chunks/:docId', (req, res) => {
-  invalidateChunkCache(req.params.docId);
-  const chunks = loadChunks(req.params.docId);
+// ─── GET /api/curriculum/chunks/:docId ───────────────────────────────────────
+router.get('/chunks/:docId', requireAuth, (req, res) => {
+  const docId = str(req.params.docId);
+  const doc   = getDocMeta(docId);
+  if (!doc) { res.status(404).json({ error: 'Document not found' }); return; }
+
+  const uid = req.user!.uid;
+  if (doc.visibility === 'private' && doc.ownerId !== uid && !isAdmin(req.user!)) {
+    res.status(403).json({ error: 'Access denied' });
+    return;
+  }
+
+  invalidateChunkCache(docId);
+  const chunks = loadChunks(docId);
   res.json({ chunks, count: chunks.length });
 });
 
-// GET /api/curriculum/debug/:docId?chunkIndex=N
-router.get('/debug/:docId', (req, res) => {
+// ─── GET /api/curriculum/debug/:docId ────────────────────────────────────────
+// Admin only — diagnostic endpoint.
+router.get('/debug/:docId', requireAuth, requireAdmin, (req, res) => {
+  const docId = str(req.params.docId);
   const { chunkIndex = '0', query = '' } = req.query as Record<string, string>;
-  invalidateChunkCache(req.params.docId);
-  const chunks = loadChunks(req.params.docId);
+  invalidateChunkCache(docId);
+  const chunks = loadChunks(docId);
+
   if (chunks.length === 0) {
     res.status(404).json({ error: 'No chunks found' });
     return;
   }
-  const idx = Math.min(parseInt(chunkIndex), chunks.length - 1);
+
+  const idx   = Math.min(parseInt(chunkIndex), chunks.length - 1);
   const chunk = chunks[idx];
 
-  const raw200 = chunk.content.slice(0, 200);
-  const hexCodes = Array.from(raw200).map((ch) => {
+  const raw200    = chunk.content.slice(0, 200);
+  const hexCodes  = Array.from(raw200).map((ch) => {
     const cp = ch.codePointAt(0)!;
     return cp > 0x007e || cp < 0x0020 ? `[U+${cp.toString(16).padStart(4, '0')}]` : ch;
   }).join('');
 
   const normalized = normalizeArabic(chunk.content);
-  const tokens = tokenize(chunk.content).slice(0, 20);
+  const tokens     = tokenize(chunk.content).slice(0, 20);
 
   const queryInfo = query ? {
-    queryNorm: normalizeArabic(query),
-    queryTokens: tokenize(query),
-    substringMatch: normalized.includes(normalizeArabic(query)),
+    queryNorm:       normalizeArabic(query),
+    queryTokens:     tokenize(query),
+    substringMatch:  normalized.includes(normalizeArabic(query)),
   } : undefined;
 
   res.json({
-    chunkIndex: idx,
-    totalChunks: chunks.length,
-    pageRange: chunk.pageRange,
-    chapter: chunk.chapter,
-    rawPreview: raw200,
-    hexCodes,
+    chunkIndex: idx, totalChunks: chunks.length,
+    pageRange: chunk.pageRange, chapter: chunk.chapter,
+    rawPreview: raw200, hexCodes,
     normalizedPreview: normalized.slice(0, 300),
     hasContentNormalized: 'contentNormalized' in chunk,
     keywords: chunk.keywords.slice(0, 15),
-    tokens,
-    queryInfo,
+    tokens, queryInfo,
   });
 });
 
-// GET /api/curriculum/verify/:id
-router.get('/verify/:id', (req, res) => {
-  const doc = getDocMeta(req.params.id);
-  if (!doc) {
-    res.status(404).json({ error: 'Document not found' });
+// ─── GET /api/curriculum/verify/:id ──────────────────────────────────────────
+router.get('/verify/:id', requireAuth, (req, res) => {
+  const doc = getDocMeta(str(req.params.id));
+  if (!doc) { res.status(404).json({ error: 'Document not found' }); return; }
+
+  const uid = req.user!.uid;
+  if (doc.visibility === 'private' && doc.ownerId !== uid && !isAdmin(req.user!)) {
+    res.status(403).json({ error: 'Access denied' });
     return;
   }
 
   invalidateChunkCache(doc.id);
   const chunks = loadChunks(doc.id);
 
-  // partial docs are searchable for their completed pages
   if (doc.status !== 'done' && doc.status !== 'partial') {
     res.json({ searchable: false, reason: `Status is '${doc.status}'`, chunkCount: 0, doc });
     return;
   }
-
   if (chunks.length === 0) {
     res.json({ searchable: false, reason: 'No chunks on disk', chunkCount: 0, doc });
     return;
   }
 
-  const results = searchChunks(doc.country, doc.grade, doc.subject, '', 1);
+  const results   = searchChunks(doc.country, doc.grade, doc.subject, '', 1, { userId: uid });
   const searchable = results.length > 0;
 
   res.json({
     searchable,
     reason: searchable
       ? doc.status === 'partial'
-        ? `Partial document is searchable (pages 1–${doc.lastRenderedPage ?? '?'} of ${doc.totalPages}). Resume OCR with POST /api/curriculum/docs/${doc.id}/resume`
+        ? `Partial doc is searchable (pages 1–${doc.lastRenderedPage ?? '?'} of ${doc.totalPages})`
         : 'Document is live in search index'
       : 'Search returned 0 results despite chunks existing',
     chunkCount: chunks.length,

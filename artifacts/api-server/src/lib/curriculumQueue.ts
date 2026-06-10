@@ -33,6 +33,12 @@ export interface Job {
   track: string;
   filename: string;
   docType?: 'book' | 'note' | 'exam';
+  /** Firebase UID of the uploader; null for admin-managed public books. */
+  ownerId?: string | null;
+  /** 'public' for curriculum books; 'private' for notes/exams. */
+  visibility?: 'public' | 'private';
+  /** Human-readable title, e.g. "النحو والصرف". */
+  bookTitle?: string;
   status: JobStatus;
   progress: { current: number; total: number };
   // For resume jobs: the 1-based PDF page to start OCR from.
@@ -118,6 +124,9 @@ export function enqueueJob(data: Omit<Job, 'id' | 'status' | 'progress' | 'creat
     uploadedAt: Date.now(),
     docType: data.docType,
     pdfStoragePath: permanentPath,
+    ownerId:    data.ownerId,
+    visibility: data.visibility ?? (data.docType === 'book' ? 'public' : 'private'),
+    bookTitle:  data.bookTitle,
   });
 
   setImmediate(processNext);

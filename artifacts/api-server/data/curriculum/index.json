@@ -11,7 +11,9 @@
     "status": "done",
     "uploadedAt": 1779963081730,
     "processedAt": 1779963082445,
-    "pdfStoragePath": "artifacts/api-server/data/pdfs/b1f370a7-c389-472c-b691-affbb8132e05.pdf"
+    "pdfStoragePath": "artifacts/api-server/data/pdfs/b1f370a7-c389-472c-b691-affbb8132e05.pdf",
+    "visibility": "public",
+    "bookTitle": "Ø§ÙØ£Ø­ÙØ§Ø¡ - Ø«Ø§ÙØ« Ø«Ø§ÙÙÙ"
   },
   {
     "id": "aeab0878-dd6e-4b44-8632-d633418ac70e",
@@ -30,7 +32,9 @@
     "extractionMethod": "ocr",
     "extractedChars": 40418,
     "extractedPages": 0,
-    "lastResumeAttempt": 1781075766326,
-    "resumeAttempts": 6
+    "lastResumeAttempt": 1781077262399,
+    "resumeAttempts": 8,
+    "visibility": "public",
+    "bookTitle": "ÙÙØ²ÙØ§Ø¡ 3"
   }
 ]
