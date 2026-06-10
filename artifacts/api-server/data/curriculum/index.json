@@ -14,23 +14,23 @@
     "pdfStoragePath": "artifacts/api-server/data/pdfs/b1f370a7-c389-472c-b691-affbb8132e05.pdf"
   },
   {
-    "id": "161f4996-d503-4a85-a220-319ac2960c1d",
+    "id": "aeab0878-dd6e-4b44-8632-d633418ac70e",
     "country": "sudan",
     "grade": "grade12",
     "subject": "physics",
     "track": "",
     "filename": "ÙÙØ²ÙØ§Ø¡ 3.pdf",
-    "totalPages": 215,
-    "chunkCount": 46,
+    "totalPages": 0,
+    "chunkCount": 12,
     "status": "partial",
-    "uploadedAt": 1780733722548,
-    "processedAt": 1780734305617,
+    "uploadedAt": 1780998729253,
     "docType": "book",
+    "pdfStoragePath": "/home/runner/workspace/artifacts/api-server/data/pdfs/aeab0878-dd6e-4b44-8632-d633418ac70e.pdf",
+    "lastRenderedPage": 40,
     "extractionMethod": "ocr",
-    "extractedChars": 164739,
-    "avgCharsPerPage": 1791,
-    "extractedPages": 92,
-    "pdfStoragePath": "artifacts/api-server/data/pdfs/161f4996-d503-4a85-a220-319ac2960c1d.pdf",
-    "lastRenderedPage": 92
+    "extractedChars": 40418,
+    "extractedPages": 0,
+    "lastResumeAttempt": 1781074874326,
+    "resumeAttempts": 5
   }
 ]
