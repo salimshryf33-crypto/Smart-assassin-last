@@ -1,12 +1,12 @@
 /**
- * Frontend API client for the curriculum system.
+ * Frontend API client for the curriculum + exam system.
  *
  * All requests automatically include a Firebase ID token so the backend can
  * identify the caller and enforce ownership / admin checks.
  */
 import { getAuth } from 'firebase/auth';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Types — Curriculum ───────────────────────────────────────────────────────
 
 export interface CurriculumDocMeta {
   id: string;
@@ -22,11 +22,8 @@ export interface CurriculumDocMeta {
   uploadedAt: number;
   processedAt?: number;
   docType?: 'book' | 'note' | 'exam';
-  /** e.g. "النحو والصرف", "فيزياء 3" — distinguishes multiple books per subject. */
   bookTitle?: string;
-  /** Firebase UID of the uploader; null for admin-managed public books. */
   ownerId?: string | null;
-  /** 'public' = curriculum books visible to all; 'private' = personal notes/exams. */
   visibility: 'public' | 'private';
   extractionMethod?: 'text' | 'virtual' | 'ocr';
   extractedChars?: number;
@@ -72,6 +69,164 @@ export interface MeResponse {
   isAdmin: boolean;
 }
 
+// ─── Types — Exam Bank ────────────────────────────────────────────────────────
+
+export interface ExamRecord {
+  examId: string;
+  curriculumDocId: string;
+  title: string;
+  bookTitle?: string | null;
+  subject: string;
+  grade: string;
+  country: string;
+  track?: string | null;
+  year?: string | null;
+  examType: string;
+  organization?: string | null;
+  ownerId?: string | null;
+  visibility: 'public' | 'private';
+  questionCount: number;
+  extractionStatus: 'pending' | 'extracting' | 'done' | 'error';
+  extractionError?: string | null;
+  extractedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ExamQuestion {
+  id: string;
+  examId: string;
+  question: string;
+  questionType: 'mcq' | 'true_false' | 'short_answer' | 'essay' | 'calculation';
+  options?: string[] | null;
+  correctAnswer?: string | null;
+  explanation?: string | null;
+  topic?: string | null;
+  chapter?: string | null;
+  subject: string;
+  grade: string;
+  country: string;
+  year?: string | null;
+  examType?: string | null;
+  difficulty?: 'easy' | 'medium' | 'hard' | null;
+  organization?: string | null;
+  questionOrder?: number | null;
+}
+
+// ─── Types — Exam Solver ──────────────────────────────────────────────────────
+
+export interface StartAttemptResponse {
+  attemptId: string;
+  examId: string;
+  /** Questions without correct answers — safe for display */
+  questions: Omit<ExamQuestion, 'correctAnswer' | 'explanation'>[];
+}
+
+export interface ExamAttempt {
+  id: string;
+  examId: string;
+  studentId: string;
+  status: 'in_progress' | 'completed' | 'abandoned';
+  totalQuestions: number;
+  correctCount: number;
+  scorePct: string | null;
+  startedAt: string;
+  completedAt: string | null;
+}
+
+export interface ExamAnswer {
+  id: string;
+  attemptId: string;
+  questionId: string;
+  studentAnswer: string | null;
+  isCorrect: boolean | null;
+  gradingMethod: string | null;
+  aiFeedback: string | null;
+  answeredAt: string;
+}
+
+export interface SubmitResult {
+  attemptId: string;
+  totalQuestions: number;
+  correctCount: number;
+  scorePct: number;
+}
+
+export interface AttemptResults {
+  attemptId: string;
+  examId: string;
+  studentId: string;
+  totalQuestions: number;
+  correctCount: number;
+  scorePct: string | null;
+  completedAt: string | null;
+  answers: Array<ExamAnswer & {
+    questionText: string | null;
+    correctAnswer: string | null;
+    explanation: string | null;
+    topic: string | null;
+    chapter: string | null;
+    questionType: string | null;
+    options: string[] | null;
+  }>;
+}
+
+export interface FlashcardSeedItem {
+  front: string;
+  back: string;
+  category: string;
+  source: 'exam_question';
+  examId: string;
+  questionId: string;
+  studentAnswer: string | null;
+  aiFeedback: string | null;
+}
+
+// ─── Types — Weakness ─────────────────────────────────────────────────────────
+
+export interface WeakTopicResult {
+  subject: string;
+  topic: string;
+  weaknessScore: number;
+  correct: number;
+  total: number;
+}
+
+export interface WeaknessSnapshot {
+  id: number;
+  studentId: string;
+  country: string;
+  grade: string;
+  subject: string;
+  topicScores: Record<string, { correct: number; total: number; score: number }>;
+  totalExams: number;
+  lastUpdated: string;
+}
+
+// ─── Types — Exam Generator ───────────────────────────────────────────────────
+
+export interface GenerateExamOptions {
+  country: string;
+  grade: string;
+  subject: string;
+  track?: string;
+  chapter?: string;
+  topic?: string;
+  year?: string;
+  examType?: string;
+  organization?: string;
+  count?: number;
+  title?: string;
+  bookTitle?: string;
+  typeBreakdown?: Record<string, number>;
+}
+
+export interface GenerateExamResult {
+  examId: string;
+  title: string;
+  questionCount: number;
+}
+
 // ─── Auth helper ──────────────────────────────────────────────────────────────
 
 async function getIdToken(): Promise<string | null> {
@@ -89,16 +244,23 @@ async function authHeaders(): Promise<HeadersInit> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-// ─── Base path ────────────────────────────────────────────────────────────────
+async function authJson(): Promise<HeadersInit> {
+  const token = await getIdToken();
+  const base: HeadersInit = { 'Content-Type': 'application/json' };
+  return token ? { ...base, Authorization: `Bearer ${token}` } : base;
+}
 
-const BASE = '/api/curriculum';
+// ─── Base paths ───────────────────────────────────────────────────────────────
 
-// ─── Endpoints ────────────────────────────────────────────────────────────────
+const CURR = '/api/curriculum';
+const EXAM = '/api/exams';
+const SOLV = '/api/exams/solve';
 
-/** Returns current user's UID and admin flag. */
+// ─── Curriculum endpoints ─────────────────────────────────────────────────────
+
 export async function getMe(): Promise<MeResponse | null> {
   try {
-    const res = await fetch(`${BASE}/me`, { headers: await authHeaders() });
+    const res = await fetch(`${CURR}/me`, { headers: await authHeaders() });
     if (!res.ok) return null;
     return res.json();
   } catch {
@@ -126,7 +288,7 @@ export async function uploadCurriculumPdf(
   form.append('docType', meta.docType ?? 'book');
   if (meta.bookTitle?.trim()) form.append('bookTitle', meta.bookTitle.trim());
 
-  const res = await fetch(`${BASE}/upload`, {
+  const res = await fetch(`${CURR}/upload`, {
     method: 'POST',
     headers: await authHeaders(),
     body: form,
@@ -139,19 +301,19 @@ export async function uploadCurriculumPdf(
 }
 
 export async function getJobStatus(jobId: string): Promise<JobStatus> {
-  const res = await fetch(`${BASE}/jobs/${jobId}`, { headers: await authHeaders() });
+  const res = await fetch(`${CURR}/jobs/${jobId}`, { headers: await authHeaders() });
   if (!res.ok) throw new Error(`Job ${jobId} not found`);
   return res.json();
 }
 
 export async function getCurriculumDocs(): Promise<CurriculumDocMeta[]> {
-  const res = await fetch(`${BASE}/docs`, { headers: await authHeaders() });
+  const res = await fetch(`${CURR}/docs`, { headers: await authHeaders() });
   if (!res.ok) return [];
   return res.json();
 }
 
 export async function deleteCurriculumDoc(id: string): Promise<void> {
-  const res = await fetch(`${BASE}/docs/${id}`, {
+  const res = await fetch(`${CURR}/docs/${id}`, {
     method: 'DELETE',
     headers: await authHeaders(),
   });
@@ -161,19 +323,13 @@ export async function deleteCurriculumDoc(id: string): Promise<void> {
   }
 }
 
-/**
- * Search curriculum chunks.
- *
- * @param bookTitle  Mode B — restrict to one specific book title.
- *                   Omit for Mode A (all books in the subject).
- */
 export async function resumeCurriculumDoc(docId: string): Promise<{
   jobId: string;
   docId: string;
   status: string;
   resumeFromPage: number;
 }> {
-  const res = await fetch(`${BASE}/docs/${docId}/resume`, {
+  const res = await fetch(`${CURR}/docs/${docId}/resume`, {
     method: 'POST',
     headers: await authHeaders(),
   });
@@ -195,8 +351,156 @@ export async function searchCurriculumApi(
   if (!country || !grade || !subject) return [];
   const params = new URLSearchParams({ country, grade, subject, query, topK: String(topK) });
   if (bookTitle) params.set('bookTitle', bookTitle);
-  const res = await fetch(`${BASE}/search?${params}`, { headers: await authHeaders() });
+  const res = await fetch(`${CURR}/search?${params}`, { headers: await authHeaders() });
   if (!res.ok) return [];
   const data = await res.json();
   return (data as { chunks?: CurriculumChunk[] }).chunks ?? [];
+}
+
+// ─── Exam Bank endpoints ──────────────────────────────────────────────────────
+
+export async function listExamRecords(): Promise<ExamRecord[]> {
+  const res = await fetch(`${EXAM}`, { headers: await authHeaders() });
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function getExamRecord(examId: string): Promise<ExamRecord | null> {
+  const res = await fetch(`${EXAM}/${examId}`, { headers: await authHeaders() });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function getExamQuestions(examId: string): Promise<ExamQuestion[]> {
+  const res = await fetch(`${EXAM}/${examId}/questions`, { headers: await authHeaders() });
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function deleteExamRecord(examId: string): Promise<void> {
+  const res = await fetch(`${EXAM}/${examId}`, {
+    method: 'DELETE',
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? 'Delete failed');
+  }
+}
+
+// ─── Exam Solver endpoints ────────────────────────────────────────────────────
+
+/** Start a new exam attempt and get questions (no correct answers). */
+export async function startExamAttempt(examId: string): Promise<StartAttemptResponse> {
+  const res = await fetch(`${SOLV}/start`, {
+    method: 'POST',
+    headers: await authJson(),
+    body: JSON.stringify({ examId }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? 'Failed to start attempt');
+  }
+  return res.json();
+}
+
+/** Save one answer during an in-progress attempt. Can be called multiple times to update. */
+export async function submitExamAnswer(
+  attemptId: string,
+  questionId: string,
+  answer: string
+): Promise<void> {
+  const res = await fetch(`${SOLV}/${attemptId}/answer`, {
+    method: 'POST',
+    headers: await authJson(),
+    body: JSON.stringify({ questionId, answer }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? 'Failed to save answer');
+  }
+}
+
+/** Finalize attempt: triggers auto-grading and weakness analysis. */
+export async function submitAttempt(attemptId: string): Promise<SubmitResult> {
+  const res = await fetch(`${SOLV}/${attemptId}/submit`, {
+    method: 'POST',
+    headers: await authJson(),
+    body: '{}',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? 'Failed to submit attempt');
+  }
+  return res.json();
+}
+
+/** Get attempt info and raw answers. */
+export async function getAttempt(
+  attemptId: string
+): Promise<{ attempt: ExamAttempt; answers: ExamAnswer[] }> {
+  const res = await fetch(`${SOLV}/${attemptId}`, { headers: await authHeaders() });
+  if (!res.ok) throw new Error(`Attempt ${attemptId} not found`);
+  return res.json();
+}
+
+/** Get full graded results with question text, correct answers, feedback. */
+export async function getAttemptResults(attemptId: string): Promise<AttemptResults> {
+  const res = await fetch(`${SOLV}/${attemptId}/results`, { headers: await authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? 'Failed to get results');
+  }
+  return res.json();
+}
+
+/**
+ * Get wrong answers formatted as flashcard seed data.
+ * Frontend should save them to Firestore with source='exam_question'.
+ */
+export async function getExamFlashcards(
+  attemptId: string
+): Promise<{ flashcards: FlashcardSeedItem[]; count: number }> {
+  const res = await fetch(`${SOLV}/${attemptId}/flashcards`, { headers: await authHeaders() });
+  if (!res.ok) return { flashcards: [], count: 0 };
+  return res.json();
+}
+
+// ─── Weakness endpoints ───────────────────────────────────────────────────────
+
+/** List all weakness snapshots for the current user. */
+export async function listWeaknessSnapshots(): Promise<{ snapshots: WeaknessSnapshot[] }> {
+  const res = await fetch(`${SOLV}/weakness/list`, { headers: await authHeaders() });
+  if (!res.ok) return { snapshots: [] };
+  return res.json();
+}
+
+/** Get ranked weak topics for a specific country + grade. */
+export async function getWeakTopics(
+  country: string,
+  grade: string
+): Promise<{ topics: WeakTopicResult[] }> {
+  const params = new URLSearchParams({ country, grade });
+  const res = await fetch(`${SOLV}/weakness/topics?${params}`, { headers: await authHeaders() });
+  if (!res.ok) return { topics: [] };
+  return res.json();
+}
+
+// ─── Exam Generator endpoint ──────────────────────────────────────────────────
+
+/**
+ * AI-generate a new exam from curriculum chunks.
+ * Admin → public exam. Regular user → private practice exam.
+ */
+export async function generateExam(opts: GenerateExamOptions): Promise<GenerateExamResult> {
+  const res = await fetch(`${EXAM}/generate`, {
+    method: 'POST',
+    headers: await authJson(),
+    body: JSON.stringify(opts),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? 'Exam generation failed');
+  }
+  return res.json();
 }

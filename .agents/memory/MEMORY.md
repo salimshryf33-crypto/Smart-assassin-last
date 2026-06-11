@@ -4,3 +4,4 @@
 - [Curriculum Doc Types](curriculum-doc-types.md) — docType field (book/note/exam) threads through storage→queue→routes→API→UI; OCR Stage 5 uses Gemini inline PDF (≤20MB).
 - [OCR Resume Architecture](ocr-resume-architecture.md) — QuotaExhaustedError + startFromPage + onBatchComplete in pdfExtractor; partial status + appendChunks + PDF permanent storage in queue/storage/routes.
 - [PDF Persistence Architecture](pdf-persistence.md) — Local disk is ephemeral; PDFs now dual-written to disk + PostgreSQL bytea; scheduler restores from DB if disk missing; legacy relative pdfStoragePath bug fixed.
+- [Exam Solver Architecture](exam-solver-architecture.md) — IExamSolverStore + 3 new PG tables; autoGrader (exact/AI); weaknessAnalyzer (fire-and-forget); examGenerator (curriculum chunks→Gemini); flashcard bridge via source='exam_question'.

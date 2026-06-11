@@ -27,6 +27,8 @@ export interface IExamQuestionStore {
 
   // ── ExamQuestion ────────────────────────────────────────────────────────────
   saveQuestions(questions: InsertExamQuestion[]): Promise<void>;
+  getQuestionById(id: string): Promise<ExamQuestion | null>;
+  getQuestionsByIds(ids: string[]): Promise<ExamQuestion[]>;
   getQuestionsByExam(examId: string): Promise<ExamQuestion[]>;
   searchQuestions(opts: {
     country: string;
@@ -101,6 +103,21 @@ class PostgresExamQuestionStore implements IExamQuestionStore {
     for (let i = 0; i < questions.length; i += CHUNK) {
       await db.insert(examQuestionsTable).values(questions.slice(i, i + CHUNK));
     }
+  }
+
+  async getQuestionById(id: string): Promise<ExamQuestion | null> {
+    const rows = await db
+      .select()
+      .from(examQuestionsTable)
+      .where(eq(examQuestionsTable.id, id))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async getQuestionsByIds(ids: string[]): Promise<ExamQuestion[]> {
+    if (ids.length === 0) return [];
+    const { inArray } = await import('drizzle-orm');
+    return db.select().from(examQuestionsTable).where(inArray(examQuestionsTable.id, ids));
   }
 
   async getQuestionsByExam(examId: string): Promise<ExamQuestion[]> {
