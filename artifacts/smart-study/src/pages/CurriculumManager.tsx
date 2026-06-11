@@ -107,15 +107,18 @@ export default function CurriculumManager() {
 
   useEffect(() => { refreshDocs(); }, [refreshDocs]);
 
-  // Auto-refresh every 30 s so partial/resuming/processing docs update without user action
+  // Auto-refresh: 5 s when OCR is actively running, 30 s otherwise.
+  // This drives the live progress bar on ocr_running / resuming cards.
   useEffect(() => {
-    const id = setInterval(() => {
-      const hasLiveDocs = docs.some((d) =>
-        d.status === 'partial' || d.status === 'resuming' ||
-        d.status === 'processing' || d.status === 'ocr_running' || d.status === 'queued'
-      );
-      if (hasLiveDocs) refreshDocs();
-    }, 30_000);
+    const hasActiveOcr = docs.some((d) =>
+      d.status === 'ocr_running' || d.status === 'resuming' || d.status === 'processing'
+    );
+    const hasAnyLive = hasActiveOcr || docs.some((d) =>
+      d.status === 'partial' || d.status === 'queued'
+    );
+    if (!hasAnyLive) return;
+
+    const id = setInterval(refreshDocs, hasActiveOcr ? 5_000 : 30_000);
     return () => clearInterval(id);
   }, [docs, refreshDocs]);
 
@@ -675,6 +678,47 @@ export default function CurriculumManager() {
                         );
                       })()}
                     </div>
+
+                    {/* ── Live OCR progress bar ── */}
+                    {(doc.status === 'ocr_running' || doc.status === 'resuming') && (() => {
+                      const isOcr     = doc.status === 'ocr_running';
+                      const color     = isOcr ? '#f59e0b' : '#8b5cf6';
+                      const colorMid  = isOcr ? 'rgba(245,158,11,0.55)' : 'rgba(139,92,246,0.55)';
+                      const hasPct    = doc.lastRenderedPage != null && doc.totalPages > 0;
+                      const pct       = hasPct ? Math.max(4, Math.round((doc.lastRenderedPage! / doc.totalPages) * 100)) : 0;
+                      return (
+                        <div className="mt-2 space-y-1">
+                          <div
+                            className="relative h-1 overflow-hidden rounded-full"
+                            style={{ background: 'rgba(255,255,255,0.05)' }}
+                          >
+                            {hasPct ? (
+                              <motion.div
+                                className="absolute inset-y-0 left-0 h-full rounded-full"
+                                style={{ background: `linear-gradient(90deg, ${colorMid}, ${color})` }}
+                                animate={{ width: `${pct}%` }}
+                                transition={{ duration: 0.9, ease: 'easeOut' }}
+                              />
+                            ) : (
+                              <motion.div
+                                className="absolute inset-y-0 h-full rounded-full"
+                                style={{ width: '35%', background: `linear-gradient(90deg, transparent, ${color}, transparent)` }}
+                                animate={{ left: ['-35%', '135%'] }}
+                                transition={{ duration: 1.6, repeat: Infinity, ease: 'easeInOut', repeatDelay: 0.15 }}
+                              />
+                            )}
+                          </div>
+                          <div className="flex items-center justify-between text-[9px]" style={{ color: 'rgba(255,255,255,0.28)' }}>
+                            <span>{isOcr ? 'Gemini Vision OCR...' : `استئناف من ص ${(doc.lastRenderedPage ?? 0) + 1}`}</span>
+                            {hasPct && (
+                              <span style={{ color }}>
+                                {doc.lastRenderedPage}/{doc.totalPages} ص · {pct}%
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
                   <div className="flex flex-col gap-1.5 flex-shrink-0">
                     {isAdmin && (doc.status === 'partial' || doc.status === 'error') && (
