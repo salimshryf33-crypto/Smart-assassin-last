@@ -1,100 +1,183 @@
 /**
- * IExamQuestionStore — interface + PostgreSQL implementation.
+ * IExamQuestionStore — interface + PostgresExamQuestionStore implementation.
  *
  * Architecture rule: NO route or business-logic file may import from
- * @workspace/db directly. All exam-question DB access goes through this module.
+ * @workspace/db directly. All exam DB access goes through this module only.
  */
-import { db, examQuestionsTable, type ExamQuestion, type InsertExamQuestion } from '@workspace/db';
-import { eq, and, or, isNull } from 'drizzle-orm';
+import { v4 as uuidv4 } from 'uuid';
+import {
+  db,
+  examRecordsTable,
+  examQuestionsTable,
+  type ExamRecord,
+  type InsertExamRecord,
+  type ExamQuestion,
+  type InsertExamQuestion,
+} from '@workspace/db';
+import { eq, and, or, sql } from 'drizzle-orm';
 
 // ─── Interface ────────────────────────────────────────────────────────────────
 
 export interface IExamQuestionStore {
-  /** Insert a batch of extracted questions for one document. */
+  // ── ExamRecord ──────────────────────────────────────────────────────────────
+  upsertExamRecord(record: InsertExamRecord): Promise<void>;
+  getExamRecord(examId: string): Promise<ExamRecord | null>;
+  listExamRecords(opts: { userId: string; isAdmin: boolean }): Promise<ExamRecord[]>;
+  deleteExamRecord(examId: string): Promise<void>;
+
+  // ── ExamQuestion ────────────────────────────────────────────────────────────
   saveQuestions(questions: InsertExamQuestion[]): Promise<void>;
-
-  /** Return all questions for a specific document (owner or admin check upstream). */
-  getByDoc(docId: string): Promise<ExamQuestion[]>;
-
-  /**
-   * Return questions visible to the given user:
-   *  - All public questions matching the filter.
-   *  - Private questions owned by `userId`.
-   */
-  getVisible(opts: {
+  getQuestionsByExam(examId: string): Promise<ExamQuestion[]>;
+  searchQuestions(opts: {
     country: string;
     grade: string;
     subject: string;
     userId: string;
+    isAdmin: boolean;
   }): Promise<ExamQuestion[]>;
-
-  /** Delete all questions belonging to a document. */
-  deleteByDoc(docId: string): Promise<void>;
-
-  /** Delete a single question by id. */
-  deleteById(id: number): Promise<void>;
-
-  /** Check whether questions have already been extracted for a document. */
-  hasQuestions(docId: string): Promise<boolean>;
+  deleteQuestionsByExam(examId: string): Promise<void>;
+  deleteQuestionById(id: string): Promise<void>;
+  hasQuestions(examId: string): Promise<boolean>;
 }
 
 // ─── PostgreSQL implementation ────────────────────────────────────────────────
 
-export const examStore: IExamQuestionStore = {
-  async saveQuestions(questions) {
+class PostgresExamQuestionStore implements IExamQuestionStore {
+  // ── ExamRecord ──────────────────────────────────────────────────────────────
+
+  async upsertExamRecord(record: InsertExamRecord): Promise<void> {
+    await db
+      .insert(examRecordsTable)
+      .values(record)
+      .onConflictDoUpdate({
+        target: examRecordsTable.examId,
+        set: {
+          extractionStatus: record.extractionStatus ?? 'pending',
+          extractionError:  record.extractionError  ?? null,
+          extractedAt:      record.extractedAt      ?? null,
+          questionCount:    record.questionCount     ?? 0,
+          updatedAt:        sql`NOW()`,
+        },
+      });
+  }
+
+  async getExamRecord(examId: string): Promise<ExamRecord | null> {
+    const rows = await db
+      .select()
+      .from(examRecordsTable)
+      .where(eq(examRecordsTable.examId, examId))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async listExamRecords({ userId, isAdmin }: { userId: string; isAdmin: boolean }): Promise<ExamRecord[]> {
+    if (isAdmin) {
+      return db.select().from(examRecordsTable);
+    }
+    return db
+      .select()
+      .from(examRecordsTable)
+      .where(
+        or(
+          eq(examRecordsTable.visibility, 'public'),
+          and(
+            eq(examRecordsTable.visibility, 'private'),
+            eq(examRecordsTable.ownerId, userId)
+          )
+        )
+      );
+  }
+
+  async deleteExamRecord(examId: string): Promise<void> {
+    // exam_questions are deleted via ON DELETE CASCADE
+    await db.delete(examRecordsTable).where(eq(examRecordsTable.examId, examId));
+  }
+
+  // ── ExamQuestion ────────────────────────────────────────────────────────────
+
+  async saveQuestions(questions: InsertExamQuestion[]): Promise<void> {
     if (questions.length === 0) return;
-    // Insert in chunks of 100 to stay well under parameter limits
     const CHUNK = 100;
     for (let i = 0; i < questions.length; i += CHUNK) {
       await db.insert(examQuestionsTable).values(questions.slice(i, i + CHUNK));
     }
-  },
+  }
 
-  async getByDoc(docId) {
+  async getQuestionsByExam(examId: string): Promise<ExamQuestion[]> {
     return db
       .select()
       .from(examQuestionsTable)
-      .where(eq(examQuestionsTable.docId, docId));
-  },
+      .where(eq(examQuestionsTable.examId, examId))
+      .orderBy(examQuestionsTable.questionOrder);
+  }
 
-  async getVisible({ country, grade, subject, userId }) {
-    return db
-      .select()
+  async searchQuestions({
+    country,
+    grade,
+    subject,
+    userId,
+    isAdmin,
+  }: {
+    country: string;
+    grade: string;
+    subject: string;
+    userId: string;
+    isAdmin: boolean;
+  }): Promise<ExamQuestion[]> {
+    // JOIN with exam_records to enforce visibility gate.
+    // exam_questions.source_exam_id = exam_records.exam_id
+    const rows = await db
+      .select({ q: examQuestionsTable })
       .from(examQuestionsTable)
+      .innerJoin(
+        examRecordsTable,
+        eq(examQuestionsTable.sourceExamId, examRecordsTable.examId)
+      )
       .where(
         and(
           eq(examQuestionsTable.country, country),
           eq(examQuestionsTable.grade, grade),
           eq(examQuestionsTable.subject, subject),
-          or(
-            eq(examQuestionsTable.visibility, 'public'),
-            and(
-              eq(examQuestionsTable.visibility, 'private'),
-              eq(examQuestionsTable.ownerId, userId)
-            )
-          )
+          isAdmin
+            ? undefined
+            : or(
+                eq(examRecordsTable.visibility, 'public'),
+                and(
+                  eq(examRecordsTable.visibility, 'private'),
+                  eq(examRecordsTable.ownerId, userId)
+                )
+              )
         )
-      );
-  },
+      )
+      .orderBy(examQuestionsTable.questionOrder);
 
-  async deleteByDoc(docId) {
-    await db
-      .delete(examQuestionsTable)
-      .where(eq(examQuestionsTable.docId, docId));
-  },
+    return rows.map((r) => r.q);
+  }
 
-  async deleteById(id) {
-    await db
-      .delete(examQuestionsTable)
-      .where(eq(examQuestionsTable.id, id));
-  },
+  async deleteQuestionsByExam(examId: string): Promise<void> {
+    await db.delete(examQuestionsTable).where(eq(examQuestionsTable.examId, examId));
+  }
 
-  async hasQuestions(docId) {
+  async deleteQuestionById(id: string): Promise<void> {
+    await db.delete(examQuestionsTable).where(eq(examQuestionsTable.id, id));
+  }
+
+  async hasQuestions(examId: string): Promise<boolean> {
     const rows = await db
       .select({ id: examQuestionsTable.id })
       .from(examQuestionsTable)
-      .where(eq(examQuestionsTable.docId, docId))
+      .where(eq(examQuestionsTable.examId, examId))
       .limit(1);
     return rows.length > 0;
-  },
-};
+  }
+}
+
+// ─── Singleton ────────────────────────────────────────────────────────────────
+
+export const examStore: IExamQuestionStore = new PostgresExamQuestionStore();
+
+// ─── Helper: build examId from docId (stable, idempotent) ────────────────────
+
+export function examIdFromDocId(docId: string): string {
+  return docId;
+}

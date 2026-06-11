@@ -18,6 +18,7 @@ import {
 import { extractPdf, QuotaExhaustedError } from './pdfExtractor';
 import { chunkText } from './chunker';
 import { savePdfToDb } from './pdfPersistence';
+import { triggerQuestionExtraction } from './questionExtractor';
 
 export type JobStatus = 'queued' | 'processing' | 'ocr_running' | 'partial' | 'done' | 'error';
 
@@ -454,6 +455,13 @@ async function processNext() {
       },
       'Curriculum PDF processed, quality-validated, and verified searchable'
     );
+
+    // ── Fire-and-forget: extract questions for exam documents ─────────────────
+    if (job.docType === 'exam') {
+      triggerQuestionExtraction(job.docId).catch((err) =>
+        logger.error({ jobId, docId: job.docId, err: String(err) }, 'triggerQuestionExtraction failed')
+      );
+    }
 
   } catch (err) {
     // ── Quota exhausted: save partial progress ────────────────────────────────

@@ -1,21 +1,26 @@
 /**
  * questionExtractor — AI-powered question extraction from exam chunks.
  *
- * Takes the CurriculumChunk[] produced by the OCR pipeline for a docType='exam'
- * document and calls Gemini to parse each chunk into structured Q&A records.
+ * Data flow (per the architecture plan):
+ *   1. getDocMeta(docId)   → curriculumStorage [UNCHANGED]
+ *   2. loadChunks(docId)   → curriculumStorage [UNCHANGED]
+ *   3. upsertExamRecord(status:'extracting')
+ *   4. batch chunks → Gemini API → JSON questions
+ *   5. validate
+ *   6. deduplicate
+ *   7. saveQuestions(examId, [...])
+ *   8. upsertExamRecord(status:'done')
  *
- * Architecture rule: this module does NOT touch PostgreSQL. It returns
- * InsertExamQuestion[] and lets the caller (curriculumQueue) persist via examStore.
+ * Architecture rule: this file never touches PostgreSQL directly.
+ * All DB writes go through examStore.
  */
-import type { CurriculumChunk } from './curriculumStorage';
-import type { InsertExamQuestion } from '@workspace/db';
+import { v4 as uuidv4 } from 'uuid';
+import { getDocMeta, loadChunks } from './curriculumStorage';
+import { examStore, examIdFromDocId } from './examStore';
 import { logger } from './logger';
+import type { InsertExamQuestion } from '@workspace/db';
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
-
-function getApiKey(): string | null {
-  return process.env.GEMINI_API_KEY ?? null;
-}
 
 // ─── Gemini call ──────────────────────────────────────────────────────────────
 
@@ -26,7 +31,7 @@ interface GeminiResponse {
 }
 
 async function callGemini(prompt: string): Promise<string> {
-  const apiKey = getApiKey();
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
 
   const res = await fetch(
@@ -36,7 +41,7 @@ async function callGemini(prompt: string): Promise<string> {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { maxOutputTokens: 2048, temperature: 0.1 },
+        generationConfig: { maxOutputTokens: 4096, temperature: 0.1 },
       }),
     }
   );
@@ -50,45 +55,54 @@ async function callGemini(prompt: string): Promise<string> {
   return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 }
 
-// ─── Prompt builder ───────────────────────────────────────────────────────────
+// ─── Prompt ───────────────────────────────────────────────────────────────────
 
-function buildExtractionPrompt(chunkText: string): string {
-  return `You are an exam question extractor for Arabic educational content.
+function buildPrompt(chunkText: string, examTitle: string): string {
+  return `أنت نظام استخراج أسئلة امتحانات للمحتوى التعليمي العربي.
 
-Extract ALL questions from the following exam text. For each question return a JSON array.
-Each element must be:
+استخرج كل الأسئلة من نص الامتحان التالي. أعد مصفوفة JSON فقط.
+كل عنصر يجب أن يكون:
 {
-  "questionText": "<full question text in Arabic>",
-  "questionType": "mcq" | "short_answer" | "essay",
-  "options": ["أ) ...", "ب) ...", "ج) ...", "د) ..."] or null,
-  "answer": "<correct answer or null if unknown>"
+  "question": "<نص السؤال كاملاً بالعربي>",
+  "questionType": "mcq" | "true_false" | "short_answer" | "essay" | "calculation",
+  "options": ["أ) ...", "ب) ...", "ج) ...", "د) ..."] أو null للأسئلة المقالية,
+  "correctAnswer": "<الإجابة الصحيحة أو null إذا لم تذكر في النص>",
+  "explanation": "<الشرح إن وُجد أو null>",
+  "topic": "<الموضوع إن وُجد>",
+  "chapter": "<الفصل إن وُجد>",
+  "difficulty": "easy" | "medium" | "hard" | null
 }
 
-Rules:
-- Only extract actual exam questions. Ignore headers, instructions, and page numbers.
-- For MCQ, populate "options" with the list of choices as written.
-- For short_answer / essay, set "options" to null.
-- If the correct answer is stated in the text, capture it in "answer". Otherwise null.
-- Respond with ONLY the JSON array, no markdown fences, no explanation.
-- If no questions found, respond with exactly: []
+قواعد:
+- استخرج الأسئلة الفعلية فقط. تجاهل العناوين والتعليمات وأرقام الصفحات.
+- للاختيار من متعدد، ضع الخيارات في "options".
+- للصواب/الخطأ، ضع ["صواب", "خطأ"] في "options".
+- إذا ذُكرت الإجابة في النص، ضعها في "correctAnswer"، وإلا null.
+- أجب بمصفوفة JSON فقط، بدون أي نص إضافي أو markdown.
+- إذا لم توجد أسئلة، أجب بـ: []
 
-EXAM TEXT:
+عنوان الامتحان: ${examTitle}
+
+نص الامتحان:
 ${chunkText}`;
 }
 
-// ─── Parsed question from AI response ────────────────────────────────────────
+// ─── Response parser ──────────────────────────────────────────────────────────
 
 interface ParsedQuestion {
-  questionText: string;
-  questionType: 'mcq' | 'short_answer' | 'essay';
-  options: string[] | null;
-  answer: string | null;
+  question:      string;
+  questionType:  string;
+  options:       string[] | null;
+  correctAnswer: string | null;
+  explanation:   string | null;
+  topic:         string | null;
+  chapter:       string | null;
+  difficulty:    string | null;
 }
 
 function parseResponse(raw: string): ParsedQuestion[] {
-  const text = raw.trim();
-  // Strip markdown fences if Gemini added them despite instructions
-  const cleaned = text
+  const cleaned = raw
+    .trim()
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/\s*```$/i, '')
     .trim();
@@ -100,80 +114,180 @@ function parseResponse(raw: string): ParsedQuestion[] {
       (q): q is ParsedQuestion =>
         typeof q === 'object' &&
         q !== null &&
-        typeof (q as Record<string, unknown>).questionText === 'string' &&
-        (q as Record<string, unknown>).questionText.length > 0
+        typeof (q as Record<string, unknown>).question === 'string' &&
+        (q as Record<string, unknown>).question !== ''
     );
   } catch {
     return [];
   }
 }
 
-// ─── Main extractor ───────────────────────────────────────────────────────────
+// ─── Deduplication ────────────────────────────────────────────────────────────
 
-export interface ExtractionMeta {
-  docId: string;
-  ownerId: string | null;
-  visibility: 'public' | 'private';
-  country: string;
-  grade: string;
-  subject: string;
-  track: string;
+function deduplicateQuestions(questions: ParsedQuestion[]): ParsedQuestion[] {
+  const seen = new Set<string>();
+  return questions.filter((q) => {
+    // Normalize: lowercase + strip whitespace for comparison
+    const key = q.question.replace(/\s+/g, ' ').trim().toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
+// ─── Trigger (fire-and-forget, called from curriculumQueue) ──────────────────
+
 /**
- * Extract structured exam questions from a list of curriculum chunks.
- *
- * Processes chunks in series (no parallel Gemini calls) to stay within quota.
- * Skips chunks that are too short to contain questions (< 100 chars).
- *
- * @returns InsertExamQuestion[] — ready to pass to examStore.saveQuestions()
+ * Trigger question extraction for a finished exam document.
+ * Designed to be called fire-and-forget: errors are logged, never thrown.
  */
-export async function extractQuestionsFromChunks(
-  chunks: CurriculumChunk[],
-  meta: ExtractionMeta
-): Promise<InsertExamQuestion[]> {
-  const results: InsertExamQuestion[] = [];
+export async function triggerQuestionExtraction(docId: string): Promise<void> {
+  const examId = examIdFromDocId(docId);
 
-  for (const chunk of chunks) {
-    if (chunk.content.trim().length < 100) continue;
+  try {
+    const doc = getDocMeta(docId);
+    if (!doc) {
+      logger.warn({ docId }, 'triggerQuestionExtraction: doc not found in index, skipping');
+      return;
+    }
 
+    if (doc.docType !== 'exam') {
+      return;
+    }
+
+    // Skip if already extracted
+    const already = await examStore.hasQuestions(examId);
+    if (already) {
+      logger.info({ docId, examId }, 'triggerQuestionExtraction: already extracted, skipping');
+      return;
+    }
+
+    const chunks = loadChunks(docId);
+    if (chunks.length === 0) {
+      logger.warn({ docId }, 'triggerQuestionExtraction: no chunks found, skipping');
+      return;
+    }
+
+    const examTitle = doc.bookTitle ?? doc.filename.replace(/\.pdf$/i, '');
+    const visibility = doc.visibility ?? 'private';
+    const ownerId   = (visibility === 'public') ? null : (doc.ownerId ?? null);
+
+    // ── 3. upsertExamRecord(status:'extracting') ─────────────────────────────
+    await examStore.upsertExamRecord({
+      examId,
+      curriculumDocId:  docId,
+      title:            examTitle,
+      bookTitle:        doc.bookTitle ?? null,
+      subject:          doc.subject,
+      grade:            doc.grade,
+      country:          doc.country,
+      track:            doc.track ?? '',
+      year:             null,
+      examType:         'final',
+      organization:     null,
+      ownerId,
+      visibility,
+      questionCount:    0,
+      extractionStatus: 'extracting',
+      extractionError:  null,
+      extractedAt:      null,
+    });
+
+    logger.info(
+      { docId, examId, chunks: chunks.length, title: examTitle },
+      'triggerQuestionExtraction: starting extraction'
+    );
+
+    // ── 4. Batch chunks → Gemini → JSON ─────────────────────────────────────
+    const allParsed: ParsedQuestion[] = [];
+
+    for (const chunk of chunks) {
+      if (chunk.content.trim().length < 80) continue;
+      try {
+        const raw    = await callGemini(buildPrompt(chunk.content, examTitle));
+        const parsed = parseResponse(raw);
+        allParsed.push(...parsed);
+        logger.debug(
+          { docId, chunkIndex: chunk.chunkIndex, extracted: parsed.length },
+          'triggerQuestionExtraction: chunk done'
+        );
+      } catch (err) {
+        logger.warn(
+          { docId, chunkIndex: chunk.chunkIndex, err: String(err) },
+          'triggerQuestionExtraction: chunk skipped — Gemini error'
+        );
+      }
+    }
+
+    // ── 5-6. Validate + deduplicate ──────────────────────────────────────────
+    const deduped = deduplicateQuestions(allParsed);
+
+    // ── 7. saveQuestions ──────────────────────────────────────────────────────
+    const toInsert: InsertExamQuestion[] = deduped.map((q, idx) => ({
+      id:               uuidv4(),
+      examId,
+      question:         q.question,
+      questionType:     q.questionType ?? 'short_answer',
+      options:          q.options ?? null,
+      correctAnswer:    q.correctAnswer ?? null,
+      explanation:      q.explanation ?? null,
+      topic:            q.topic ?? null,
+      chapter:          q.chapter ?? null,
+      subject:          doc.subject,
+      grade:            doc.grade,
+      country:          doc.country,
+      year:             null,
+      examType:         'final',
+      difficulty:       q.difficulty ?? null,
+      organization:     null,
+      sourceExamId:     examId,
+      sourceExamTitle:  examTitle,
+      questionOrder:    idx + 1,
+    }));
+
+    await examStore.saveQuestions(toInsert);
+
+    // ── 8. upsertExamRecord(status:'done') ────────────────────────────────────
+    await examStore.upsertExamRecord({
+      examId,
+      curriculumDocId:  docId,
+      title:            examTitle,
+      bookTitle:        doc.bookTitle ?? null,
+      subject:          doc.subject,
+      grade:            doc.grade,
+      country:          doc.country,
+      track:            doc.track ?? '',
+      year:             null,
+      examType:         'final',
+      organization:     null,
+      ownerId,
+      visibility,
+      questionCount:    toInsert.length,
+      extractionStatus: 'done',
+      extractionError:  null,
+      extractedAt:      new Date(),
+    });
+
+    logger.info(
+      { docId, examId, totalQuestions: toInsert.length },
+      'triggerQuestionExtraction: done'
+    );
+
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ docId, examId, err: msg }, 'triggerQuestionExtraction: failed');
+
+    // Mark as error (best-effort)
     try {
-      const raw = await callGemini(buildExtractionPrompt(chunk.content));
-      const parsed = parseResponse(raw);
-
-      for (const q of parsed) {
-        results.push({
-          docId:           meta.docId,
-          ownerId:         meta.ownerId,
-          visibility:      meta.visibility,
-          country:         meta.country,
-          grade:           meta.grade,
-          subject:         meta.subject,
-          track:           meta.track,
-          questionText:    q.questionText,
-          questionType:    q.questionType,
-          options:         q.options ?? null,
-          answer:          q.answer ?? null,
-          sourcePageRange: chunk.pageRange ?? null,
+      const doc = getDocMeta(docId);
+      const existing = await examStore.getExamRecord(examId);
+      if (existing) {
+        await examStore.upsertExamRecord({
+          ...existing,
+          extractionStatus: 'error',
+          extractionError:  msg,
         });
       }
-
-      logger.debug(
-        { docId: meta.docId, chunkIndex: chunk.chunkIndex, extracted: parsed.length },
-        'questionExtractor: chunk processed'
-      );
-    } catch (err) {
-      logger.warn(
-        { docId: meta.docId, chunkIndex: chunk.chunkIndex, err: String(err) },
-        'questionExtractor: skipping chunk — Gemini error'
-      );
-    }
+    } catch { /* ignore */ }
   }
-
-  logger.info(
-    { docId: meta.docId, totalQuestions: results.length, totalChunks: chunks.length },
-    'questionExtractor: extraction complete'
-  );
-
-  return results;
 }
