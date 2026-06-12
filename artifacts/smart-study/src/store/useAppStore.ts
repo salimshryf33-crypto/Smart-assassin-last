@@ -3,7 +3,7 @@ import { persist } from 'zustand/middleware';
 import { type GamificationData, DEFAULT_GAMIFICATION } from '../lib/gamification';
 import { type DailyChecklist, DEFAULT_DAILY_CHECKLIST } from '../lib/streakEngine';
 
-export type Page = 'splash' | 'profile-setup' | 'home' | 'flashcards' | 'focus' | 'chat' | 'search' | 'profile' | 'settings' | 'curriculum-manager';
+export type Page = 'splash' | 'profile-setup' | 'home' | 'flashcards' | 'focus' | 'chat' | 'search' | 'profile' | 'settings' | 'curriculum-manager' | 'exams' | 'exam-solver' | 'exam-results';
 
 export type Country = 'egypt' | 'sudan';
 export type Level = 'primary' | 'preparatory' | 'secondary';
@@ -99,6 +99,18 @@ const DEFAULT_STUDENT_PROFILE: StudentProfile = {
   profileComplete: false,
 };
 
+export interface ExamNav {
+  selectedExamId: string | null;
+  selectedAttemptId: string | null;
+  examsSubTab: 'my-exams' | 'bank' | 'weakness';
+}
+
+const DEFAULT_EXAM_NAV: ExamNav = {
+  selectedExamId: null,
+  selectedAttemptId: null,
+  examsSubTab: 'my-exams',
+};
+
 interface AppState {
   currentPage: Page;
   flashcards: Flashcard[];
@@ -111,6 +123,7 @@ interface AppState {
   gamification: GamificationData;
   dailyChecklist: DailyChecklist;
   activeFlashcardIndex: number;
+  examNav: ExamNav;
   pomodoroState: {
     isRunning: boolean;
     mode: 'work' | 'break';
@@ -150,6 +163,7 @@ interface AppState {
   hydrateGamification: (data: GamificationData) => void;
   updateDailyChecklist: (updates: Partial<DailyChecklist>) => void;
   hydrateDailyChecklist: (checklist: DailyChecklist) => void;
+  setExamNav: (updates: Partial<ExamNav>) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -166,6 +180,7 @@ export const useAppStore = create<AppState>()(
       gamification: DEFAULT_GAMIFICATION,
       dailyChecklist: DEFAULT_DAILY_CHECKLIST,
       activeFlashcardIndex: 0,
+      examNav: DEFAULT_EXAM_NAV,
       pomodoroState: {
         isRunning: false,
         mode: 'work',
@@ -302,6 +317,9 @@ export const useAppStore = create<AppState>()(
 
       hydrateDailyChecklist: (checklist) =>
         set({ dailyChecklist: { ...DEFAULT_DAILY_CHECKLIST, ...checklist } }),
+
+      setExamNav: (updates) =>
+        set((state) => ({ examNav: { ...state.examNav, ...updates } })),
     }),
     {
       name: 'smart-study-assistant',

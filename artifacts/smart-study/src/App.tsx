@@ -14,9 +14,12 @@ import SearchPage from './pages/SearchPage';
 import ProfilePage from './pages/ProfilePage';
 import SettingsPage from './pages/SettingsPage';
 import CurriculumManager from './pages/CurriculumManager';
+import ExamsPage from './pages/ExamsPage';
+import ExamSolverPage from './pages/ExamSolverPage';
+import ExamResultsPage from './pages/ExamResultsPage';
 import { Brain, MailWarning, X } from 'lucide-react';
 
-const NO_NAV_PAGES = new Set(['splash', 'profile-setup', 'login', 'curriculum-manager']);
+const NO_NAV_PAGES = new Set(['splash', 'profile-setup', 'login', 'curriculum-manager', 'exam-solver']);
 
 // ─── Loading Screen ───────────────────────────────────────────────────────────
 
@@ -166,7 +169,10 @@ function AppContent() {
       case 'profile':           return <ProfilePage key="profile" />;
       case 'settings':          return <SettingsPage key="settings" />;
       case 'curriculum-manager': return <CurriculumManager key="curriculum-manager" />;
-      default:                  return <HomeDashboard key="home" />;
+      case 'exams':              return <ExamsPage key="exams" />;
+      case 'exam-solver':        return <ExamSolverPage key="exam-solver" />;
+      case 'exam-results':       return <ExamResultsPage key="exam-results" />;
+      default:                   return <HomeDashboard key="home" />;
     }
   };
 

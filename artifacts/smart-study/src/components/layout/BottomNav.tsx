@@ -1,13 +1,13 @@
 import { motion } from 'framer-motion';
-import { Home, BookOpen, Timer, MessageCircle, User } from 'lucide-react';
+import { Home, BookOpen, GraduationCap, MessageCircle, User } from 'lucide-react';
 import { useAppStore, Page } from '../../store/useAppStore';
 
 const TABS: { id: Page; icon: typeof Home; label: string }[] = [
-  { id: 'home', icon: Home, label: 'Home' },
-  { id: 'flashcards', icon: BookOpen, label: 'Cards' },
-  { id: 'focus', icon: Timer, label: 'Focus' },
-  { id: 'chat', icon: MessageCircle, label: 'Chat' },
-  { id: 'profile', icon: User, label: 'Profile' },
+  { id: 'home',      icon: Home,           label: 'الرئيسية' },
+  { id: 'flashcards', icon: BookOpen,      label: 'البطاقات' },
+  { id: 'exams',     icon: GraduationCap,  label: 'الامتحانات' },
+  { id: 'chat',      icon: MessageCircle,  label: 'المساعد' },
+  { id: 'profile',   icon: User,           label: 'الملف' },
 ];
 
 export default function BottomNav() {
@@ -27,7 +27,7 @@ export default function BottomNav() {
       <div
         className="mx-3 mb-3 rounded-3xl px-2 py-2"
         style={{
-          background: 'rgba(10, 15, 30, 0.85)',
+          background: 'rgba(10, 15, 30, 0.92)',
           backdropFilter: 'blur(24px)',
           WebkitBackdropFilter: 'blur(24px)',
           border: '1px solid rgba(255,255,255,0.08)',
@@ -37,7 +37,8 @@ export default function BottomNav() {
         <div className="flex items-center justify-around">
           {TABS.map((tab) => {
             const Icon = tab.icon;
-            const isActive = currentPage === tab.id;
+            const isActive = currentPage === tab.id ||
+              (tab.id === 'exams' && ['exam-solver', 'exam-results'].includes(currentPage));
 
             return (
               <motion.button
