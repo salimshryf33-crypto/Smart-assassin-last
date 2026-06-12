@@ -44,18 +44,20 @@
     "subject": "biology",
     "track": "",
     "filename": "Ø¥ÙØªØ­Ø§Ù Ø§ÙØ£Ø­ÙØ§Ø¡ 2022 (1).pdf",
-    "totalPages": 0,
-    "chunkCount": 0,
-    "status": "error",
+    "totalPages": 36,
+    "chunkCount": 18,
+    "status": "done",
     "uploadedAt": 1781278199535,
+    "processedAt": 1781283969931,
     "docType": "exam",
+    "extractionMethod": "ocr",
+    "extractedChars": 71179,
+    "avgCharsPerPage": 1977,
+    "extractedPages": 36,
     "pdfStoragePath": "/home/runner/workspace/artifacts/api-server/data/pdfs/46ac42b7-cd8b-446e-8f57-b7d28bf9c51a.pdf",
+    "lastRenderedPage": 8,
     "ownerId": "JlLBDDgQpkRtgJ3efZ8Lp7yhijr2",
     "visibility": "private",
-    "bookTitle": "Ø¥ÙØªØ­Ø§Ù Ø§ÙØ£Ø­ÙØ§Ø¡ 2022 (1)",
-    "lastRenderedPage": 0,
-    "resumeAttempts": 1,
-    "lastResumeAttempt": 1781283549934,
-    "errorMessage": "PDF extraction produced 0 usable pages after all stages (including OCR). File may be encrypted, blank, or the OCR service is unavailable. totalPages=8, extractionMethod=ocr"
+    "bookTitle": "Ø¥ÙØªØ­Ø§Ù Ø§ÙØ£Ø­ÙØ§Ø¡ 2022 (1)"
   }
 ]
