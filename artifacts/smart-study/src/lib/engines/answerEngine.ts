@@ -89,7 +89,7 @@ async function retrieveContext(
       curriculum.level,
       curriculum.subject,
       query,
-      5
+      10
     );
     if (!chunks.length) return null;
     return { chunks: chunks.length, formatted: formatCurriculumContext(chunks) };

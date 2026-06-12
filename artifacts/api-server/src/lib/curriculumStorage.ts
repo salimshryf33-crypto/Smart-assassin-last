@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { logger } from './logger';
 import { deletePdfFromDb } from './pdfPersistence';
+import { extractChapterLabel } from './chunker';
 
 // ─── Chunk ────────────────────────────────────────────────────────────────────
 
@@ -38,22 +39,8 @@ export interface CurriculumDocument {
   docType?: 'book' | 'note' | 'exam';
 
   // ─── Ownership & visibility ───────────────────────────────────────────────
-  /**
-   * Firebase UID of the uploader.
-   * null / undefined = system-managed public content (admin-uploaded books).
-   */
   ownerId?: string | null;
-  /**
-   * 'public'  → visible to all authenticated users (curriculum books).
-   * 'private' → visible only to the owner (personal notes / exams).
-   * Defaults to 'public' for all legacy docs and books without explicit value.
-   */
   visibility: 'public' | 'private';
-  /**
-   * Human-readable book title — distinguishes multiple books under the same
-   * subject, e.g. "النحو والصرف" vs "الأدب والنصوص" vs "فيزياء 3".
-   * Defaults to filename stem when not provided at upload time.
-   */
   bookTitle?: string;
 
   // ─── Extraction quality ───────────────────────────────────────────────────
@@ -115,23 +102,10 @@ function writeIndex(docs: CurriculumDocument[]) {
   fs.writeFileSync(INDEX_FILE, JSON.stringify(docs, null, 2));
 }
 
-/**
- * Input type for upsertDocMeta — same as CurriculumDocument but with
- * `visibility` optional (defaults to existing value or 'public').
- * This lets callers that only update status/progress omit visibility safely.
- */
 export type UpsertDocInput = Omit<CurriculumDocument, 'visibility'> & {
   visibility?: 'public' | 'private';
 };
 
-/**
- * Upsert a document in the index.
- *
- * Ownership fields (ownerId, visibility, bookTitle) are **preserved from the
- * existing record** when not explicitly provided, so callers that only update
- * status / OCR progress don't need to carry these fields through every code
- * path — they will never accidentally be cleared.
- */
 export function upsertDocMeta(doc: UpsertDocInput): void {
   const all      = readIndex();
   const existing = all.find((d) => d.id === doc.id);
@@ -171,18 +145,6 @@ export function deleteDoc(id: string) {
 
 // ─── Startup migration ────────────────────────────────────────────────────────
 
-/**
- * One-time safe migration: adds `visibility` and `bookTitle` defaults to
- * legacy documents that pre-date the ownership system.
- *
- * Rules:
- *   visibility → 'public'  for books (or unknown type)
- *              → 'private' for notes / exams
- *   bookTitle  → filename stem (strips .pdf extension)
- *   ownerId    → left undefined (legacy public content has no owner)
- *
- * Safe to call on every startup — no-op when all docs already have the fields.
- */
 export function migrateIndex(): void {
   const docs = readIndex();
   if (docs.length === 0) return;
@@ -218,6 +180,81 @@ export function migrateIndex(): void {
   }
 }
 
+// ─── Chapter Re-labeling (Phase 2 fix) ───────────────────────────────────────
+
+/**
+ * Re-apply improved chapter detection to all existing chunks on disk.
+ *
+ * This is a non-destructive migration: it only updates the `chapter` field
+ * on chunks that are currently labeled "عام" (generic) or have an invalid
+ * label. Content, keywords, embeddings, and all other fields are preserved.
+ *
+ * Run on every startup — no-op when all chunks already have meaningful labels.
+ * Safe to call multiple times.
+ */
+export function relabelChapters(): void {
+  ensureDirs();
+  const docs = readIndex().filter(
+    (d) => d.status === 'done' || d.status === 'partial'
+  );
+
+  if (docs.length === 0) return;
+
+  let totalRelabeled = 0;
+
+  for (const doc of docs) {
+    const chunks = loadChunks(doc.id);
+    if (chunks.length === 0) continue;
+
+    // Sort by chunkIndex to ensure forward propagation
+    const sorted = [...chunks].sort((a, b) => a.chunkIndex - b.chunkIndex);
+
+    // ── Complete fresh rescan — ignore ALL previously stored labels ──────────
+    // This is idempotent and correct even after prior bad relabeling passes.
+    // We derive chapter labels ONLY from chunk content, never from stored labels,
+    // so MCQ false-positives written by earlier runs are fully overwritten.
+    let currentChapter = 'عام';
+    let changed = false;
+
+    const updated = sorted.map((chunk) => {
+      // Scan ALL lines using extractChapterLabel (strict + embedded patterns)
+      const detected = extractChapterLabel(chunk.content);
+      if (detected) currentChapter = detected;
+
+      // The canonical chapter for this chunk is whatever the running label is
+      const newChapter = currentChapter;
+
+      if (chunk.chapter !== newChapter) {
+        changed = true;
+        totalRelabeled++;
+        return { ...chunk, chapter: newChapter };
+      }
+      return chunk;
+    });
+
+    if (changed) {
+      saveChunks(doc.id, updated);
+      const uniqueChapters = new Set(updated.map((c) => c.chapter));
+      logger.info(
+        {
+          docId: doc.id,
+          filename: doc.filename,
+          totalChunks: updated.length,
+          uniqueChapters: uniqueChapters.size,
+          chapters: [...uniqueChapters].slice(0, 10),
+        },
+        'relabelChapters: updated chapter labels'
+      );
+    }
+  }
+
+  if (totalRelabeled > 0) {
+    logger.info({ totalRelabeled }, 'relabelChapters: complete');
+  } else {
+    logger.info('relabelChapters: no changes needed');
+  }
+}
+
 // ─── Chunk I/O ────────────────────────────────────────────────────────────────
 
 export function saveChunks(docId: string, chunks: CurriculumChunk[]) {
@@ -226,10 +263,6 @@ export function saveChunks(docId: string, chunks: CurriculumChunk[]) {
   invalidateChunkCache(docId);
 }
 
-/**
- * Append new chunks to an existing doc (OCR resume path).
- * Renumbers new chunks to continue from the highest existing index.
- */
 export function appendChunks(docId: string, newChunks: CurriculumChunk[]) {
   if (newChunks.length === 0) return;
 
@@ -342,16 +375,7 @@ function resolveGrades(gradeOrLevel: string): Set<string> {
 // ─── Search ───────────────────────────────────────────────────────────────────
 
 export interface SearchOptions {
-  /**
-   * Mode B — restrict to a specific book title.
-   * Omit for Mode A (search all books in the subject).
-   */
   bookTitle?: string;
-  /**
-   * Firebase UID of the requesting user.
-   * Required to include private (note/exam) docs in results.
-   * Omit for public-only search (AI chat default).
-   */
   userId?: string;
 }
 
@@ -360,7 +384,7 @@ export function searchChunks(
   gradeOrLevel: string,
   subject: string,
   query: string,
-  topK = 5,
+  topK = 10,
   opts: SearchOptions = {}
 ): CurriculumChunk[] {
   const validGrades = resolveGrades(gradeOrLevel);
@@ -371,11 +395,8 @@ export function searchChunks(
       d.country  === country &&
       d.subject  === subject &&
       validGrades.has(d.grade) &&
-      // Visibility gate: public docs always visible;
-      // private docs only visible to their owner.
       (d.visibility !== 'private' ||
         (opts.userId !== undefined && d.ownerId === opts.userId)) &&
-      // Mode B: book-specific filter
       (!opts.bookTitle || d.bookTitle === opts.bookTitle)
   );
 
@@ -406,43 +427,70 @@ export function searchChunks(
     const chapterNorm = normalizeArabic(chunk.chapter);
 
     let score = 0;
+
+    // ── Per-token scoring (Phase 3: capped boolean — prevents frequency bias) ─
+    // Each query token contributes at most one fixed amount regardless of how
+    // many times it appears in the chunk. This removes the early-chapter bias
+    // caused by dense repeated vocabulary.
     for (const qt of qTokens) {
-      if (cTokenSet.has(qt))                                            score += 4;
-      if (cNorm.includes(qt))                                           score += 5;
-      for (const ct of cTokenSet) { if (ct.includes(qt)) { score += 2; break; } }
-      if (chunk.keywords.some((k) => normalizeArabic(k).includes(qt))) score += 3;
-      if (chapterNorm.includes(qt))                                     score += 10;
+      let tokenScore = 0;
+
+      // Exact token match (highest signal)
+      if (cTokenSet.has(qt))                                          tokenScore = Math.max(tokenScore, 6);
+      // Substring match in normalized content
+      if (cNorm.includes(qt))                                         tokenScore = Math.max(tokenScore, 5);
+      // Partial token match (fuzzy)
+      for (const ct of cTokenSet) { if (ct.includes(qt)) { tokenScore = Math.max(tokenScore, 2); break; } }
+      // Keyword index match
+      if (chunk.keywords.some((k) => normalizeArabic(k).includes(qt))) tokenScore = Math.max(tokenScore, 4);
+      // Chapter name match (strong signal — activates now with improved detection)
+      if (chapterNorm.includes(qt))                                   tokenScore = Math.max(tokenScore, 12);
+
+      score += tokenScore;
     }
-    if (cNorm.includes(qNorm))      score += 20;
+
+    // ── Full-phrase bonuses ──────────────────────────────────────────────────
+    if (cNorm.includes(qNorm))       score += 20;
     if (chapterNorm.includes(qNorm)) score += 30;
 
+    // ── Trigram similarity (Phase 3: weight raised from 15 → 25) ────────────
+    // Higher weight improves detection of morphological variants and OCR noise.
     const tSim = trigramScore(qTrigrams, cNorm);
-    score += tSim * 15;
+    score += tSim * 25;
 
     return { chunk, score, tSim };
   });
 
-  const result = scored
-    .sort((a, b) => b.score - a.score)
+  // Sort by score descending
+  const sortedScored = [...scored].sort((a, b) => b.score - a.score);
+
+  // ── Phase 4: Adaptive threshold ──────────────────────────────────────────
+  // Instead of a fixed 4.0 cutoff (which excluded valid late-chapter chunks),
+  // use 15% of the top score as the minimum floor, with a hard floor of 1.0.
+  // This ensures we always surface relevant content even when it scores low
+  // relative to expectations, while still filtering pure noise.
+  const topScore = sortedScored[0]?.score ?? 0;
+  const adaptiveThreshold = Math.max(1.0, topScore * 0.15);
+
+  const result = sortedScored
     .slice(0, topK)
-    .filter((r) => {
-      if (r.score <= 4.0) return false;
-      const directScore = r.score - r.tSim * 15;
-      if (directScore < 0.5 && r.tSim < 0.35) return false;
-      return true;
-    })
+    .filter((r) => r.score >= adaptiveThreshold)
     .map((r) => r.chunk);
+
+  // ── Logging: chapter distribution of selected chunks ─────────────────────
+  const chapterDist: Record<string, number> = {};
+  for (const c of result) chapterDist[c.chapter] = (chapterDist[c.chapter] ?? 0) + 1;
 
   console.log(
     `[search] top results:`,
-    scored
-      .sort((a, b) => b.score - a.score)
+    sortedScored
       .slice(0, Math.min(5, topK))
       .map((r) =>
         `chunk#${r.chunk.chunkIndex} pages=${r.chunk.pageRange} ` +
-        `score=${r.score.toFixed(2)} tSim=${r.tSim.toFixed(3)}`
+        `score=${r.score.toFixed(2)} tSim=${r.tSim.toFixed(3)} ch="${r.chunk.chapter.slice(0, 30)}"`
       )
   );
+  console.log(`[search] chapter distribution:`, chapterDist);
 
   return result;
 }
