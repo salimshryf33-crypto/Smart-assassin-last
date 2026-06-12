@@ -15,8 +15,8 @@ let _app: App | null = null;
 function getAdminApp(): App {
   if (_app) return _app;
 
-  const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
-  if (!raw) throw new Error('FIREBASE_SERVICE_ACCOUNT env var is not set');
+  const raw = process.env.FIREBASE_ADMIN_SERVICE_ACCOUNT ?? process.env.FIREBASE_SERVICE_ACCOUNT;
+  if (!raw) throw new Error('FIREBASE_ADMIN_SERVICE_ACCOUNT env var is not set');
 
   let serviceAccount: object;
   try {
