@@ -6,25 +6,52 @@ import { restorePdfFromDb } from './pdfPersistence';
 
 const STARTUP_DELAY_MS = 8_000;
 const INTERVAL_MS = 15 * 60 * 1_000;
+// Maximum number of auto-resume attempts for docs stuck in 'error' due to
+// transient Gemini failures (503 / OCR unavailable).
+const MAX_ERROR_RESUME_ATTEMPTS = 5;
+
+/** Returns true if an 'error' doc failed due to a transient OCR/Gemini issue. */
+function isTransientOcrError(errorMessage: string | undefined): boolean {
+  if (!errorMessage) return false;
+  return (
+    errorMessage.includes('503') ||
+    errorMessage.includes('OCR service is unavailable') ||
+    errorMessage.includes('ServiceUnavailableError') ||
+    errorMessage.includes('0 usable pages') ||
+    errorMessage.includes('service overloaded')
+  );
+}
 
 async function runScheduler(): Promise<void> {
-  const partialDocs = readIndex().filter((doc) =>
+  const allDocs = readIndex();
+
+  // Docs that are 'partial' — always resumable.
+  const partialDocs = allDocs.filter((doc) =>
     doc.status === 'partial' && !hasActiveJob(doc.id)
   );
 
-  if (partialDocs.length === 0) {
-    logger.debug('ResumeScheduler: no partial docs');
+  // Docs stuck in 'error' due to a transient Gemini/OCR failure — also resumable.
+  const errorDocs = allDocs.filter((doc) =>
+    doc.status === 'error' &&
+    !hasActiveJob(doc.id) &&
+    (doc.resumeAttempts ?? 0) < MAX_ERROR_RESUME_ATTEMPTS &&
+    isTransientOcrError(doc.errorMessage)
+  );
+
+  const resumeCandidates = [...partialDocs, ...errorDocs];
+
+  if (resumeCandidates.length === 0) {
+    logger.debug('ResumeScheduler: no resumable docs');
     return;
   }
 
-  // ── Ensure PDF is on disk (restore from DB if needed) ────────────────────
-  const resumable: typeof partialDocs = [];
-  for (const doc of partialDocs) {
-    const pdfPath = getPdfPath(doc.id); // always canonical absolute path
+  // ── Ensure PDF is on disk (restore from DB if needed) ──────────────────────
+  const resumable: typeof resumeCandidates = [];
+  for (const doc of resumeCandidates) {
+    const pdfPath = getPdfPath(doc.id);
     if (fs.existsSync(pdfPath)) {
       resumable.push(doc);
     } else {
-      // PDF missing from disk — try to restore from the persistent DB copy
       try {
         const restored = await restorePdfFromDb(doc.id, pdfPath);
         if (restored) {
@@ -50,20 +77,20 @@ async function runScheduler(): Promise<void> {
   }
 
   if (resumable.length === 0) {
-    logger.debug('ResumeScheduler: no resumable partial docs (PDFs unavailable)');
+    logger.debug('ResumeScheduler: no resumable docs (PDFs unavailable)');
     return;
   }
 
   logger.info(
     { count: resumable.length, docs: resumable.map((d) => d.id) },
-    'ResumeScheduler: found partial docs — attempting auto-resume'
+    'ResumeScheduler: found resumable docs — attempting auto-resume'
   );
 
   for (const doc of resumable) {
     const now = Date.now();
 
     const fresh = getDocMeta(doc.id);
-    if (!fresh || fresh.status !== 'partial') {
+    if (!fresh || (fresh.status !== 'partial' && fresh.status !== 'error')) {
       logger.debug({ docId: doc.id }, 'ResumeScheduler: doc status changed, skipping');
       continue;
     }
@@ -89,6 +116,7 @@ async function runScheduler(): Promise<void> {
           filename: doc.filename,
           lastRenderedPage: fresh.lastRenderedPage,
           attempt: nextAttempt,
+          fromStatus: fresh.status,
         },
         'ResumeScheduler: resume job queued'
       );

@@ -15,7 +15,7 @@ import {
   type CurriculumChunk,
   type CurriculumDocument,
 } from './curriculumStorage';
-import { extractPdf, QuotaExhaustedError } from './pdfExtractor';
+import { extractPdf, QuotaExhaustedError, ServiceUnavailableError } from './pdfExtractor';
 import { chunkText } from './chunker';
 import { savePdfToDb } from './pdfPersistence';
 import { triggerQuestionExtraction } from './questionExtractor';
@@ -562,6 +562,34 @@ async function processNext() {
         job.status = 'partial';
         job.error = `Gemini quota exhausted before any batches completed (lastRenderedPage=${err.lastRenderedPage}). Resume with POST /api/curriculum/docs/${job.docId}/resume`;
       }
+    } else if (err instanceof ServiceUnavailableError) {
+      // ── Gemini 503 (service overloaded): save as partial so scheduler retries
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(
+        { jobId, docId: job.docId },
+        'Gemini 503 service unavailable — marking as partial for auto-retry'
+      );
+
+      job.status = 'partial';
+      job.error = `Gemini OCR service unavailable (503). Will auto-retry. ${msg}`;
+
+      upsertDocMeta({
+        ...(getDocMeta(job.docId) ?? {}),
+        id: job.docId,
+        country: job.country,
+        grade: job.grade,
+        subject: job.subject,
+        track: job.track,
+        filename: job.filename,
+        totalPages: existingMeta?.totalPages ?? 0,
+        chunkCount: existingMeta?.chunkCount ?? 0,
+        status: 'partial',
+        errorMessage: msg,
+        uploadedAt: existingMeta?.uploadedAt ?? job.createdAt,
+        docType: job.docType,
+        pdfStoragePath: job.filePath,
+        lastRenderedPage: 0,
+      });
     } else {
       // ── Other errors: mark as error ───────────────────────────────────────
       const msg = err instanceof Error ? err.message : String(err);
