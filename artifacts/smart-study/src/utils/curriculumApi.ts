@@ -86,7 +86,7 @@ export interface ExamRecord {
   ownerId?: string | null;
   visibility: 'public' | 'private';
   questionCount: number;
-  extractionStatus: 'pending' | 'extracting' | 'done' | 'error';
+  extractionStatus: 'pending' | 'extracting' | 'done' | 'error' | 'poor_scan';
   extractionError?: string | null;
   extractedAt?: string | null;
   createdAt: string;
@@ -254,6 +254,7 @@ async function authJson(): Promise<HeadersInit> {
 
 const CURR = '/api/curriculum';
 const EXAM = '/api/exams';
+const RECS = '/api/exams/records';
 const SOLV = '/api/exams/solve';
 
 // ─── Curriculum endpoints ─────────────────────────────────────────────────────
@@ -360,25 +361,26 @@ export async function searchCurriculumApi(
 // ─── Exam Bank endpoints ──────────────────────────────────────────────────────
 
 export async function listExamRecords(): Promise<ExamRecord[]> {
-  const res = await fetch(`${EXAM}`, { headers: await authHeaders() });
+  const res = await fetch(`${RECS}`, { headers: await authHeaders() });
   if (!res.ok) return [];
   return res.json();
 }
 
 export async function getExamRecord(examId: string): Promise<ExamRecord | null> {
-  const res = await fetch(`${EXAM}/${examId}`, { headers: await authHeaders() });
+  const res = await fetch(`${RECS}/${examId}`, { headers: await authHeaders() });
   if (!res.ok) return null;
   return res.json();
 }
 
 export async function getExamQuestions(examId: string): Promise<ExamQuestion[]> {
-  const res = await fetch(`${EXAM}/${examId}/questions`, { headers: await authHeaders() });
+  const res = await fetch(`${RECS}/${examId}/questions`, { headers: await authHeaders() });
   if (!res.ok) return [];
-  return res.json();
+  const data = await res.json();
+  return (data as { questions?: ExamQuestion[] }).questions ?? [];
 }
 
 export async function deleteExamRecord(examId: string): Promise<void> {
-  const res = await fetch(`${EXAM}/${examId}`, {
+  const res = await fetch(`${RECS}/${examId}`, {
     method: 'DELETE',
     headers: await authHeaders(),
   });
@@ -386,6 +388,26 @@ export async function deleteExamRecord(examId: string): Promise<void> {
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
     throw new Error((err as { error?: string }).error ?? 'Delete failed');
   }
+}
+
+/**
+ * Search question bank — all params optional.
+ * Pass `country` to narrow to the student's curriculum; omit for global view.
+ */
+export async function searchBankQuestions(opts: {
+  country?: string;
+  grade?: string;
+  subject?: string;
+} = {}): Promise<ExamQuestion[]> {
+  const params = new URLSearchParams();
+  if (opts.country) params.set('country', opts.country);
+  if (opts.grade)   params.set('grade',   opts.grade);
+  if (opts.subject) params.set('subject', opts.subject);
+
+  const res = await fetch(`${EXAM}/questions?${params}`, { headers: await authHeaders() });
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data as { questions?: ExamQuestion[] }).questions ?? [];
 }
 
 // ─── Exam Solver endpoints ────────────────────────────────────────────────────

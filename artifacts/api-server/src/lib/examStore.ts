@@ -31,9 +31,9 @@ export interface IExamQuestionStore {
   getQuestionsByIds(ids: string[]): Promise<ExamQuestion[]>;
   getQuestionsByExam(examId: string): Promise<ExamQuestion[]>;
   searchQuestions(opts: {
-    country: string;
-    grade: string;
-    subject: string;
+    country?: string;
+    grade?: string;
+    subject?: string;
     userId: string;
     isAdmin: boolean;
   }): Promise<ExamQuestion[]>;
@@ -135,14 +135,33 @@ class PostgresExamQuestionStore implements IExamQuestionStore {
     userId,
     isAdmin,
   }: {
-    country: string;
-    grade: string;
-    subject: string;
+    country?: string;
+    grade?: string;
+    subject?: string;
     userId: string;
     isAdmin: boolean;
   }): Promise<ExamQuestion[]> {
     // JOIN with exam_records to enforce visibility gate.
-    // exam_questions.source_exam_id = exam_records.exam_id
+    // Build conditions dynamically so all filter params are optional.
+    type Condition = Parameters<typeof and>[0];
+    const conditions: Condition[] = [];
+
+    if (country) conditions.push(eq(examQuestionsTable.country, country));
+    if (grade)   conditions.push(eq(examQuestionsTable.grade,   grade));
+    if (subject) conditions.push(eq(examQuestionsTable.subject, subject));
+
+    if (!isAdmin) {
+      conditions.push(
+        or(
+          eq(examRecordsTable.visibility, 'public'),
+          and(
+            eq(examRecordsTable.visibility, 'private'),
+            eq(examRecordsTable.ownerId, userId)
+          )
+        )
+      );
+    }
+
     const rows = await db
       .select({ q: examQuestionsTable })
       .from(examQuestionsTable)
@@ -150,22 +169,7 @@ class PostgresExamQuestionStore implements IExamQuestionStore {
         examRecordsTable,
         eq(examQuestionsTable.sourceExamId, examRecordsTable.examId)
       )
-      .where(
-        and(
-          eq(examQuestionsTable.country, country),
-          eq(examQuestionsTable.grade, grade),
-          eq(examQuestionsTable.subject, subject),
-          isAdmin
-            ? undefined
-            : or(
-                eq(examRecordsTable.visibility, 'public'),
-                and(
-                  eq(examRecordsTable.visibility, 'private'),
-                  eq(examRecordsTable.ownerId, userId)
-                )
-              )
-        )
-      )
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(examQuestionsTable.questionOrder);
 
     return rows.map((r) => r.q);

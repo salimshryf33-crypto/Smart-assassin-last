@@ -54,7 +54,8 @@ type UploadState =
   | { phase: 'error'; message: string };
 
 export default function CurriculumManager() {
-  const setPage = useAppStore((s) => s.setPage);
+  const setPage    = useAppStore((s) => s.setPage);
+  const setExamNav = useAppStore((s) => s.setExamNav);
   const studentProfile = useAppStore((s) => s.studentProfile);
 
   const [docs, setDocs] = useState<CurriculumDocMeta[]>([]);
@@ -144,6 +145,13 @@ export default function CurriculumManager() {
           setSubject('');
           setBookTitle('');
           if (fileInputRef.current) fileInputRef.current.value = '';
+          // Auto-navigate to ExamsPage when an exam upload completes
+          if (docType === 'exam') {
+            setTimeout(() => {
+              setExamNav({ examsSubTab: 'my-exams' });
+              setPage('exams');
+            }, 2_000);
+          }
         } else if (status.status === 'error') {
           stopPolling();
           setUploadState({ phase: 'error', message: status.error ?? 'فشل في المعالجة' });

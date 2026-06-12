@@ -90,18 +90,16 @@ router.get('/records/:examId/questions', requireAuth, async (req, res) => {
 });
 
 // ─── GET /api/exams/questions ─────────────────────────────────────────────────
-// Query params: country, grade, subject (required)
+// Query params: country, grade, subject — all optional; omit = no filter on that field.
 router.get('/questions', requireAuth, async (req, res) => {
   const { country, grade, subject } = req.query as Record<string, string>;
-  if (!country || !grade || !subject) {
-    res.status(400).json({ error: 'country, grade, and subject are required' });
-    return;
-  }
   try {
     const questions = await examStore.searchQuestions({
-      country, grade, subject,
-      userId:  req.user!.uid,
-      isAdmin: isAdmin(req.user!),
+      country:  country  || undefined,
+      grade:    grade    || undefined,
+      subject:  subject  || undefined,
+      userId:   req.user!.uid,
+      isAdmin:  isAdmin(req.user!),
     });
     res.json({ questions, count: questions.length });
   } catch (err) {

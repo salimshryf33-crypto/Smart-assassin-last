@@ -1,15 +1,14 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   GraduationCap, BookOpen, ChevronRight, Plus,
-  CheckCircle2, XCircle, Search,
+  CheckCircle2, Search,
   TrendingDown, BarChart3, ArrowRight, FileText,
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
-import { useAuth } from '../contexts/AuthContext';
 import PageWrapper from '../components/layout/PageWrapper';
 import {
-  listExamRecords, getExamQuestions, listWeaknessSnapshots, getWeakTopics,
+  listExamRecords, searchBankQuestions, listWeaknessSnapshots, getWeakTopics,
   type ExamRecord, type ExamQuestion, type WeaknessSnapshot, type WeakTopicResult,
 } from '../utils/curriculumApi';
 
@@ -47,10 +46,11 @@ function Pill({ label, active, onClick }: { label: string; active: boolean; onCl
 // ─── Status badge ─────────────────────────────────────────────────────────────
 function StatusBadge({ status }: { status: string }) {
   const cfg: Record<string, { label: string; color: string; bg: string }> = {
-    done:       { label: 'مكتمل',    color: C.green, bg: 'rgba(52,211,153,0.1)' },
-    extracting: { label: 'جاري الاستخراج', color: C.blue,  bg: 'rgba(0,198,255,0.1)' },
-    pending:    { label: 'معلّق',    color: C.gold,  bg: 'rgba(245,158,11,0.1)' },
-    error:      { label: 'خطأ',      color: C.red,   bg: 'rgba(248,113,113,0.1)' },
+    done:       { label: 'مكتمل',          color: C.green,   bg: 'rgba(52,211,153,0.1)' },
+    extracting: { label: 'جاري الاستخراج', color: C.blue,    bg: 'rgba(0,198,255,0.1)' },
+    pending:    { label: 'معلّق',          color: C.gold,    bg: 'rgba(245,158,11,0.1)' },
+    error:      { label: 'خطأ',            color: C.red,     bg: 'rgba(248,113,113,0.1)' },
+    poor_scan:  { label: 'جودة منخفضة',   color: '#f97316', bg: 'rgba(249,115,22,0.1)' },
   };
   const c = cfg[status] ?? cfg.pending;
   return (
@@ -225,7 +225,6 @@ function QuestionItem({ q }: { q: ExamQuestion }) {
 // ─── Main ExamsPage ───────────────────────────────────────────────────────────
 export default function ExamsPage() {
   const { setPage, setExamNav, examNav, studentProfile } = useAppStore();
-  const { user } = useAuth();
 
   const [subTab, setSubTab] = useState<SubTab>(examNav.examsSubTab);
   const [exams, setExams]   = useState<ExamRecord[]>([]);
@@ -234,6 +233,9 @@ export default function ExamsPage() {
   const [snapshots, setSnapshots]   = useState<WeaknessSnapshot[]>([]);
   const [loading, setLoading]       = useState(false);
   const [error, setError]           = useState('');
+
+  // Ref for the extracting-status polling interval
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Bank filters
   const [bankQuery, setBankQuery]     = useState('');
@@ -250,23 +252,25 @@ export default function ExamsPage() {
     finally  { setLoading(false); }
   }, []);
 
+  // Silent refresh — no loading spinner, used by the polling interval
+  const silentRefreshExams = useCallback(async () => {
+    try {
+      const recs = await listExamRecords();
+      setExams(recs);
+    } catch { /* ignore — next tick will retry */ }
+  }, []);
+
   const loadBank = useCallback(async () => {
-    if (!studentProfile.country || !studentProfile.level) return;
     setLoading(true); setError('');
     try {
-      const token = await user?.getIdToken();
-      const params = new URLSearchParams({
-        country: studentProfile.country,
-        grade:   studentProfile.level,
-        subject: '',
+      // Pass country if available to narrow results; grade/subject are optional
+      const qs = await searchBankQuestions({
+        country: studentProfile.country || undefined,
       });
-      const res = await fetch(`/api/exams/questions?${params}`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-      if (res.ok) setQuestions(await res.json());
+      setQuestions(qs);
     } catch { setError('تعذّر تحميل بنك الأسئلة'); }
     finally { setLoading(false); }
-  }, [studentProfile.country, studentProfile.level, user]);
+  }, [studentProfile.country]);
 
   const loadWeakness = useCallback(async () => {
     setLoading(true); setError('');
@@ -288,6 +292,29 @@ export default function ExamsPage() {
     else if (subTab === 'bank') loadBank();
     else loadWeakness();
   }, [subTab]);
+
+  // ── Auto-polling: refresh every 5 s while any exam is still extracting ───────
+  useEffect(() => {
+    const hasExtracting = exams.some((e) => e.extractionStatus === 'extracting');
+
+    if (hasExtracting && subTab === 'my-exams') {
+      if (!pollRef.current) {
+        pollRef.current = setInterval(silentRefreshExams, 5_000);
+      }
+    } else {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    }
+
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [exams, subTab, silentRefreshExams]);
 
   const switchTab = (t: SubTab) => {
     setSubTab(t);
