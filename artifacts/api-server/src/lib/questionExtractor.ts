@@ -87,6 +87,43 @@ function buildPrompt(chunkText: string, examTitle: string): string {
 ${chunkText}`;
 }
 
+// ─── Retry prompt (aggressive) ────────────────────────────────────────────────
+// Used when first-pass extraction returns [] for a chunk that contains Arabic
+// words — OCR artifacts (dots mixed into text, broken spacing) may have confused
+// the main prompt. This prompt is more tolerant of imperfect OCR formatting.
+function buildRetryPrompt(chunkText: string, examTitle: string): string {
+  return `أنت نظام متخصص في استخراج الأسئلة الامتحانية من نصوص OCR العربية.
+
+النص التالي مُستخرج بالـ OCR وقد يحتوي على نقاط أو مسافات إضافية بين الكلمات.
+استخرج كل سؤال موجود في النص بغض النظر عن جودة التنسيق.
+
+ابحث عن أي من الأنماط التالية وعدّها أسئلة:
+- أرقام عربية أو هندية + نص (١- ... أو 1. ...)
+- كلمات تدل على سؤال: ما، اشرح، اذكر، عرّف، قارن، أكمل، ضع، اختر، بيّن، وضّح، احسب
+- جمل استفهامية تنتهي بـ ؟
+- اختيار من متعدد: أ/ ب/ ج/ د/ أو (أ) (ب) أو A B C D
+- جداول مقارنة تطلب ملء خانات
+
+أعد مصفوفة JSON فقط. كل عنصر:
+{
+  "question": "<نص السؤال كما ورد>",
+  "questionType": "mcq" | "true_false" | "short_answer" | "essay" | "calculation",
+  "options": ["أ) ...", "ب) ...", "ج) ...", "د) ..."] أو null,
+  "correctAnswer": null,
+  "explanation": null,
+  "topic": null,
+  "chapter": null,
+  "difficulty": null
+}
+
+إذا لم توجد أسئلة على الإطلاق بعد الفحص الدقيق، أجب بـ: []
+
+عنوان الامتحان: ${examTitle}
+
+النص:
+${chunkText}`;
+}
+
 // ─── Response parser ──────────────────────────────────────────────────────────
 
 interface ParsedQuestion {
@@ -219,7 +256,37 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
 
       try {
         const raw    = await callGemini(buildPrompt(chunk.content, examTitle));
-        const parsed = parseResponse(raw);
+        let parsed   = parseResponse(raw);
+
+        // ── Phase 3 hardening: retry if first pass returned [] but chunk has
+        // Arabic content. OCR artifacts (dots mixed into text, broken spacing)
+        // can confuse the main prompt even when questions are present.
+        if (parsed.length === 0) {
+          const arabicWordCount = (chunk.content.match(/[\u0600-\u06FF]{2,}/g) || []).length;
+          if (arabicWordCount >= 10) {
+            logger.info(
+              { docId, chunkIndex: chunk.chunkIndex, arabicWordCount },
+              'triggerQuestionExtraction: first pass returned [], retrying with aggressive prompt'
+            );
+            try {
+              const rawRetry    = await callGemini(buildRetryPrompt(chunk.content, examTitle));
+              const parsedRetry = parseResponse(rawRetry);
+              if (parsedRetry.length > 0) {
+                parsed = parsedRetry;
+                logger.info(
+                  { docId, chunkIndex: chunk.chunkIndex, extracted: parsedRetry.length },
+                  'triggerQuestionExtraction: retry extraction succeeded'
+                );
+              }
+            } catch (retryErr) {
+              logger.warn(
+                { docId, chunkIndex: chunk.chunkIndex, err: String(retryErr) },
+                'triggerQuestionExtraction: retry failed'
+              );
+            }
+          }
+        }
+
         allParsed.push(...parsed);
         logger.debug(
           { docId, chunkIndex: chunk.chunkIndex, extracted: parsed.length },

@@ -22,10 +22,15 @@ const MIN_PAGE_CHARS     = 10;
 
 const OCR_MODEL          = 'gemini-2.5-flash';
 const OCR_FALLBACK_MODEL = 'gemini-1.5-flash';
-const OCR_DPI            = 150;
-const BATCH_SIZE         = 8;
+const OCR_DPI            = 200;  // raised from 150 — better quality for scanned Arabic exams
+const OCR_RECOVERY_DPI   = 300;  // used for per-page recovery when batch result is dot-heavy
+const BATCH_SIZE         = 4;    // lowered from 8 — smaller batches give Gemini better per-page focus
 const OCR_MAX_OUTPUT     = 16384;
 const SERVICE_503_THRESHOLD = 3;
+
+// Pages where >DOT_HEAVY_THRESHOLD of content is dots indicate blank answer sheets.
+// These trigger a per-page recovery pass at OCR_RECOVERY_DPI.
+const DOT_HEAVY_THRESHOLD = 0.85;
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
 
@@ -137,6 +142,16 @@ export function fixCharSeparatedArabic(text: string): string {
   }
 
   return result.join(' ');
+}
+
+// ─── Dot-heavy detector ───────────────────────────────────────────────────────
+// Returns true when the OCR result is predominantly fill-in-blank dots with no
+// meaningful Arabic content — a signal that the page is a blank answer sheet or
+// that Gemini Vision couldn't read the content at the current DPI.
+function isDotHeavy(text: string): boolean {
+  if (text.length < 50) return false;
+  const dots = (text.match(/\./g) || []).length;
+  return dots / text.length > DOT_HEAVY_THRESHOLD;
 }
 
 // ─── OCR repetition filter ────────────────────────────────────────────────────
@@ -459,12 +474,67 @@ async function ocrPdfViaImages(
         }
       }
 
-      // Clean up rendered images immediately to save disk space
+      // Clean up 200-DPI rendered images immediately to save disk space
       for (const img of imagePaths) {
         try { fs.unlinkSync(img); } catch { /* ignore */ }
       }
 
-      const cleaned = filterRepetitiveLines(fixCharSeparatedArabic(batchText.trim()));
+      let cleaned = filterRepetitiveLines(fixCharSeparatedArabic(batchText.trim()));
+
+      // ── Dot-heavy recovery ────────────────────────────────────────────────
+      // If the batch result is almost entirely dots, Gemini couldn't read the
+      // content at the baseline DPI (200). Re-render each page of this batch
+      // individually at OCR_RECOVERY_DPI (300) and re-submit one-by-one so
+      // that content pages are not buried by blank answer-sheet pages.
+      if (isDotHeavy(cleaned)) {
+        console.log(
+          `[pdfExtractor] Dot-heavy result for pages ${pageStart}–${pageEnd}` +
+          ` (${cleaned.length} chars, >${Math.round(DOT_HEAVY_THRESHOLD * 100)}% dots).` +
+          ` Attempting per-page recovery at ${OCR_RECOVERY_DPI} DPI...`
+        );
+        const recoveryDir = path.join(
+          os.tmpdir(),
+          `sage_recovery_${Date.now()}_${Math.random().toString(36).slice(2)}`
+        );
+        fs.mkdirSync(recoveryDir, { recursive: true });
+        let recoveryText = '';
+        try {
+          const recoveryPaths = await renderPageBatch(
+            filePath, recoveryDir, pageStart, pageEnd, OCR_RECOVERY_DPI
+          );
+          for (const rImg of recoveryPaths) {
+            try {
+              const pageRaw   = await ocrImageBatch([rImg], apiKey, currentModel);
+              const pageCleaned = filterRepetitiveLines(fixCharSeparatedArabic(pageRaw.trim()));
+              if (!isDotHeavy(pageCleaned) && pageCleaned.length >= MIN_PAGE_CHARS) {
+                recoveryText += (recoveryText ? '\n' : '') + pageCleaned;
+                console.log(`[pdfExtractor] Recovery found readable content: ${pageCleaned.length} chars`);
+              }
+            } catch { /* ignore per-page failures */ }
+            try { fs.unlinkSync(rImg); } catch { /* ignore */ }
+          }
+        } catch (rErr) {
+          console.warn(
+            `[pdfExtractor] Recovery render failed for pages ${pageStart}–${pageEnd}:`,
+            rErr instanceof Error ? rErr.message : String(rErr)
+          );
+        } finally {
+          try { fs.rmSync(recoveryDir, { recursive: true, force: true }); } catch { /* ignore */ }
+        }
+
+        if (recoveryText.length > cleaned.length) {
+          console.log(
+            `[pdfExtractor] Using recovery result (${recoveryText.length} chars)` +
+            ` over dot-heavy result (${cleaned.length} dots)`
+          );
+          cleaned = recoveryText;
+        } else if (recoveryText.length > 0) {
+          console.log(`[pdfExtractor] Recovery text (${recoveryText.length} chars) not better than original, keeping original`);
+        } else {
+          console.log(`[pdfExtractor] Recovery found no readable content for pages ${pageStart}–${pageEnd}`);
+        }
+      }
+
       if (cleaned.length >= MIN_PAGE_CHARS) {
         allBatchTexts.push(cleaned);
       }
@@ -499,7 +569,8 @@ async function renderPageBatch(
   filePath: string,
   imgDir: string,
   firstPage: number,
-  lastPage: number
+  lastPage: number,
+  dpi = OCR_DPI,
 ): Promise<string[]> {
   const prefix = path.join(imgDir, `p${firstPage}`);
 
@@ -507,7 +578,7 @@ async function renderPageBatch(
     'pdftoppm',
     [
       '-png',
-      '-r', String(OCR_DPI),
+      '-r', String(dpi),
       '-f', String(firstPage),
       '-l', String(lastPage),
       filePath,
