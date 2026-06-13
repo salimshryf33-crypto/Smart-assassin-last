@@ -99,6 +99,29 @@ router.get('/weakness/topics', requireAuth, async (req, res) => {
   }
 });
 
+// ─── GET /attempts ────────────────────────────────────────────────────────────
+// Must come before /:attemptId to avoid param conflict
+router.get('/attempts', requireAuth, async (req, res) => {
+  try {
+    const attempts = await examSolverStore.listAttemptsByStudent(req.user!.uid);
+    const examIds = [...new Set(attempts.map((a) => a.examId))];
+    const examMap: Record<string, string> = {};
+    await Promise.all(
+      examIds.map(async (id) => {
+        const rec = await examStore.getExamRecord(id).catch(() => null);
+        if (rec) examMap[id] = rec.title;
+      })
+    );
+    const enriched = attempts.map((a) => ({
+      ...a,
+      examTitle: examMap[a.examId] ?? 'امتحان',
+    }));
+    res.json({ attempts: enriched });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 // ─── POST /:attemptId/answer ──────────────────────────────────────────────────
 router.post('/:attemptId/answer', requireAuth, async (req, res) => {
   const attemptId = str(req.params.attemptId);

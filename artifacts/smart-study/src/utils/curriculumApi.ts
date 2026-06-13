@@ -508,6 +508,17 @@ export async function getWeakTopics(
   return res.json();
 }
 
+/** List all attempts by the current student, enriched with exam title. */
+export interface AttemptWithTitle extends ExamAttempt {
+  examTitle: string;
+}
+
+export async function listMyAttempts(): Promise<{ attempts: AttemptWithTitle[] }> {
+  const res = await fetch(`${SOLV}/attempts`, { headers: await authHeaders() });
+  if (!res.ok) return { attempts: [] };
+  return res.json();
+}
+
 // ─── Exam Generator endpoint ──────────────────────────────────────────────────
 
 /**

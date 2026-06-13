@@ -3,7 +3,7 @@ import { persist } from 'zustand/middleware';
 import { type GamificationData, DEFAULT_GAMIFICATION } from '../lib/gamification';
 import { type DailyChecklist, DEFAULT_DAILY_CHECKLIST } from '../lib/streakEngine';
 
-export type Page = 'splash' | 'profile-setup' | 'home' | 'flashcards' | 'focus' | 'chat' | 'search' | 'profile' | 'settings' | 'curriculum-manager' | 'exams' | 'exam-solver' | 'exam-results';
+export type Page = 'splash' | 'profile-setup' | 'home' | 'flashcards' | 'focus' | 'chat' | 'search' | 'profile' | 'settings' | 'curriculum-manager' | 'exams' | 'exam-solver' | 'exam-results' | 'exam-generator';
 
 export type Country = 'egypt' | 'sudan';
 export type Level = 'primary' | 'preparatory' | 'secondary';
@@ -102,7 +102,9 @@ const DEFAULT_STUDENT_PROFILE: StudentProfile = {
 export interface ExamNav {
   selectedExamId: string | null;
   selectedAttemptId: string | null;
-  examsSubTab: 'my-exams' | 'bank' | 'weakness';
+  examsSubTab: 'my-exams' | 'bank' | 'weakness' | 'attempts';
+  generatorSubject?: string;
+  generatorTopic?: string;
 }
 
 const DEFAULT_EXAM_NAV: ExamNav = {
