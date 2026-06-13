@@ -41,6 +41,24 @@ const router = Router();
 const str = (v: string | string[] | undefined): string =>
   Array.isArray(v) ? v[0] ?? '' : v ?? '';
 
+/**
+ * Re-decode a string that was read as Latin-1 but whose underlying bytes are UTF-8.
+ * Multer/busboy reads multipart field values and filenames as Latin-1 by default,
+ * so Arabic (and other non-ASCII) text arrives as mojibake that needs this fix.
+ * ASCII-only strings pass through unchanged.
+ */
+function fixEncoding(s: string): string {
+  if (!s) return s;
+  // Only attempt re-decode if the string contains high-Latin-1 bytes (≥ 0xC0),
+  // which are the leading bytes of multi-byte UTF-8 sequences for Arabic etc.
+  if (!/[\xC0-\xFF]/.test(s)) return s;
+  try {
+    return Buffer.from(s, 'latin1').toString('utf8');
+  } catch {
+    return s;
+  }
+}
+
 // ─── GET /api/curriculum/me ───────────────────────────────────────────────────
 // Returns the caller's UID and admin flag.  Used by the frontend to adapt UI.
 router.get('/me', requireAuth, (req, res) => {
@@ -61,8 +79,11 @@ router.post('/upload', requireAuth, upload.single('pdf'), (req, res) => {
     country, grade, subject,
     track = '',
     docType = 'book',
-    bookTitle = '',
+    bookTitle: rawBookTitle = '',
   } = req.body as Record<string, string>;
+
+  // Re-decode form fields and filename from Latin-1 → UTF-8 (multer/busboy default).
+  const bookTitle = fixEncoding(rawBookTitle);
 
   if (!country || !grade || !subject) {
     fs.unlinkSync(req.file.path);
@@ -89,11 +110,13 @@ router.post('/upload', requireAuth, upload.single('pdf'), (req, res) => {
   const visibility = isPublic ? 'public' : 'private';
   const ownerId    = isPublic ? null : caller.uid;
 
+  const originalname = fixEncoding(req.file.originalname);
+
   // Derive bookTitle: use provided value or filename stem
   const resolvedTitle =
     bookTitle.trim() ||
-    req.file.originalname.replace(/\.pdf$/i, '').trim() ||
-    req.file.originalname;
+    originalname.replace(/\.pdf$/i, '').trim() ||
+    originalname;
 
   // ── Duplicate protection for public books ──────────────────────────────────
   if (validDocType === 'book') {
@@ -126,7 +149,7 @@ router.post('/upload', requireAuth, upload.single('pdf'), (req, res) => {
     grade,
     subject,
     track,
-    filename: req.file.originalname,
+    filename: originalname,
     docType: validDocType,
     ownerId,
     visibility,
@@ -134,7 +157,7 @@ router.post('/upload', requireAuth, upload.single('pdf'), (req, res) => {
   });
 
   req.log.info(
-    { jobId, docId, filename: req.file.originalname, docType: validDocType, visibility, bookTitle: resolvedTitle },
+    { jobId, docId, filename: originalname, docType: validDocType, visibility, bookTitle: resolvedTitle },
     'Curriculum upload queued'
   );
   res.status(202).json({ jobId, docId, status: 'queued' });
@@ -285,12 +308,13 @@ router.post('/reindex/:id', requireAuth, requireAdmin, upload.single('pdf'), asy
     return;
   }
 
-  req.log.info({ docId, filename: req.file.originalname }, 'Reindex with new PDF');
+  const reindexFilename = fixEncoding(req.file.originalname) || existing.filename;
+  req.log.info({ docId, filename: reindexFilename }, 'Reindex with new PDF');
   invalidateChunkCache(docId);
   const job = await reindexDoc(docId, req.file.path, {
     country: existing.country, grade: existing.grade,
     subject: existing.subject, track: existing.track,
-    filename: req.file.originalname || existing.filename,
+    filename: reindexFilename,
   });
   res.status(202).json({ jobId: job.id, docId, status: 'queued', source: 'new_upload' });
 });

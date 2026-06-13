@@ -203,6 +203,20 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
 
     for (const chunk of chunks) {
       if (chunk.content.trim().length < 80) continue;
+
+      // Skip chunks whose content is essentially all fill-in-blank dots with no
+      // question text (e.g. scanned exam answer sheets). Strip sequences of 2+
+      // dots and whitespace — if fewer than 30 meaningful chars remain, the chunk
+      // has no extractable questions and sending it to Gemini wastes a call.
+      const meaningful = chunk.content.replace(/\.{2,}/g, '').replace(/\s+/g, '').trim();
+      if (meaningful.length < 30) {
+        logger.info(
+          { docId, chunkIndex: chunk.chunkIndex, meaningfulChars: meaningful.length },
+          'triggerQuestionExtraction: skipping dot-only chunk (no question content)'
+        );
+        continue;
+      }
+
       try {
         const raw    = await callGemini(buildPrompt(chunk.content, examTitle));
         const parsed = parseResponse(raw);
