@@ -420,7 +420,12 @@ async function processNext() {
     });
 
     // ── Verify searchability ─────────────────────────────────────────────────
-    const verifyChunks = searchChunks(job.country, job.grade, job.subject, '', 1);
+    // Pass ownerId so private documents (exams) are not excluded by the
+    // visibility filter — they are always private at upload time.
+    const verifyChunks = searchChunks(
+      job.country, job.grade, job.subject, '', 1,
+      { userId: job.ownerId ?? undefined }
+    );
     const searchable = verifyChunks.length > 0;
 
     if (!searchable) {
