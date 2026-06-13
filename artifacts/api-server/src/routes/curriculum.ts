@@ -299,7 +299,7 @@ router.post('/reindex/:id', requireAuth, requireAdmin, upload.single('pdf'), asy
 // Mode A (subject-wide): omit bookTitle param.
 // Mode B (book-specific): include bookTitle param.
 // Always includes caller's private docs alongside public ones.
-router.get('/search', requireAuth, (req, res) => {
+router.get('/search', requireAuth, async (req, res) => {
   const { country, grade, subject, query = '', topK, bookTitle } =
     req.query as Record<string, string>;
 
@@ -308,11 +308,23 @@ router.get('/search', requireAuth, (req, res) => {
     return;
   }
 
+  // Pre-compute query embedding for hybrid (keyword + semantic) search.
+  // Falls back to keyword-only gracefully if embedding API is unavailable.
+  let queryEmbedding: number[] | undefined;
+  if (query.trim()) {
+    try {
+      const { getEmbedding } = await import('../lib/embeddingService');
+      queryEmbedding = await getEmbedding(query);
+    } catch {
+      // Non-fatal — keyword scoring still runs
+    }
+  }
+
   invalidateChunkCache();
   const chunks = searchChunks(
     country, grade, subject, query,
-    topK ? parseInt(topK) : 5,
-    { bookTitle: bookTitle || undefined, userId: req.user!.uid }
+    topK ? parseInt(topK) : 10,
+    { bookTitle: bookTitle || undefined, userId: req.user!.uid, queryEmbedding }
   );
   res.json({ chunks, count: chunks.length });
 });
