@@ -289,7 +289,13 @@ export function loadChunks(docId: string): CurriculumChunk[] {
   const f = path.join(DOCS_DIR, `${docId}.json`);
   if (!fs.existsSync(f)) return [];
   try {
-    const chunks = JSON.parse(fs.readFileSync(f, 'utf8')) as CurriculumChunk[];
+    const raw = JSON.parse(fs.readFileSync(f, 'utf8'));
+    // Support both root-array format and the legacy { chunks: [...] } object format
+    const chunks: CurriculumChunk[] = Array.isArray(raw)
+      ? raw
+      : Array.isArray((raw as Record<string, unknown>).chunks)
+        ? ((raw as Record<string, unknown>).chunks as CurriculumChunk[])
+        : [];
     _chunkCache.set(docId, chunks);
     return chunks;
   } catch {
