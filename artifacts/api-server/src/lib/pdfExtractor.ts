@@ -4,6 +4,13 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { analyzeOcrText } from './ocrQualityAnalyzer';
+import {
+  isRecoveryEnabled,
+  preprocessBatch,
+  createPreprocessDir,
+  cleanupPreprocessDir,
+} from './imagePreprocessor';
 
 const execFileAsync = promisify(execFile);
 
@@ -532,6 +539,91 @@ async function ocrPdfViaImages(
           console.log(`[pdfExtractor] Recovery text (${recoveryText.length} chars) not better than original, keeping original`);
         } else {
           console.log(`[pdfExtractor] Recovery found no readable content for pages ${pageStart}–${pageEnd}`);
+        }
+      }
+
+      // ── Quality-based ImageMagick recovery (ADDITIVE ENHANCEMENT LAYER) ────
+      //
+      // ARCHITECTURE RULE: The OCR pipeline above is COMPLETELY UNCHANGED.
+      // This block runs ONLY AFTER the existing OCR result is finalized.
+      //
+      // Conditions to trigger recovery:
+      //   1. OCR_RECOVERY_ENABLED env var is NOT 'false' (default: enabled)
+      //   2. Dot-heavy check was NOT triggered (different failure mode)
+      //   3. ocrQualityAnalyzer reports low confidence on the result text
+      //
+      // PDFs that already produce good Arabic text score well above the
+      // threshold → this block is skipped entirely → zero behavior change.
+      //
+      // Recovery steps:
+      //   a. Re-render pages at OCR_RECOVERY_DPI (higher resolution)
+      //   b. Apply ImageMagick preprocessing (grayscale → normalize → sharpen → threshold)
+      //   c. Re-run Gemini Vision OCR on enhanced images
+      //   d. Compare quality scores: keep whichever result scored higher
+      if (!isDotHeavy(cleaned) && isRecoveryEnabled()) {
+        const qualAnalysis = analyzeOcrText(cleaned);
+        if (qualAnalysis.isLowConfidence) {
+          console.log(
+            `[pdfExtractor] Quality recovery triggered for pages ${pageStart}–${pageEnd}` +
+            ` (score=${qualAnalysis.score.toFixed(0)}, reason=${qualAnalysis.reason}).` +
+            ` Re-rendering at ${OCR_RECOVERY_DPI} DPI + ImageMagick preprocessing...`
+          );
+
+          const preprocessDir = createPreprocessDir();
+          try {
+            // Step a: Re-render at higher DPI
+            const hiResImages = await renderPageBatch(
+              filePath, preprocessDir, pageStart, pageEnd, OCR_RECOVERY_DPI
+            );
+
+            if (hiResImages.length > 0) {
+              // Step b: Preprocess with ImageMagick
+              const enhancedImages = await preprocessBatch(hiResImages, preprocessDir);
+              // Fallback to hi-res without preprocessing if ImageMagick produced nothing
+              const imagesToOcr = enhancedImages.length > 0 ? enhancedImages : hiResImages;
+
+              // Step c: Re-run OCR on enhanced images
+              try {
+                const recoveryRaw = await ocrImageBatch(imagesToOcr, apiKey, currentModel);
+                const recoveryText = filterRepetitiveLines(
+                  fixCharSeparatedArabic(recoveryRaw.trim())
+                );
+                // Step d: Compare quality scores — keep the better result
+                const recoveryAnalysis = analyzeOcrText(recoveryText);
+                if (
+                  recoveryText.length >= MIN_PAGE_CHARS &&
+                  recoveryAnalysis.score > qualAnalysis.score
+                ) {
+                  console.log(
+                    `[pdfExtractor] Quality recovery succeeded for pages ${pageStart}–${pageEnd}:` +
+                    ` score ${qualAnalysis.score.toFixed(0)} → ${recoveryAnalysis.score.toFixed(0)}` +
+                    `, chars ${cleaned.length} → ${recoveryText.length}`
+                  );
+                  cleaned = recoveryText;
+                } else {
+                  console.log(
+                    `[pdfExtractor] Quality recovery did not improve pages ${pageStart}–${pageEnd}` +
+                    ` (recovery score=${recoveryAnalysis.score.toFixed(0)} ≤ original ${qualAnalysis.score.toFixed(0)}), keeping original`
+                  );
+                }
+              } catch (ocrErr) {
+                // Propagate quota errors immediately — never swallow them
+                if (ocrErr instanceof QuotaExhaustedError) throw ocrErr;
+                console.warn(
+                  `[pdfExtractor] Quality recovery OCR failed for pages ${pageStart}–${pageEnd}:`,
+                  ocrErr instanceof Error ? ocrErr.message : String(ocrErr)
+                );
+              }
+            }
+          } catch (recovErr) {
+            if (recovErr instanceof QuotaExhaustedError) throw recovErr;
+            console.warn(
+              `[pdfExtractor] Quality recovery render failed for pages ${pageStart}–${pageEnd}:`,
+              recovErr instanceof Error ? recovErr.message : String(recovErr)
+            );
+          } finally {
+            cleanupPreprocessDir(preprocessDir);
+          }
         }
       }
 

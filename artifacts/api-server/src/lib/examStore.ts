@@ -58,6 +58,12 @@ class PostgresExamQuestionStore implements IExamQuestionStore {
           extractionError:  record.extractionError  ?? null,
           extractedAt:      record.extractedAt      ?? null,
           questionCount:    record.questionCount     ?? 0,
+          // Diagnostic fields — only overwrite when the caller provides a value;
+          // undefined means "leave whatever is already in the DB".
+          ...(record.ocrQualityScore    !== undefined && { ocrQualityScore:    record.ocrQualityScore }),
+          ...(record.extractionAttempts !== undefined && { extractionAttempts: record.extractionAttempts }),
+          ...(record.failureReason      !== undefined && { failureReason:      record.failureReason }),
+          ...(record.ocrDiagnostics     !== undefined && { ocrDiagnostics:     record.ocrDiagnostics }),
           updatedAt:        sql`NOW()`,
         },
       });

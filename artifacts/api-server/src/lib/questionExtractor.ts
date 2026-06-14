@@ -18,6 +18,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { getDocMeta, loadChunks } from './curriculumStorage';
 import { examStore, examIdFromDocId } from './examStore';
 import { logger } from './logger';
+import { detectQuestionPatterns, analyzeOcrText } from './ocrQualityAnalyzer';
 import type { InsertExamQuestion } from '@workspace/db';
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
@@ -238,6 +239,17 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
     // ── 4. Batch chunks → Gemini → JSON ─────────────────────────────────────
     const allParsed: ParsedQuestion[] = [];
 
+    // Diagnostic tracking — written to exam_records at the end of extraction.
+    let totalExtractionAttempts = 0;
+    const chunkDiagnostics: Array<{
+      chunkIndex: number;
+      chars: number;
+      arabicWords: number;
+      questionPatterns: number;
+      extracted: number;
+      retried: boolean;
+    }> = [];
+
     for (const chunk of chunks) {
       if (chunk.content.trim().length < 80) continue;
 
@@ -254,20 +266,44 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
         continue;
       }
 
+      // ── Question pattern detection (diagnostic, non-destructive) ────────────
+      // Runs before Gemini to log structural signals in the chunk.
+      // Helps diagnose why a chunk may return 0 questions after extraction.
+      const patternCheck      = detectQuestionPatterns(chunk.content);
+      const arabicWordsInChunk = (chunk.content.match(/[\u0600-\u06FF\u0750-\u077F]{2,}/g) || []).length;
+      totalExtractionAttempts++;
+
+      logger.debug(
+        {
+          docId,
+          chunkIndex:      chunk.chunkIndex,
+          chars:           chunk.content.length,
+          arabicWords:     arabicWordsInChunk,
+          questionPatterns: patternCheck.count,
+          hasNumbered:     patternCheck.hasNumberedItems,
+          hasQWords:       patternCheck.hasQuestionWords,
+          hasMcq:          patternCheck.hasMcqOptions,
+        },
+        'triggerQuestionExtraction: pattern pre-check'
+      );
+
       try {
         const raw    = await callGemini(buildPrompt(chunk.content, examTitle));
         let parsed   = parseResponse(raw);
+        let retried  = false;
 
         // ── Phase 3 hardening: retry if first pass returned [] but chunk has
         // Arabic content. OCR artifacts (dots mixed into text, broken spacing)
         // can confuse the main prompt even when questions are present.
+        // Also force retry when question patterns were detected (structural signal).
         if (parsed.length === 0) {
-          const arabicWordCount = (chunk.content.match(/[\u0600-\u06FF]{2,}/g) || []).length;
-          if (arabicWordCount >= 10) {
+          const shouldRetry = arabicWordsInChunk >= 10 || patternCheck.count >= 2;
+          if (shouldRetry) {
             logger.info(
-              { docId, chunkIndex: chunk.chunkIndex, arabicWordCount },
+              { docId, chunkIndex: chunk.chunkIndex, arabicWords: arabicWordsInChunk, patterns: patternCheck.count },
               'triggerQuestionExtraction: first pass returned [], retrying with aggressive prompt'
             );
+            retried = true;
             try {
               const rawRetry    = await callGemini(buildRetryPrompt(chunk.content, examTitle));
               const parsedRetry = parseResponse(rawRetry);
@@ -288,8 +324,18 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
         }
 
         allParsed.push(...parsed);
+
+        chunkDiagnostics.push({
+          chunkIndex:       chunk.chunkIndex,
+          chars:            chunk.content.length,
+          arabicWords:      arabicWordsInChunk,
+          questionPatterns: patternCheck.count,
+          extracted:        parsed.length,
+          retried,
+        });
+
         logger.debug(
-          { docId, chunkIndex: chunk.chunkIndex, extracted: parsed.length },
+          { docId, chunkIndex: chunk.chunkIndex, extracted: parsed.length, retried },
           'triggerQuestionExtraction: chunk done'
         );
       } catch (err) {
@@ -302,6 +348,24 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
 
     // ── 5-6. Validate + deduplicate ──────────────────────────────────────────
     const deduped = deduplicateQuestions(allParsed);
+
+    // ── Aggregate diagnostics ─────────────────────────────────────────────────
+    // Compute OCR quality score from the combined chunk text (post-OCR output).
+    const allChunkText   = chunks.map((c) => c.content).join('\n');
+    const ocrQual        = analyzeOcrText(allChunkText);
+    const ocrQualityScore = Math.round(ocrQual.score);
+
+    // Build a human-readable failure reason when 0 questions are extracted.
+    const failureReason = deduped.length === 0
+      ? `Extracted 0 questions from ${chunks.length} chunk(s). ` +
+        `OCR quality score: ${ocrQualityScore}/100. ` +
+        `Arabic words: ${ocrQual.arabicWordCount}. ` +
+        `Pattern signals: ${chunkDiagnostics.reduce((s, c) => s + c.questionPatterns, 0)} across ${totalExtractionAttempts} chunk(s) attempted.`
+      : null;
+
+    if (failureReason) {
+      logger.warn({ docId, examId, failureReason, ocrQualityScore }, 'triggerQuestionExtraction: zero questions extracted');
+    }
 
     // ── 7. saveQuestions ──────────────────────────────────────────────────────
     const toInsert: InsertExamQuestion[] = deduped.map((q, idx) => ({
@@ -331,22 +395,32 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
     // ── 8. upsertExamRecord(status:'done') ────────────────────────────────────
     await examStore.upsertExamRecord({
       examId,
-      curriculumDocId:  docId,
-      title:            examTitle,
-      bookTitle:        doc.bookTitle ?? null,
-      subject:          doc.subject,
-      grade:            doc.grade,
-      country:          doc.country,
-      track:            doc.track ?? '',
-      year:             null,
-      examType:         'final',
-      organization:     null,
+      curriculumDocId:   docId,
+      title:             examTitle,
+      bookTitle:         doc.bookTitle ?? null,
+      subject:           doc.subject,
+      grade:             doc.grade,
+      country:           doc.country,
+      track:             doc.track ?? '',
+      year:              null,
+      examType:          'final',
+      organization:      null,
       ownerId,
       visibility,
-      questionCount:    toInsert.length,
-      extractionStatus: 'done',
-      extractionError:  null,
-      extractedAt:      new Date(),
+      questionCount:     toInsert.length,
+      extractionStatus:  'done',
+      extractionError:   null,
+      extractedAt:       new Date(),
+      // Diagnostic fields (nullable — written once per extraction run)
+      ocrQualityScore,
+      extractionAttempts: totalExtractionAttempts,
+      failureReason,
+      ocrDiagnostics: {
+        ocrScore:      { score: ocrQualityScore, arabicWords: ocrQual.arabicWordCount, uniqueWordRatio: ocrQual.uniqueWordRatio },
+        chunkCount:    chunks.length,
+        chunksAttempted: totalExtractionAttempts,
+        chunks:        chunkDiagnostics,
+      },
     });
 
     logger.info(

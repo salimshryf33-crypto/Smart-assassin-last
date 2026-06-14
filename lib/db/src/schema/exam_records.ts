@@ -1,4 +1,4 @@
-import { pgTable, text, integer, timestamp, index } from 'drizzle-orm/pg-core';
+import { pgTable, text, integer, timestamp, index, jsonb } from 'drizzle-orm/pg-core';
 import { createInsertSchema, createSelectSchema } from 'drizzle-zod';
 import { z } from 'zod/v4';
 import { sql } from 'drizzle-orm';
@@ -23,6 +23,23 @@ export const examRecordsTable = pgTable(
     extractionStatus:  text('extraction_status').notNull().default('pending'),
     extractionError:   text('extraction_error'),
     extractedAt:       timestamp('extracted_at', { withTimezone: true }),
+
+    // ── Diagnostic columns (nullable — fully backward-compatible) ────────────
+    // Written by questionExtractor after each extraction run.
+    // All nullable: existing rows and the first upsert that omits them are fine.
+
+    /** Composite OCR quality score 0–100 computed from chunk content. */
+    ocrQualityScore:    integer('ocr_quality_score'),
+
+    /** Number of extraction attempts made (chunks processed). */
+    extractionAttempts: integer('extraction_attempts'),
+
+    /** Human-readable reason when extraction produces 0 questions. */
+    failureReason:      text('failure_reason'),
+
+    /** Full structured diagnostic JSON — pattern counts, scores per chunk, etc. */
+    ocrDiagnostics:     jsonb('ocr_diagnostics'),
+
     createdAt:         timestamp('created_at', { withTimezone: true }).default(sql`NOW()`).notNull(),
     updatedAt:         timestamp('updated_at', { withTimezone: true }).default(sql`NOW()`).notNull(),
   },
