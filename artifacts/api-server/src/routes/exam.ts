@@ -13,6 +13,8 @@ import { Router } from 'express';
 import { examStore } from '../lib/examStore';
 import { triggerQuestionExtraction } from '../lib/questionExtractor';
 import { requireAuth, requireAdmin, isAdmin } from '../middleware/auth';
+import { loadChunks } from '../lib/curriculumStorage';
+import { analyzeOcrText, detectQuestionPatterns } from '../lib/ocrQualityAnalyzer';
 
 const router = Router();
 
@@ -119,6 +121,127 @@ router.delete('/questions/:id', requireAuth, async (req, res) => {
     }
     await examStore.deleteQuestionById(qId);
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ─── GET /api/exams/records/:examId/coverage ─────────────────────────────────
+// Returns per-chunk extraction diagnostics so the UI can show exactly where
+// questions were found, where OCR was weak, and why chunks produced 0 questions.
+router.get('/records/:examId/coverage', requireAuth, async (req, res) => {
+  try {
+    const examId = str(req.params.examId);
+    const record = await examStore.getExamRecord(examId);
+    if (!record) { res.status(404).json({ error: 'Exam record not found' }); return; }
+
+    const uid = req.user!.uid;
+    if (record.visibility === 'private' && record.ownerId !== uid && !isAdmin(req.user!)) {
+      res.status(403).json({ error: 'Access denied' });
+      return;
+    }
+
+    // Load actual chunks to get content + pageRange
+    const chunks = loadChunks(record.curriculumDocId);
+
+    // ocrDiagnostics stored by questionExtractor — has per-chunk extraction results
+    type StoredChunkDiag = {
+      chunkIndex: number;
+      chars: number;
+      arabicWords: number;
+      questionPatterns: number;
+      extracted: number;
+      retried: boolean;
+    };
+    type OcrDiagnostics = {
+      ocrScore?: { score: number; arabicWords: number; uniqueWordRatio: number };
+      chunkCount?: number;
+      chunksAttempted?: number;
+      chunks?: StoredChunkDiag[];
+    };
+
+    const diag = (record.ocrDiagnostics ?? {}) as OcrDiagnostics;
+    const storedChunks: StoredChunkDiag[] = diag.chunks ?? [];
+
+    // Build indexed map for fast lookup
+    const storedByIndex = new Map<number, StoredChunkDiag>();
+    for (const c of storedChunks) storedByIndex.set(c.chunkIndex, c);
+
+    // Per-chunk analysis: merge stored diagnostics with live OCR quality analysis
+    const chunkDetails = chunks.map((chunk) => {
+      const stored = storedByIndex.get(chunk.chunkIndex);
+      const ocrQual = analyzeOcrText(chunk.content);
+      const patterns = detectQuestionPatterns(chunk.content);
+
+      // Determine why a zero-question chunk failed
+      let failureReason: string | null = null;
+      if (stored && stored.extracted === 0) {
+        const meaningful = chunk.content.replace(/\.{2,}/g, '').replace(/\s+/g, '').trim();
+        if (chunk.content.trim().length < 80) {
+          failureReason = 'محتوى قصير جداً — تم التخطي (أقل من 80 حرف)';
+        } else if (meaningful.length < 30) {
+          failureReason = 'صفحة نقاط فقط — لا توجد أسئلة قابلة للاستخراج';
+        } else if (ocrQual.isLowConfidence) {
+          failureReason = `جودة OCR منخفضة (${Math.round(ocrQual.score)}/100) — ${ocrQual.reason}`;
+        } else if (patterns.count === 0) {
+          failureReason = 'لم يتم اكتشاف أنماط أسئلة في النص';
+        } else if (stored.retried) {
+          failureReason = 'فشل الاستخراج حتى بعد إعادة المحاولة بالـ prompt الأكثر عدوانية';
+        } else {
+          failureReason = 'Gemini لم يُرجع أسئلة من هذا الجزء';
+        }
+      } else if (!stored) {
+        // Chunk was skipped before even hitting Gemini
+        const meaningful = chunk.content.replace(/\.{2,}/g, '').replace(/\s+/g, '').trim();
+        if (chunk.content.trim().length < 80) {
+          failureReason = 'محتوى قصير جداً — تم التخطي';
+        } else if (meaningful.length < 30) {
+          failureReason = 'صفحة نقاط فقط — تم التخطي';
+        } else {
+          failureReason = 'لم يتم معالجة هذا الجزء';
+        }
+      }
+
+      return {
+        chunkIndex:      chunk.chunkIndex,
+        pageRange:       chunk.pageRange,
+        chars:           chunk.content.length,
+        arabicWords:     stored?.arabicWords ?? ocrQual.arabicWordCount,
+        questionPatterns: stored?.questionPatterns ?? patterns.count,
+        extracted:       stored?.extracted ?? 0,
+        retried:         stored?.retried ?? false,
+        ocrScore:        Math.round(ocrQual.score),
+        isLowConfidence: ocrQual.isLowConfidence,
+        dotRatio:        Math.round(ocrQual.dotRatio * 100),
+        failureReason,
+        patternDetail: {
+          hasNumberedItems: patterns.hasNumberedItems,
+          hasQuestionWords: patterns.hasQuestionWords,
+          hasQuestionMarks: patterns.hasQuestionMarks,
+          hasMcqOptions:    patterns.hasMcqOptions,
+        },
+      };
+    });
+
+    const totalExtracted  = chunkDetails.reduce((s, c) => s + c.extracted, 0);
+    const zeroChunks      = chunkDetails.filter((c) => c.extracted === 0 && c.failureReason !== null);
+    const lowConfChunks   = chunkDetails.filter((c) => c.isLowConfidence);
+
+    res.json({
+      examId,
+      title:             record.title,
+      extractionStatus:  record.extractionStatus,
+      questionCount:     record.questionCount,
+      ocrQualityScore:   record.ocrQualityScore ?? null,
+      extractionAttempts: record.extractionAttempts ?? null,
+      failureReason:     record.failureReason ?? null,
+      totalChunks:       chunks.length,
+      chunksAttempted:   diag.chunksAttempted ?? storedChunks.length,
+      totalExtracted,
+      zeroChunkCount:    zeroChunks.length,
+      lowConfChunkCount: lowConfChunks.length,
+      chunks:            chunkDetails,
+    });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }

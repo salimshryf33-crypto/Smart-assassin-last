@@ -519,6 +519,53 @@ export async function listMyAttempts(): Promise<{ attempts: AttemptWithTitle[] }
   return res.json();
 }
 
+// ─── Exam Coverage Analysis ───────────────────────────────────────────────────
+
+export interface CoverageChunk {
+  chunkIndex: number;
+  pageRange: string;
+  chars: number;
+  arabicWords: number;
+  questionPatterns: number;
+  extracted: number;
+  retried: boolean;
+  ocrScore: number;
+  isLowConfidence: boolean;
+  dotRatio: number;
+  failureReason: string | null;
+  patternDetail: {
+    hasNumberedItems: boolean;
+    hasQuestionWords: boolean;
+    hasQuestionMarks: boolean;
+    hasMcqOptions: boolean;
+  };
+}
+
+export interface ExamCoverageReport {
+  examId: string;
+  title: string;
+  extractionStatus: string;
+  questionCount: number;
+  ocrQualityScore: number | null;
+  extractionAttempts: number | null;
+  failureReason: string | null;
+  totalChunks: number;
+  chunksAttempted: number;
+  totalExtracted: number;
+  zeroChunkCount: number;
+  lowConfChunkCount: number;
+  chunks: CoverageChunk[];
+}
+
+export async function getExamCoverage(examId: string): Promise<ExamCoverageReport> {
+  const res = await fetch(`${EXAM}/records/${examId}/coverage`, { headers: await authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error((err as { error?: string }).error ?? 'Failed to load coverage');
+  }
+  return res.json();
+}
+
 // ─── Exam Generator endpoint ──────────────────────────────────────────────────
 
 /**

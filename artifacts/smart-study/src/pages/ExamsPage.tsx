@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import PageWrapper from '../components/layout/PageWrapper';
+import ExamCoverageModal from '../components/ExamCoverageModal';
 import {
   listExamRecords, searchBankQuestions, listWeaknessSnapshots, getWeakTopics, listMyAttempts,
   type ExamRecord, type ExamQuestion, type WeaknessSnapshot, type WeakTopicResult, type AttemptWithTitle,
@@ -65,21 +66,26 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 // ─── ExamCard ─────────────────────────────────────────────────────────────────
-function ExamCard({ exam, onSolve }: { exam: ExamRecord; onSolve: () => void }) {
-  const canSolve = exam.extractionStatus === 'done' && (exam.questionCount ?? 0) > 0;
+function ExamCard({
+  exam, onSolve, onCoverage,
+}: { exam: ExamRecord; onSolve: () => void; onCoverage: () => void }) {
+  const canSolve    = exam.extractionStatus === 'done' && (exam.questionCount ?? 0) > 0;
+  const canCoverage = exam.extractionStatus === 'done' || exam.extractionStatus === 'error' || exam.extractionStatus === 'poor_scan';
   return (
     <motion.div
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
-      whileTap={canSolve ? { scale: 0.98 } : undefined}
-      onClick={canSolve ? onSolve : undefined}
-      className={`rounded-2xl p-4 ${canSolve ? 'cursor-pointer' : 'opacity-70'}`}
+      className="rounded-2xl p-4"
       style={{
         background: 'rgba(255,255,255,0.03)',
         border: '1px solid rgba(255,255,255,0.07)',
       }}
     >
-      <div className="flex items-start gap-3" dir="rtl">
+      <div
+        className={`flex items-start gap-3 ${canSolve ? 'cursor-pointer' : ''}`}
+        dir="rtl"
+        onClick={canSolve ? onSolve : undefined}
+      >
         <div
           className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl"
           style={{ background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.2)' }}
@@ -105,6 +111,24 @@ function ExamCard({ exam, onSolve }: { exam: ExamRecord; onSolve: () => void }) 
           <ChevronRight size={16} className="text-slate-600 flex-shrink-0 mt-1" />
         )}
       </div>
+
+      {/* Coverage analysis button */}
+      {canCoverage && (
+        <div className="mt-3 pt-3 border-t border-white/5 flex justify-end" dir="rtl">
+          <button
+            onClick={(e) => { e.stopPropagation(); onCoverage(); }}
+            className="flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-[11px] font-semibold transition-all active:scale-95"
+            style={{
+              background: 'rgba(0,198,255,0.07)',
+              border: '1px solid rgba(0,198,255,0.18)',
+              color: '#64a8c8',
+            }}
+          >
+            <BarChart3 size={11} />
+            تحليل التغطية
+          </button>
+        </div>
+      )}
     </motion.div>
   );
 }
@@ -236,6 +260,7 @@ export default function ExamsPage() {
   const [weakSubjectFilter, setWeakSubjectFilter] = useState<string>('');
   const [loading, setLoading]       = useState(false);
   const [error, setError]           = useState('');
+  const [coverageExam, setCoverageExam] = useState<{ id: string; title: string } | null>(null);
 
   // Ref for the extracting-status polling interval
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -437,6 +462,7 @@ export default function ExamsPage() {
                       key={exam.examId}
                       exam={exam}
                       onSolve={() => goSolve(exam.examId)}
+                      onCoverage={() => setCoverageExam({ id: exam.examId, title: exam.title })}
                     />
                   ))}
                 </div>
@@ -772,6 +798,17 @@ export default function ExamsPage() {
           )}
         </AnimatePresence>
       </div>
+
+      {/* ── Coverage Analysis Modal ── */}
+      <AnimatePresence>
+        {coverageExam && (
+          <ExamCoverageModal
+            examId={coverageExam.id}
+            examTitle={coverageExam.title}
+            onClose={() => setCoverageExam(null)}
+          />
+        )}
+      </AnimatePresence>
     </PageWrapper>
   );
 }
