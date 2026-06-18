@@ -28,13 +28,13 @@ args = "API Server"
 name = "Smart Study Assistant"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "PORT=5000 BASE_PATH=/smart-study/ pnpm --filter @workspace/smart-study run dev"
-waitForPort = 5000
-
 [workflows.workflow.metadata]
 outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "PORT=5000 BASE_PATH=/ pnpm --filter @workspace/smart-study run dev"
+waitForPort = 5000
 
 [[workflows.workflow]]
 name = "API Server"
@@ -64,10 +64,6 @@ externalPort = 3001
 [[ports]]
 localPort = 5000
 externalPort = 80
-
-[[ports]]
-localPort = 8080
-externalPort = 8080
 
 [[ports]]
 localPort = 8081
