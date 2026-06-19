@@ -181,21 +181,25 @@ async function callGemini(
         generationConfig: { maxOutputTokens: 1024, temperature: 0.3 },
       }),
     });
-    const data = await res.json();
+    // Read body as text first — prevents "Unexpected token '<'" if server returns HTML error page
+    const raw = await res.text();
     if (!res.ok) {
-      const msg: string = data?.error?.message ?? data?.error ?? `HTTP ${res.status}`;
+      let msg = `HTTP ${res.status}`;
+      try {
+        const errJson = JSON.parse(raw);
+        msg = errJson?.error?.message ?? errJson?.error ?? msg;
+      } catch { /* raw is not JSON (e.g. HTML from 413/502) — use status code */ }
       if (
         res.status === 429 ||
-        (typeof msg === 'string' && (
-          msg.toLowerCase().includes('quota') ||
-          msg.toLowerCase().includes('resource_exhausted')
-        ))
+        msg.toLowerCase().includes('quota') ||
+        msg.toLowerCase().includes('resource_exhausted')
       ) {
         throw Object.assign(new Error(String(msg)), { code: 'QUOTA_EXCEEDED' });
       }
-      if (typeof msg === 'string' && msg.toLowerCase().includes('not found')) resetModelCache();
+      if (msg.toLowerCase().includes('not found')) resetModelCache();
       throw new Error(String(msg));
     }
+    const data = JSON.parse(raw);
     const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
     if (!text) throw new Error('EMPTY_RESPONSE');
     return text;
@@ -216,11 +220,13 @@ async function callGemini(
         generationConfig: { maxOutputTokens: 1024, temperature: 0.3 },
       }),
     });
-    const data = await res.json();
+    const raw = await res.text();
     if (!res.ok) {
-      const msg: string = data?.error?.message ?? data?.error ?? `HTTP ${res.status}`;
+      let msg = `HTTP ${res.status}`;
+      try { msg = (JSON.parse(raw) as { error?: { message?: string }; message?: string })?.error?.message ?? msg; } catch { /* not JSON */ }
       throw new Error(String(msg));
     }
+    const data = JSON.parse(raw);
     const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
     if (!text) throw new Error('EMPTY_RESPONSE');
     return text;

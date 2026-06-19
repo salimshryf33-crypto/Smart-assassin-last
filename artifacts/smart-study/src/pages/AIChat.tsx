@@ -568,45 +568,6 @@ export default function AIChat() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages, isTyping, understandingCheck, checkResult]);
 
-  // ── DIAGNOSTIC PROBE (temp) ───────────────────────────────────────────────
-  useEffect(() => {
-    (async () => {
-      console.log('[DIAG] ═══ Chat diagnostic probe START ═══');
-      try {
-        const { getAuth } = await import('firebase/auth');
-        const fbUser = getAuth().currentUser;
-        console.log('[DIAG] Firebase user:', fbUser ? `uid=${fbUser.uid} email=${fbUser.email}` : 'NULL (not logged in)');
-        const token = fbUser ? await fbUser.getIdToken() : null;
-        console.log('[DIAG] ID token exists:', !!token, token ? `(first 20: ${token.slice(0,20)}...)` : '');
-        const authHdr = token ? `Bearer ${token.slice(0,20)}...` : 'NONE';
-        console.log('[DIAG] Authorization header that will be sent:', authHdr);
-
-        // Test 1: curriculum/search
-        console.log('[DIAG] ── Test 1: GET /api/curriculum/search ──');
-        const params = new URLSearchParams({ country: 'sudan', grade: 'secondary', subject: 'biology', query: 'test', topK: '3' });
-        const r1 = await fetch(`/api/curriculum/search?${params}`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
-        const body1 = await r1.text();
-        console.log('[DIAG] URL:', `/api/curriculum/search?${params}`);
-        console.log('[DIAG] Status:', r1.status);
-        console.log('[DIAG] Content-Type:', r1.headers.get('content-type'));
-        console.log('[DIAG] Body(300):', body1.slice(0, 300));
-
-        // Test 2: gemini/models
-        console.log('[DIAG] ── Test 2: GET /api/gemini/models ──');
-        const r2 = await fetch('/api/gemini/models');
-        const body2 = await r2.text();
-        console.log('[DIAG] Status:', r2.status);
-        console.log('[DIAG] Content-Type:', r2.headers.get('content-type'));
-        console.log('[DIAG] Body(100):', body2.slice(0, 100));
-
-      } catch (e) {
-        console.error('[DIAG] Probe error:', e);
-      }
-      console.log('[DIAG] ═══ Chat diagnostic probe END ═══');
-    })();
-  }, []);
 
   const saveGeneratedCards = useCallback(
     (cards: Parameters<typeof addFlashcardLocal>[0][]) => {
@@ -673,15 +634,6 @@ export default function AIChat() {
     setIsTyping(true);
 
     try {
-      // ── SEND DIAGNOSTIC (temp) ───────────────────────────────────────────
-      console.log('[SEND] ═══ sendMessage called ═══');
-      console.log('[SEND] user uid:', user?.uid ?? 'NULL');
-      console.log('[SEND] curriculum:', JSON.stringify(curriculum));
-      console.log('[SEND] selectedSubject:', selectedSubject);
-      console.log('[SEND] studentProfile:', JSON.stringify(studentProfile));
-      console.log('[SEND] content:', content.slice(0, 80));
-      // ─────────────────────────────────────────────────────────────────────
-
       const history = chatMessages.map((m) => ({
         role: m.role === 'assistant' ? 'model' : ('user' as 'user' | 'model'),
         parts: [{ text: m.content }],
@@ -735,7 +687,6 @@ export default function AIChat() {
         recordActivity('ai_chat', { messageText: content }).catch(() => {});
       }
     } catch (err: unknown) {
-      console.error('[SEND] ═══ orchestrate THREW ═══', err);
       const msg = err instanceof Error ? err.message : String(err);
       const isQuota =
         msg.includes('QUOTA_EXCEEDED') ||
