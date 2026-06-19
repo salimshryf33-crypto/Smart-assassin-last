@@ -31,7 +31,10 @@ interface GeminiResponse {
   }>;
 }
 
-async function callGemini(prompt: string): Promise<string> {
+/** Backoff delays (ms) for 429 rate-limit retries. */
+const RATE_LIMIT_DELAYS = [15_000, 30_000, 60_000];
+
+async function callGemini(prompt: string, attempt = 0): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
 
@@ -46,6 +49,17 @@ async function callGemini(prompt: string): Promise<string> {
       }),
     }
   );
+
+  // ── Rate-limit: retry with exponential backoff ────────────────────────────
+  if (res.status === 429 && attempt < RATE_LIMIT_DELAYS.length) {
+    const delay = RATE_LIMIT_DELAYS[attempt];
+    logger.warn(
+      { attempt, delayMs: delay },
+      'callGemini: rate-limited (429) — retrying after backoff'
+    );
+    await new Promise((r) => setTimeout(r, delay));
+    return callGemini(prompt, attempt + 1);
+  }
 
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
