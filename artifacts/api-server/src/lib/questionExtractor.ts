@@ -42,7 +42,7 @@ async function callGemini(prompt: string): Promise<string> {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { maxOutputTokens: 4096, temperature: 0.1 },
+        generationConfig: { maxOutputTokens: 32768, temperature: 0.1 },
       }),
     }
   );
@@ -58,7 +58,14 @@ async function callGemini(prompt: string): Promise<string> {
 
 // ─── Prompt ───────────────────────────────────────────────────────────────────
 
+/** Compress long dot/underscore runs (fill-blank markers) to save tokens. */
+function compressFillerDots(text: string): string {
+  // Replace runs of 4+ dots with a short placeholder
+  return text.replace(/\.{4,}/g, '....').replace(/_{4,}/g, '____');
+}
+
 function buildPrompt(chunkText: string, examTitle: string): string {
+  const compressed = compressFillerDots(chunkText);
   return `أنت نظام استخراج أسئلة امتحانات للمحتوى التعليمي العربي.
 
 استخرج كل الأسئلة من نص الامتحان التالي. أعد مصفوفة JSON فقط.
@@ -85,7 +92,7 @@ function buildPrompt(chunkText: string, examTitle: string): string {
 عنوان الامتحان: ${examTitle}
 
 نص الامتحان:
-${chunkText}`;
+${compressed}`;
 }
 
 // ─── Retry prompt (aggressive) ────────────────────────────────────────────────
@@ -93,6 +100,7 @@ ${chunkText}`;
 // words — OCR artifacts (dots mixed into text, broken spacing) may have confused
 // the main prompt. This prompt is more tolerant of imperfect OCR formatting.
 function buildRetryPrompt(chunkText: string, examTitle: string): string {
+  const compressed = compressFillerDots(chunkText);
   return `أنت نظام متخصص في استخراج الأسئلة الامتحانية من نصوص OCR العربية.
 
 النص التالي مُستخرج بالـ OCR وقد يحتوي على نقاط أو مسافات إضافية بين الكلمات.
@@ -122,7 +130,7 @@ function buildRetryPrompt(chunkText: string, examTitle: string): string {
 عنوان الامتحان: ${examTitle}
 
 النص:
-${chunkText}`;
+${compressed}`;
 }
 
 // ─── Response parser ──────────────────────────────────────────────────────────

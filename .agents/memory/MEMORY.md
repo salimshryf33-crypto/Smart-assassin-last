@@ -7,3 +7,4 @@
 - [Exam Solver Architecture](exam-solver-architecture.md) — IExamSolverStore + 3 new PG tables; autoGrader (exact/AI); weaknessAnalyzer (fire-and-forget); examGenerator (curriculum chunks→Gemini); flashcard bridge via source='exam_question'.
 - [RAG Retrieval Architecture](rag-retrieval.md) — topK 5→10; capped per-token scoring; trigram weight ×25; adaptive threshold; extractChapterLabel handles embedded OCR headings; relabelChapters() runs on startup.
 - [Gemini Proxy Body Limits](gemini-proxy-body.md) — callGemini must read res.text() before res.json(); express.json() limit raised to 10mb to handle large RAG contexts.
+- [Question Extractor Token Fix](question-extractor-token-fix.md) — maxOutputTokens 4096→32768; compressFillerDots() strips long dot runs before Gemini; both buildPrompt+buildRetryPrompt use compressed text.
