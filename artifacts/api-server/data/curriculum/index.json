@@ -82,5 +82,28 @@
     "ownerId": "JlLBDDgQpkRtgJ3efZ8Lp7yhijr2",
     "visibility": "private",
     "bookTitle": "إمتحان الأحياء 2022 (1)"
+  },
+  {
+    "id": "4fa330de-ddcd-47dc-9dd2-9c6b11fed943",
+    "country": "sudan",
+    "grade": "grade12",
+    "subject": "biology",
+    "track": "",
+    "filename": "إمتحان الأحياء 2024.pdf",
+    "totalPages": 9,
+    "chunkCount": 5,
+    "status": "done",
+    "uploadedAt": 1781954328665,
+    "processedAt": 1781954624818,
+    "docType": "exam",
+    "extractionMethod": "ocr",
+    "extractedChars": 14659,
+    "avgCharsPerPage": 1629,
+    "extractedPages": 9,
+    "pdfStoragePath": "/home/runner/workspace/artifacts/api-server/data/pdfs/4fa330de-ddcd-47dc-9dd2-9c6b11fed943.pdf",
+    "lastRenderedPage": 8,
+    "ownerId": "JlLBDDgQpkRtgJ3efZ8Lp7yhijr2",
+    "visibility": "private",
+    "bookTitle": "إمتحان الأحياء 2024"
   }
 ]

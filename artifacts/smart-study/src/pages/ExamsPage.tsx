@@ -133,30 +133,144 @@ function ExamCard({
   );
 }
 
-// ─── Weakness bar ─────────────────────────────────────────────────────────────
-function WeaknessBar({ topic, score, subject }: { topic: string; score: number; subject: string }) {
-  const pct = Math.round(score * 100);
-  const color = pct >= 70 ? C.red : pct >= 40 ? C.gold : C.green;
+// ─── Mastery bar (shows mastery %, fills as you improve) ──────────────────────
+function WeaknessBar({
+  topic, score, subject, total,
+}: { topic: string; score: number; subject: string; total?: number }) {
+  const weaknessPct = Math.round(score * 100);
+  const masteryPct  = 100 - weaknessPct;
+  const color = masteryPct >= 80 ? C.green : masteryPct >= 50 ? C.gold : C.red;
+  const label = masteryPct >= 80 ? 'متقن' : masteryPct >= 50 ? 'جيد' : 'يحتاج مراجعة';
   return (
     <div className="mb-3" dir="rtl">
       <div className="flex items-center justify-between mb-1">
-        <div>
-          <span className="text-xs font-medium text-white">{topic}</span>
-          <span className="mr-2 text-[10px] text-slate-500">{subject}</span>
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-xs font-medium text-white truncate">{topic}</span>
+          <span className="text-[10px] text-slate-500 flex-shrink-0">{subject}</span>
+          {total != null && (
+            <span className="text-[9px] text-slate-600 flex-shrink-0">· {total} محاولة</span>
+          )}
         </div>
-        <span className="text-xs font-bold" style={{ color }}>
-          {pct >= 70 ? 'ضعيف' : pct >= 40 ? 'متوسط' : 'جيد'} {pct}%
+        <span className="text-xs font-bold flex-shrink-0 mr-2" style={{ color }}>
+          {label} {masteryPct}%
         </span>
       </div>
       <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.06)' }}>
         <motion.div
           initial={{ width: 0 }}
-          animate={{ width: `${pct}%` }}
+          animate={{ width: `${Math.max(2, masteryPct)}%` }}
           transition={{ duration: 0.8, ease: 'easeOut' }}
           className="h-full rounded-full"
           style={{ background: color }}
         />
       </div>
+    </div>
+  );
+}
+
+// ─── Recommended Action Card ──────────────────────────────────────────────────
+function RecommendedActionCard({
+  label, sub, color, onClick,
+}: { label: string; sub: string; color: string; onClick: () => void }) {
+  return (
+    <motion.button
+      whileTap={{ scale: 0.97 }}
+      onClick={onClick}
+      className="w-full flex items-center gap-3 rounded-2xl p-4 mb-4 text-right"
+      dir="rtl"
+      style={{
+        background: `linear-gradient(135deg, ${color}14, ${color}06)`,
+        border: `1px solid ${color}28`,
+      }}
+    >
+      <div
+        className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl"
+        style={{ background: `${color}18`, border: `1px solid ${color}30` }}
+      >
+        <Zap size={18} style={{ color }} />
+      </div>
+      <div className="flex-1 min-w-0 text-right">
+        <p className="text-[9px] text-slate-500 mb-0.5">ماذا تدرس الآن؟</p>
+        <p className="text-sm font-bold text-white leading-tight">{label}</p>
+        <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">{sub}</p>
+      </div>
+      <ArrowRight size={14} style={{ color }} className="flex-shrink-0 opacity-50" />
+    </motion.button>
+  );
+}
+
+// ─── Progress Overview Card ───────────────────────────────────────────────────
+function ProgressOverviewCard({
+  masteryPct, latestScore, prevScore, strongestTopic, weakestTopic,
+}: {
+  masteryPct: number;
+  latestScore: number | null;
+  prevScore: number | null;
+  strongestTopic: string | null;
+  weakestTopic: string | null;
+}) {
+  const trend = (latestScore != null && prevScore != null) ? latestScore - prevScore : null;
+  const trendColor = trend == null ? '#64748b' : trend > 1 ? C.green : trend < -1 ? C.red : '#64748b';
+  const trendLabel = trend == null ? '' : trend > 1 ? `↑ ${Math.round(trend)}` : trend < -1 ? `↓ ${Math.abs(Math.round(trend))}` : '→ ثابت';
+  const masteryColor = masteryPct >= 70 ? C.green : masteryPct >= 45 ? C.gold : C.red;
+
+  return (
+    <div
+      className="rounded-2xl p-4 mb-4"
+      style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.07)' }}
+      dir="rtl"
+    >
+      <div className="flex items-center gap-2 mb-3">
+        <BarChart3 size={12} style={{ color: C.blue }} />
+        <span className="text-xs font-bold text-white">نظرة عامة على تقدّمك</span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 mb-2">
+        <div className="rounded-xl p-3" style={{ background: `${masteryColor}08`, border: `1px solid ${masteryColor}18` }}>
+          <p className="text-[9px] text-slate-500 mb-1">مستوى الإتقان الكلي</p>
+          <p className="text-2xl font-bold leading-none" style={{ color: masteryColor }}>
+            {masteryPct}<span className="text-sm font-normal text-slate-500 mr-0.5">%</span>
+          </p>
+        </div>
+        <div className="rounded-xl p-3" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)' }}>
+          <p className="text-[9px] text-slate-500 mb-1">آخر امتحان</p>
+          {latestScore != null ? (
+            <div className="flex items-end gap-1.5">
+              <p className="text-2xl font-bold leading-none text-white">
+                {Math.round(latestScore)}<span className="text-sm font-normal text-slate-500 mr-0.5">%</span>
+              </p>
+              {trendLabel && (
+                <span className="text-xs font-bold pb-0.5" style={{ color: trendColor }}>{trendLabel}</span>
+              )}
+            </div>
+          ) : (
+            <p className="text-lg text-slate-600 font-bold">—</p>
+          )}
+        </div>
+      </div>
+      {(strongestTopic || weakestTopic) && (
+        <div className="grid grid-cols-2 gap-2">
+          {strongestTopic && (
+            <div className="flex items-center gap-1.5 rounded-lg px-2 py-1.5"
+              style={{ background: `${C.green}06`, border: `1px solid ${C.green}12` }}>
+              <TrendingUp size={11} style={{ color: C.green }} className="flex-shrink-0" />
+              <div className="min-w-0">
+                <p className="text-[8px] text-slate-600">الأقوى</p>
+                <p className="text-[10px] font-semibold text-white truncate">{strongestTopic}</p>
+              </div>
+            </div>
+          )}
+          {weakestTopic && (
+            <div className="flex items-center gap-1.5 rounded-lg px-2 py-1.5"
+              style={{ background: `${C.red}06`, border: `1px solid ${C.red}12` }}>
+              <TrendingDown size={11} style={{ color: C.red }} className="flex-shrink-0" />
+              <div className="min-w-0">
+                <p className="text-[8px] text-slate-600">يحتاج تركيز</p>
+                <p className="text-[10px] font-semibold text-white truncate">{weakestTopic}</p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -303,12 +417,16 @@ export default function ExamsPage() {
   const loadWeakness = useCallback(async () => {
     setLoading(true); setError('');
     try {
-      const snaps = await listWeaknessSnapshots();
+      const [snaps, attData] = await Promise.all([
+        listWeaknessSnapshots(),
+        listMyAttempts(),
+      ]);
       setSnapshots(snaps.snapshots);
+      setAttempts(attData.attempts.sort((a, b) =>
+        new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime()
+      ));
 
-      // Derive weak topics directly from snapshots.
-      // This bypasses the level↔grade mismatch bug where studentProfile.level
-      // ('secondary') never matched weakness_snapshots.grade ('grade12').
+      // Derive weak topics directly from snapshots (bypasses level↔grade mismatch).
       const derived: WeakTopicResult[] = [];
       for (const snap of snaps.snapshots) {
         for (const [topic, ts] of Object.entries(snap.topicScores)) {
@@ -560,13 +678,52 @@ export default function ExamsPage() {
             </motion.div>
           )}
 
-          {/* ═══════════════ WEAKNESS DASHBOARD ═══════════════ */}
+          {/* ═══════════════ WEAKNESS DASHBOARD / MASTERY MAP ═══════════════ */}
           {subTab === 'weakness' && (() => {
             const subjects = [...new Set(weakTopics.map(t => t.subject))];
             const vis = weakSubjectFilter ? weakTopics.filter(t => t.subject === weakSubjectFilter) : weakTopics;
-            const veryWeak = vis.filter(t => t.weaknessScore >= 0.5);
-            const medium   = vis.filter(t => t.weaknessScore >= 0.3 && t.weaknessScore < 0.5);
-            const strong   = vis.filter(t => t.weaknessScore < 0.3);
+            const veryWeak = vis.filter(t => t.weaknessScore > 0.5);
+            const medium   = vis.filter(t => t.weaknessScore > 0.2 && t.weaknessScore <= 0.5);
+            const strong   = vis.filter(t => t.weaknessScore <= 0.2);
+
+            // ── Analytics computed from existing data only ───────────────────
+            const totalAnswered = weakTopics.reduce((s, t) => s + t.total, 0);
+            const totalCorrect  = weakTopics.reduce((s, t) => s + t.correct, 0);
+            const overallMastery = totalAnswered > 0
+              ? Math.round((totalCorrect / totalAnswered) * 100) : 0;
+
+            const sortedByStrength = [...weakTopics].sort((a, b) => a.weaknessScore - b.weaknessScore);
+            const strongestTopic = sortedByStrength[0]?.topic ?? null;
+            const weakestTopic   = sortedByStrength[sortedByStrength.length - 1]?.topic ?? null;
+
+            const completedAttempts = attempts
+              .filter(a => a.status === 'completed' && a.scorePct != null)
+              .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+            const latestScore = completedAttempts[0]
+              ? parseFloat(String(completedAttempts[0].scorePct)) : null;
+            const prevScore   = completedAttempts[1]
+              ? parseFloat(String(completedAttempts[1].scorePct)) : null;
+
+            // ── Recommended Action ───────────────────────────────────────────
+            const worstTopic = weakTopics[0];
+            let recLabel: string, recSub: string, recColor: string, recAction: () => void;
+            if (worstTopic && worstTopic.weaknessScore > 0.5) {
+              recLabel  = `راجع "${worstTopic.topic}"`;
+              recSub    = `إتقانك ${Math.round((1 - worstTopic.weaknessScore) * 100)}% فقط في مادة ${worstTopic.subject}`;
+              recColor  = C.red;
+              recAction = () => { setExamNav({ generatorSubject: worstTopic.subject, generatorTopic: worstTopic.topic }); setPage('exam-generator'); };
+            } else if (worstTopic) {
+              recLabel  = `أنشئ امتحاناً تدريبياً لتقوية مستواك`;
+              recSub    = `ركّز على: ${worstTopic.topic} في ${worstTopic.subject}`;
+              recColor  = C.blue;
+              recAction = () => { setExamNav({ generatorSubject: worstTopic.subject, generatorTopic: worstTopic.topic }); setPage('exam-generator'); };
+            } else {
+              recLabel  = 'حل امتحانك الأول لبدء تتبع تقدّمك';
+              recSub    = 'سيتم تحليل نتائجك تلقائياً بعد الإرسال';
+              recColor  = C.gold;
+              recAction = () => switchTab('my-exams');
+            }
+
             return (
               <motion.div
                 key="weakness"
@@ -602,12 +759,20 @@ export default function ExamsPage() {
                   </div>
                 ) : (
                   <div>
-                    {/* Summary stats */}
+                    {/* ── Recommended Action Card ── */}
+                    <RecommendedActionCard
+                      label={recLabel}
+                      sub={recSub}
+                      color={recColor}
+                      onClick={recAction}
+                    />
+
+                    {/* ── Summary stats ── */}
                     <div className="grid grid-cols-3 gap-2 mb-4">
                       {[
-                        { label: 'إجمالي المواد',  value: snapshots.length,                                       icon: <BookOpen size={13} />,    color: C.blue  },
-                        { label: 'تحتاج مراجعة',   value: weakTopics.filter(t => t.weaknessScore >= 0.5).length,  icon: <TrendingDown size={13} />, color: C.red   },
-                        { label: 'نقاط قوة',        value: weakTopics.filter(t => t.weaknessScore < 0.3).length,  icon: <TrendingUp size={13} />,   color: C.green },
+                        { label: 'مستوى الإتقان',  value: `${overallMastery}%`,                                  icon: <Trophy size={13} />,       color: overallMastery >= 70 ? C.green : overallMastery >= 45 ? C.gold : C.red },
+                        { label: 'تحتاج مراجعة',   value: weakTopics.filter(t => t.weaknessScore > 0.5).length,  icon: <TrendingDown size={13} />, color: C.red   },
+                        { label: 'نقاط قوة',        value: weakTopics.filter(t => t.weaknessScore <= 0.2).length, icon: <TrendingUp size={13} />,   color: C.green },
                       ].map((s) => (
                         <div
                           key={s.label}
@@ -621,7 +786,16 @@ export default function ExamsPage() {
                       ))}
                     </div>
 
-                    {/* Generate exam CTA */}
+                    {/* ── Progress Overview Card ── */}
+                    <ProgressOverviewCard
+                      masteryPct={overallMastery}
+                      latestScore={latestScore}
+                      prevScore={prevScore}
+                      strongestTopic={strongestTopic}
+                      weakestTopic={weakestTopic}
+                    />
+
+                    {/* ── Generate Remedial Exam CTA ── */}
                     <button
                       onClick={() => {
                         setExamNav({ generatorSubject: veryWeak[0]?.subject ?? weakTopics[0]?.subject ?? '', generatorTopic: veryWeak[0]?.topic });
@@ -673,7 +847,7 @@ export default function ExamsPage() {
                           <h3 className="text-sm font-bold" style={{ color: C.red }}>تحتاج مراجعة</h3>
                           <span className="text-[10px] text-slate-600">({veryWeak.length})</span>
                         </div>
-                        {veryWeak.map(t => <WeaknessBar key={`${t.subject}-${t.topic}`} topic={t.topic} score={t.weaknessScore} subject={t.subject} />)}
+                        {veryWeak.map(t => <WeaknessBar key={`${t.subject}-${t.topic}`} topic={t.topic} score={t.weaknessScore} subject={t.subject} total={t.total} />)}
                       </div>
                     )}
 
@@ -685,19 +859,19 @@ export default function ExamsPage() {
                           <h3 className="text-sm font-bold" style={{ color: C.gold }}>يمكن التحسين</h3>
                           <span className="text-[10px] text-slate-600">({medium.length})</span>
                         </div>
-                        {medium.map(t => <WeaknessBar key={`${t.subject}-${t.topic}`} topic={t.topic} score={t.weaknessScore} subject={t.subject} />)}
+                        {medium.map(t => <WeaknessBar key={`${t.subject}-${t.topic}`} topic={t.topic} score={t.weaknessScore} subject={t.subject} total={t.total} />)}
                       </div>
                     )}
 
-                    {/* Strong topics */}
+                    {/* Strong topics (Mastered) */}
                     {strong.length > 0 && (
                       <div className="rounded-2xl p-4" style={{ background: 'rgba(52,211,153,0.04)', border: '1px solid rgba(52,211,153,0.12)' }}>
                         <div className="flex items-center gap-2 mb-3" dir="rtl">
                           <TrendingUp size={14} style={{ color: C.green }} />
-                          <h3 className="text-sm font-bold" style={{ color: C.green }}>نقاط قوة</h3>
+                          <h3 className="text-sm font-bold" style={{ color: C.green }}>مُتقَن ✓</h3>
                           <span className="text-[10px] text-slate-600">({strong.length})</span>
                         </div>
-                        {strong.map(t => <WeaknessBar key={`${t.subject}-${t.topic}`} topic={t.topic} score={t.weaknessScore} subject={t.subject} />)}
+                        {strong.map(t => <WeaknessBar key={`${t.subject}-${t.topic}`} topic={t.topic} score={t.weaknessScore} subject={t.subject} total={t.total} />)}
                       </div>
                     )}
                   </div>
@@ -740,6 +914,53 @@ export default function ExamsPage() {
                 </div>
               ) : (
                 <div className="space-y-3">
+                  {/* ── Score Trend Card ── */}
+                  {(() => {
+                    const done = [...attempts]
+                      .filter(a => a.status === 'completed' && a.scorePct != null)
+                      .sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime());
+                    if (done.length < 2) return null;
+                    const last5 = done.slice(-5);
+                    const avg = Math.round(done.reduce((s, a) => s + parseFloat(String(a.scorePct)), 0) / done.length);
+                    const latest = parseFloat(String(done[done.length - 1].scorePct));
+                    const prev   = parseFloat(String(done[done.length - 2].scorePct));
+                    const diff   = Math.round(latest - prev);
+                    const diffColor = diff > 0 ? C.green : diff < 0 ? C.red : '#64748b';
+                    const diffLabel = diff > 0 ? `↑ ${diff}` : diff < 0 ? `↓ ${Math.abs(diff)}` : '→ ثابت';
+                    return (
+                      <div className="rounded-2xl p-4 mb-1"
+                        style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.07)' }}
+                        dir="rtl"
+                      >
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="text-xs font-bold text-white">مسار درجاتك</span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] text-slate-500">
+                              متوسط: <span className="font-bold text-white">{avg}%</span>
+                            </span>
+                            <span className="text-[10px] font-bold" style={{ color: diffColor }}>{diffLabel}</span>
+                          </div>
+                        </div>
+                        <div className="flex items-end gap-1.5 h-14" dir="ltr">
+                          {last5.map((a) => {
+                            const s = parseFloat(String(a.scorePct));
+                            const col = s >= 70 ? C.green : s >= 50 ? C.gold : C.red;
+                            const h = Math.max(12, Math.round(s * 0.9));
+                            return (
+                              <div key={a.id} className="flex flex-col items-center gap-1 flex-1">
+                                <span className="text-[8px] font-bold" style={{ color: col }}>{Math.round(s)}</span>
+                                <div
+                                  className="w-full rounded-t-md transition-all"
+                                  style={{ height: `${h}%`, background: `${col}55`, border: `1px solid ${col}40` }}
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   <p className="text-xs text-slate-600 text-right mb-1">{attempts.length} محاولة</p>
                   {attempts.map((a) => {
                     const scorePct = a.scorePct != null ? parseFloat(String(a.scorePct)) : null;
