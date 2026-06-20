@@ -59,5 +59,28 @@
     "ownerId": "JlLBDDgQpkRtgJ3efZ8Lp7yhijr2",
     "visibility": "private",
     "bookTitle": "إمتحان الكيمياء 2022"
+  },
+  {
+    "id": "fb270347-276f-4b14-bdb6-01d23076a627",
+    "country": "sudan",
+    "grade": "grade12",
+    "subject": "biology",
+    "track": "",
+    "filename": "إمتحان الأحياء 2022 (1).pdf",
+    "totalPages": 8,
+    "chunkCount": 3,
+    "status": "done",
+    "uploadedAt": 1781943739888,
+    "processedAt": 1781943860224,
+    "docType": "exam",
+    "extractionMethod": "ocr",
+    "extractedChars": 9104,
+    "avgCharsPerPage": 1517,
+    "extractedPages": 6,
+    "pdfStoragePath": "/home/runner/workspace/artifacts/api-server/data/pdfs/fb270347-276f-4b14-bdb6-01d23076a627.pdf",
+    "lastRenderedPage": 8,
+    "ownerId": "JlLBDDgQpkRtgJ3efZ8Lp7yhijr2",
+    "visibility": "private",
+    "bookTitle": "إمتحان الأحياء 2022 (1)"
   }
 ]
