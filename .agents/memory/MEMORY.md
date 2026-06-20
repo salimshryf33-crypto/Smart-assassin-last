@@ -5,6 +5,7 @@
 - [OCR Resume Architecture](ocr-resume-architecture.md) — QuotaExhaustedError + startFromPage + onBatchComplete in pdfExtractor; partial status + appendChunks + PDF permanent storage in queue/storage/routes.
 - [PDF Persistence Architecture](pdf-persistence.md) — Local disk is ephemeral; PDFs now dual-written to disk + PostgreSQL bytea; scheduler restores from DB if disk missing; legacy relative pdfStoragePath bug fixed.
 - [Exam Solver Architecture](exam-solver-architecture.md) — IExamSolverStore + 3 new PG tables; autoGrader (exact/AI); weaknessAnalyzer (fire-and-forget); examGenerator (curriculum chunks→Gemini); flashcard bridge via source='exam_question'.
+- [Weakness Dashboard Fix](weakness-dashboard.md) — weakTopics derived from listWeaknessSnapshots() on frontend; avoids level↔grade mismatch; minTotal lowered to 1.
 - [RAG Retrieval Architecture](rag-retrieval.md) — topK 5→10; capped per-token scoring; trigram weight ×25; adaptive threshold; extractChapterLabel handles embedded OCR headings; relabelChapters() runs on startup.
 - [Gemini Proxy Body Limits](gemini-proxy-body.md) — callGemini must read res.text() before res.json(); express.json() limit raised to 10mb to handle large RAG contexts.
 - [Question Extractor Token Fix](question-extractor-token-fix.md) — maxOutputTokens 4096→32768; compressFillerDots() strips long dot runs before Gemini; both buildPrompt+buildRetryPrompt use compressed text.

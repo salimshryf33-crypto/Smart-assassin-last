@@ -10,7 +10,7 @@ import { useAppStore } from '../store/useAppStore';
 import PageWrapper from '../components/layout/PageWrapper';
 import ExamCoverageModal from '../components/ExamCoverageModal';
 import {
-  listExamRecords, searchBankQuestions, listWeaknessSnapshots, getWeakTopics, listMyAttempts,
+  listExamRecords, searchBankQuestions, listWeaknessSnapshots, listMyAttempts,
   type ExamRecord, type ExamQuestion, type WeaknessSnapshot, type WeakTopicResult, type AttemptWithTitle,
 } from '../utils/curriculumApi';
 
@@ -303,17 +303,30 @@ export default function ExamsPage() {
   const loadWeakness = useCallback(async () => {
     setLoading(true); setError('');
     try {
-      const [snaps, topics] = await Promise.all([
-        listWeaknessSnapshots(),
-        studentProfile.country && studentProfile.level
-          ? getWeakTopics(studentProfile.country, studentProfile.level)
-          : Promise.resolve({ topics: [] }),
-      ]);
+      const snaps = await listWeaknessSnapshots();
       setSnapshots(snaps.snapshots);
-      setWeakTopics(topics.topics);
+
+      // Derive weak topics directly from snapshots.
+      // This bypasses the level↔grade mismatch bug where studentProfile.level
+      // ('secondary') never matched weakness_snapshots.grade ('grade12').
+      const derived: WeakTopicResult[] = [];
+      for (const snap of snaps.snapshots) {
+        for (const [topic, ts] of Object.entries(snap.topicScores)) {
+          if (ts.total < 1) continue;
+          derived.push({
+            subject:       snap.subject,
+            topic,
+            weaknessScore: 1 - ts.score,
+            correct:       ts.correct,
+            total:         ts.total,
+          });
+        }
+      }
+      derived.sort((a, b) => b.weaknessScore - a.weaknessScore);
+      setWeakTopics(derived);
     } catch { setError('تعذّر تحميل تحليل نقاط الضعف'); }
     finally  { setLoading(false); }
-  }, [studentProfile.country, studentProfile.level]);
+  }, []);
 
   const loadAttempts = useCallback(async () => {
     setLoading(true); setError('');
