@@ -31,8 +31,25 @@ interface GeminiResponse {
   }>;
 }
 
-/** Backoff delays (ms) for 429 rate-limit retries. */
+/** Backoff delays (ms) for 429 rate-limit retries (per-minute only). */
 const RATE_LIMIT_DELAYS = [15_000, 30_000, 60_000];
+
+/**
+ * Thrown when the Gemini daily free-tier quota is exhausted.
+ * Callers should stop processing immediately and not retry until next UTC day.
+ */
+export class DailyQuotaExhaustedError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = 'DailyQuotaExhaustedError';
+  }
+}
+
+/** Returns true when the 429 body signals a per-day quota, not a per-minute rate limit. */
+function isDailyQuota(body: unknown): boolean {
+  const str = JSON.stringify(body);
+  return str.includes('PerDay') || str.includes('per_day') || str.includes('RESOURCE_EXHAUSTED');
+}
 
 async function callGemini(prompt: string, attempt = 0): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -50,15 +67,30 @@ async function callGemini(prompt: string, attempt = 0): Promise<string> {
     }
   );
 
-  // ── Rate-limit: retry with exponential backoff ────────────────────────────
-  if (res.status === 429 && attempt < RATE_LIMIT_DELAYS.length) {
-    const delay = RATE_LIMIT_DELAYS[attempt];
-    logger.warn(
-      { attempt, delayMs: delay },
-      'callGemini: rate-limited (429) — retrying after backoff'
-    );
-    await new Promise((r) => setTimeout(r, delay));
-    return callGemini(prompt, attempt + 1);
+  if (res.status === 429) {
+    const data = await res.json().catch(() => ({}));
+
+    // Daily quota exhausted — stop immediately, no retry
+    if (isDailyQuota(data)) {
+      logger.error(
+        { attempt },
+        'callGemini: daily free-tier quota exhausted — stopping extraction until tomorrow UTC'
+      );
+      throw new DailyQuotaExhaustedError(`Gemini daily quota exhausted: ${JSON.stringify(data)}`);
+    }
+
+    // Per-minute rate limit — retry with exponential backoff
+    if (attempt < RATE_LIMIT_DELAYS.length) {
+      const delay = RATE_LIMIT_DELAYS[attempt];
+      logger.warn(
+        { attempt, delayMs: delay },
+        'callGemini: rate-limited (429) — retrying after backoff'
+      );
+      await new Promise((r) => setTimeout(r, delay));
+      return callGemini(prompt, attempt + 1);
+    }
+
+    throw new Error(`Gemini error 429 (max retries exceeded): ${JSON.stringify(data)}`);
   }
 
   if (!res.ok) {
@@ -361,6 +393,8 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
           'triggerQuestionExtraction: chunk done'
         );
       } catch (err) {
+        // Daily quota exhausted — propagate immediately, stop all extraction
+        if (err instanceof DailyQuotaExhaustedError) throw err;
         logger.warn(
           { docId, chunkIndex: chunk.chunkIndex, err: String(err) },
           'triggerQuestionExtraction: chunk skipped — Gemini error'
@@ -451,6 +485,22 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
     );
 
   } catch (err) {
+    // Daily quota: re-throw so autoRecoverPendingExams can stop processing
+    if (err instanceof DailyQuotaExhaustedError) {
+      // Mark this exam as pending (not error) so it retries tomorrow
+      try {
+        const existing = await examStore.getExamRecord(examId);
+        if (existing && existing.extractionStatus !== 'done') {
+          await examStore.upsertExamRecord({
+            ...existing,
+            extractionStatus: 'pending',
+            extractionError:  'Daily Gemini quota exhausted — will retry on next server restart',
+          });
+        }
+      } catch { /* ignore */ }
+      throw err;
+    }
+
     const msg = err instanceof Error ? err.message : String(err);
     logger.error({ docId, examId, err: msg }, 'triggerQuestionExtraction: failed');
 

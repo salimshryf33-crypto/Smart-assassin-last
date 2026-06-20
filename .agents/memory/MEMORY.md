@@ -9,3 +9,4 @@
 - [RAG Retrieval Architecture](rag-retrieval.md) — topK 5→10; capped per-token scoring; trigram weight ×25; adaptive threshold; extractChapterLabel handles embedded OCR headings; relabelChapters() runs on startup.
 - [Gemini Proxy Body Limits](gemini-proxy-body.md) — callGemini must read res.text() before res.json(); express.json() limit raised to 10mb to handle large RAG contexts.
 - [Question Extractor Token Fix](question-extractor-token-fix.md) — maxOutputTokens 4096→32768; compressFillerDots() strips long dot runs before Gemini; both buildPrompt+buildRetryPrompt use compressed text.
+- [Exam Recovery & Gemini Quota](exam-recovery-quota.md) — autoRecoverPendingExams on startup; DailyQuotaExhaustedError stops retries; free tier = 20 req/day; resets UTC midnight.

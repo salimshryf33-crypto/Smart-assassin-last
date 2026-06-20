@@ -2,6 +2,8 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { startResumeScheduler } from "./lib/resumeScheduler";
 import { migrateIndex, relabelChapters, generateMissingEmbeddings } from "./lib/curriculumStorage";
+import { triggerQuestionExtraction, DailyQuotaExhaustedError } from "./lib/questionExtractor";
+import { examStore } from "./lib/examStore";
 
 const rawPort = process.env["PORT"];
 
@@ -40,4 +42,56 @@ app.listen(port, (err) => {
   );
 
   startResumeScheduler();
+
+  // Auto-recover pending/stuck exam records — runs once on startup.
+  // Safe: no-op if all exams are already 'done'.
+  autoRecoverPendingExams().catch((err) =>
+    logger.error({ err }, 'autoRecoverPendingExams: unexpected error')
+  );
 });
+
+// ─── Startup auto-recovery for pending exam records ───────────────────────────
+async function autoRecoverPendingExams(): Promise<void> {
+  // Small delay to let the server fully warm up first
+  await new Promise(r => setTimeout(r, 5_000));
+
+  const all = await examStore.listExamRecords({ userId: '', isAdmin: true });
+  const pending = all.filter(r =>
+    r.extractionStatus === 'pending' ||
+    r.extractionStatus === 'extracting' ||
+    r.extractionStatus === 'error' ||
+    // 'done' with 0 questions means extraction was blocked (e.g. by daily quota)
+    (r.extractionStatus === 'done' && r.questionCount === 0)
+  );
+
+  if (pending.length === 0) {
+    logger.info('autoRecoverPendingExams: no pending exams found');
+    return;
+  }
+
+  logger.info({ count: pending.length }, 'autoRecoverPendingExams: starting recovery');
+
+  for (let i = 0; i < pending.length; i++) {
+    const rec = pending[i]!;
+    if (i > 0) {
+      // 45s cooldown between exams to avoid Gemini rate limits
+      await new Promise(r => setTimeout(r, 45_000));
+    }
+    logger.info({ examId: rec.examId, title: rec.title }, 'autoRecoverPendingExams: triggering extraction');
+    try {
+      await triggerQuestionExtraction(rec.curriculumDocId);
+      logger.info({ examId: rec.examId }, 'autoRecoverPendingExams: extraction complete');
+    } catch (err) {
+      if (err instanceof DailyQuotaExhaustedError) {
+        logger.error(
+          { examId: rec.examId, remaining: pending.length - i - 1 },
+          'autoRecoverPendingExams: daily Gemini quota exhausted — stopping. Remaining exams will retry on next restart'
+        );
+        return; // Stop processing — quota resets at UTC midnight
+      }
+      logger.error({ err, examId: rec.examId }, 'autoRecoverPendingExams: extraction failed');
+    }
+  }
+
+  logger.info({ count: pending.length }, 'autoRecoverPendingExams: all done');
+}
