@@ -6,13 +6,14 @@
 import { Router } from 'express';
 import { generateExam } from '../lib/examGenerator';
 import { requireAuth, requireAdmin, isAdmin } from '../middleware/auth';
+import { rateLimit } from '../middleware/rateLimiter';
 
 const router = Router();
 
 // ─── POST /api/exams/generate ─────────────────────────────────────────────────
 // Admin → generates a public exam.
 // Any user → generates a private practice exam for themselves.
-router.post('/generate', requireAuth, async (req, res) => {
+router.post('/generate', requireAuth, rateLimit('exam_generation'), async (req, res) => {
   const {
     country,
     grade,

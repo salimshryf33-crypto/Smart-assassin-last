@@ -16,6 +16,8 @@ import {
   getPdfPath,
 } from '../lib/curriculumStorage';
 import { requireAuth, requireAdmin, isAdmin } from '../middleware/auth';
+import { rateLimit } from '../middleware/rateLimiter';
+import { validatePdf, recordPdfHash } from '../lib/pdfValidator';
 
 const TMP_DIR = path.join(process.cwd(), 'data', 'tmp');
 fs.mkdirSync(TMP_DIR, { recursive: true });
@@ -69,7 +71,7 @@ router.get('/me', requireAuth, (req, res) => {
 // Books   → admin only   (visibility = public, ownerId = null)
 // Notes   → any user     (visibility = private, ownerId = uid)
 // Exams   → any user     (visibility = private, ownerId = uid)
-router.post('/upload', requireAuth, upload.single('pdf'), (req, res) => {
+router.post('/upload', requireAuth, rateLimit('pdf_upload'), upload.single('pdf'), async (req, res) => {
   if (!req.file) {
     res.status(400).json({ error: 'No PDF file uploaded' });
     return;
@@ -109,6 +111,14 @@ router.post('/upload', requireAuth, upload.single('pdf'), (req, res) => {
   const isPublic   = validDocType === 'book';
   const visibility = isPublic ? 'public' : 'private';
   const ownerId    = isPublic ? null : caller.uid;
+
+  // ── Feature 2: PDF Security Validation ──────────────────────────────────────
+  const pdfCheck = await validatePdf(req.file.path, { ownerId });
+  if (!pdfCheck.valid) {
+    fs.unlinkSync(req.file.path);
+    res.status(400).json({ error: pdfCheck.reason ?? 'Invalid PDF file', code: 'INVALID_PDF' });
+    return;
+  }
 
   const originalname = fixEncoding(req.file.originalname);
 
@@ -156,8 +166,16 @@ router.post('/upload', requireAuth, upload.single('pdf'), (req, res) => {
     bookTitle: resolvedTitle,
   });
 
+  // Record PDF hash for future duplicate detection (fire-and-forget)
+  if (pdfCheck.sha256) {
+    recordPdfHash(pdfCheck.sha256, docId, ownerId).catch(() => {});
+  }
+
   req.log.info(
-    { jobId, docId, filename: originalname, docType: validDocType, visibility, bookTitle: resolvedTitle },
+    {
+      jobId, docId, filename: originalname, docType: validDocType,
+      visibility, bookTitle: resolvedTitle, sizeKB: pdfCheck.sizeKB,
+    },
     'Curriculum upload queued'
   );
   res.status(202).json({ jobId, docId, status: 'queued' });

@@ -4,6 +4,8 @@ import { startResumeScheduler } from "./lib/resumeScheduler";
 import { migrateIndex, relabelChapters, generateMissingEmbeddings } from "./lib/curriculumStorage";
 import { triggerQuestionExtraction, DailyQuotaExhaustedError } from "./lib/questionExtractor";
 import { examStore } from "./lib/examStore";
+import { runStartupMigrations } from "./lib/dbMigrations";
+import { startBackupScheduler } from "./lib/backupScheduler";
 
 const rawPort = process.env["PORT"];
 
@@ -27,6 +29,11 @@ app.listen(port, (err) => {
 
   logger.info({ port }, "Server listening");
 
+  // Phase 1: Create security/stability DB tables if they don't exist yet
+  runStartupMigrations().catch((err) =>
+    logger.error({ err }, 'runStartupMigrations: unexpected error')
+  );
+
   // Run safe startup migration (adds visibility/bookTitle defaults to legacy docs)
   migrateIndex();
 
@@ -42,6 +49,9 @@ app.listen(port, (err) => {
   );
 
   startResumeScheduler();
+
+  // Feature 4: Start daily backup scheduler (runs at 02:00 UTC)
+  startBackupScheduler();
 
   // Auto-recover pending/stuck exam records — runs once on startup.
   // Safe: no-op if all exams are already 'done'.

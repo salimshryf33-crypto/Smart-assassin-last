@@ -11,3 +11,4 @@
 - [Question Extractor Token Fix](question-extractor-token-fix.md) — maxOutputTokens 4096→32768; compressFillerDots() strips long dot runs before Gemini; both buildPrompt+buildRetryPrompt use compressed text.
 - [Exam Recovery & Gemini Quota](exam-recovery-quota.md) — autoRecoverPendingExams on startup; DailyQuotaExhaustedError stops retries; free tier = 20 req/day; resets UTC midnight.
 - [Extraction Quality Engine](extraction-quality-engine.md) — 8-phase upgrade: coverageAnalyzer+questionNormalizer+extractionCache; 3-pass extraction; Jaccard dedup; ExtractionScore 0-100; Phase 8 report at GET /api/admin/extraction-report.
+- [Security Stability Layer](security-stability-layer.md) — Phase 1: Token bucket rate limiting (PG), PDF validator (SHA-256 dedup + magic bytes + malicious pattern), RBAC (user_roles PG table), daily DB backup scheduler. All additive — no existing routes broken.

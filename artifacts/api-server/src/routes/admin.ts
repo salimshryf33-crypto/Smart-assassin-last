@@ -14,6 +14,9 @@ import { triggerQuestionExtraction } from '../lib/questionExtractor';
 import { getExtractionCacheStats, clearExtractionCache } from '../lib/extractionCache';
 import { examStore } from '../lib/examStore';
 import { logger } from '../lib/logger';
+import { grantRole, revokeRole, getUserRoles, listUsersWithRole, type Role } from '../lib/rbac';
+import { resetUserBucket, getBucketStatus } from '../middleware/rateLimiter';
+import { getBackupHealth, runBackup } from '../lib/backupScheduler';
 
 const router = Router();
 
@@ -118,6 +121,102 @@ router.get('/exam-status', requireAuth, requireAdmin, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
+});
+
+// ─── RBAC Routes ──────────────────────────────────────────────────────────────
+
+// POST /api/admin/roles/grant — grant a role to a user
+router.post('/roles/grant', requireAuth, requireAdmin, async (req, res) => {
+  const { uid, role } = req.body as { uid?: string; role?: string };
+  if (!uid || !role) { res.status(400).json({ error: '`uid` and `role` are required' }); return; }
+
+  const valid: Role[] = ['student','teacher','moderator','admin','super_admin'];
+  if (!valid.includes(role as Role)) {
+    res.status(400).json({ error: `Invalid role. Must be one of: ${valid.join(', ')}` }); return;
+  }
+
+  try {
+    await grantRole(uid, role as Role, req.user!.uid);
+    res.json({ ok: true, uid, role });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/admin/roles/revoke — revoke a role from a user
+router.post('/roles/revoke', requireAuth, requireAdmin, async (req, res) => {
+  const { uid, role } = req.body as { uid?: string; role?: string };
+  if (!uid || !role) { res.status(400).json({ error: '`uid` and `role` are required' }); return; }
+
+  try {
+    await revokeRole(uid, role as Role);
+    res.json({ ok: true, uid, role });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/admin/roles/:uid — list all roles for a user
+router.get('/roles/:uid', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const roles = await getUserRoles(req.params.uid!);
+    res.json({ uid: req.params.uid, roles });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/admin/roles/list/:role — list all users with a role
+router.get('/roles/list/:role', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const users = await listUsersWithRole(req.params.role as Role);
+    res.json({ role: req.params.role, users });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ─── Rate Limit Management ────────────────────────────────────────────────────
+
+// POST /api/admin/rate-limits/reset — reset a user's bucket for an action
+router.post('/rate-limits/reset', requireAuth, requireAdmin, async (req, res) => {
+  const { uid, action } = req.body as { uid?: string; action?: string };
+  if (!uid || !action) { res.status(400).json({ error: '`uid` and `action` are required' }); return; }
+
+  try {
+    await resetUserBucket(uid, action);
+    res.json({ ok: true, uid, action, message: 'Bucket reset to full capacity' });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/admin/rate-limits/:uid — get bucket status for a user
+router.get('/rate-limits/:uid', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const status = await getBucketStatus(req.params.uid!);
+    res.json({ uid: req.params.uid, buckets: status });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ─── Backup Management ────────────────────────────────────────────────────────
+
+// GET /api/admin/backup/health — check backup health
+router.get('/backup/health', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const health = await getBackupHealth();
+    res.json(health);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/admin/backup/run — manually trigger a backup (fire-and-forget)
+router.post('/backup/run', requireAuth, requireAdmin, (_req, res) => {
+  runBackup().catch(err => logger.error({ err }, 'manual backup: failed'));
+  res.json({ ok: true, message: 'Backup started in background — check /backup/health for status' });
 });
 
 // ─── GET /api/admin/extraction-report — Phase 8 ───────────────────────────────
