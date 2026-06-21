@@ -1,24 +1,34 @@
 /**
  * questionExtractor — AI-powered question extraction from exam chunks.
  *
- * Data flow (per the architecture plan):
- *   1. getDocMeta(docId)   → curriculumStorage [UNCHANGED]
- *   2. loadChunks(docId)   → curriculumStorage [UNCHANGED]
+ * Data flow:
+ *   1. getDocMeta(docId)   → curriculumStorage
+ *   2. loadChunks(docId)   → curriculumStorage
  *   3. upsertExamRecord(status:'extracting')
- *   4. batch chunks → Gemini API → JSON questions
- *   5. validate
- *   6. deduplicate
- *   7. saveQuestions(examId, [...])
- *   8. upsertExamRecord(status:'done')
+ *   4. Phase 7: Cache check per chunk → skip Gemini if already extracted
+ *   5. Phase 1+2: Standard Gemini pass → coverage check → aggressive retry if LOW
+ *   6. Phase 3: Failed-chunk recovery (3rd targeted pass, only suspicious chunks)
+ *   7. Phase 4: Normalize questions (fix OCR artifacts, merge split lines)
+ *   8. Phase 5: Enhanced dedup (exact + near-match Jaccard)
+ *   9. Phase 1: Whole-exam coverage analysis → LOW_EXTRACTION_COVERAGE flag
+ *  10. Phase 6: Extraction score (0-100) stored in ocrDiagnostics
+ *  11. saveQuestions + upsertExamRecord(status:'done')
  *
- * Architecture rule: this file never touches PostgreSQL directly.
- * All DB writes go through examStore.
+ * ARCHITECTURE RULE: never touches PostgreSQL directly — all DB writes via examStore.
  */
 import { v4 as uuidv4 } from 'uuid';
 import { getDocMeta, loadChunks } from './curriculumStorage';
 import { examStore, examIdFromDocId } from './examStore';
 import { logger } from './logger';
 import { detectQuestionPatterns, analyzeOcrText } from './ocrQualityAnalyzer';
+import {
+  analyzeChunkCoverage,
+  analyzeCoverage,
+  computeExtractionScore,
+  type ChunkDiagEntry,
+} from './coverageAnalyzer';
+import { normalizeAll, deduplicateEnhanced } from './questionNormalizer';
+import { getCachedExtraction, setCachedExtraction, getExtractionCacheStats } from './extractionCache';
 import type { InsertExamQuestion } from '@workspace/db';
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
@@ -102,14 +112,14 @@ async function callGemini(prompt: string, attempt = 0): Promise<string> {
   return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 }
 
-// ─── Prompt ───────────────────────────────────────────────────────────────────
+// ─── Prompts ──────────────────────────────────────────────────────────────────
 
 /** Compress long dot/underscore runs (fill-blank markers) to save tokens. */
 function compressFillerDots(text: string): string {
-  // Replace runs of 4+ dots with a short placeholder
   return text.replace(/\.{4,}/g, '....').replace(/_{4,}/g, '____');
 }
 
+/** Pass 1 — Standard extraction prompt. */
 function buildPrompt(chunkText: string, examTitle: string): string {
   const compressed = compressFillerDots(chunkText);
   return `أنت نظام استخراج أسئلة امتحانات للمحتوى التعليمي العربي.
@@ -141,10 +151,7 @@ function buildPrompt(chunkText: string, examTitle: string): string {
 ${compressed}`;
 }
 
-// ─── Retry prompt (aggressive) ────────────────────────────────────────────────
-// Used when first-pass extraction returns [] for a chunk that contains Arabic
-// words — OCR artifacts (dots mixed into text, broken spacing) may have confused
-// the main prompt. This prompt is more tolerant of imperfect OCR formatting.
+/** Pass 2 — Aggressive extraction for OCR-heavy text (retry on LOW_EXTRACTION_COVERAGE). */
 function buildRetryPrompt(chunkText: string, examTitle: string): string {
   const compressed = compressFillerDots(chunkText);
   return `أنت نظام متخصص في استخراج الأسئلة الامتحانية من نصوص OCR العربية.
@@ -154,7 +161,7 @@ function buildRetryPrompt(chunkText: string, examTitle: string): string {
 
 ابحث عن أي من الأنماط التالية وعدّها أسئلة:
 - أرقام عربية أو هندية + نص (١- ... أو 1. ...)
-- كلمات تدل على سؤال: ما، اشرح، اذكر، عرّف، قارن، أكمل، ضع، اختر، بيّن، وضّح، احسب
+- كلمات تدل على سؤال: ما، اشرح، اذكر، عرّف، قارن، أكمل، ضع، اختر، بيّن، وضّح، احسب، علّل، فسّر، ما المقصود، ناقش، برهن، أثبت، استنتج
 - جمل استفهامية تنتهي بـ ؟
 - اختيار من متعدد: أ/ ب/ ج/ د/ أو (أ) (ب) أو A B C D
 - جداول مقارنة تطلب ملء خانات
@@ -179,9 +186,32 @@ function buildRetryPrompt(chunkText: string, examTitle: string): string {
 ${compressed}`;
 }
 
+/**
+ * Pass 3 — Phase 3 targeted recovery prompt.
+ * Used only for chunks that produced 0 questions in both passes 1 and 2
+ * but contain credible question-pattern signals. Instructs Gemini to treat
+ * every numbered or indented item as a potential question.
+ */
+function buildRecoveryPrompt(chunkText: string, examTitle: string): string {
+  const compressed = compressFillerDots(chunkText);
+  return `أنت خبير في استخراج الأسئلة من نصوص ممسوحة ضوئياً بجودة منخفضة.
+
+هذا النص استعصى على المعالجة المعتادة. المطلوب:
+1. تعامل مع كل جملة تحتوي على فعل أمر، أو رقم في بداية السطر، أو علامة استفهام كسؤال مستقل.
+2. لا تستبعد أي عنصر مهما بدا ناقصاً — أعد ما تجده.
+3. أعد المصفوفة حتى لو كانت الأسئلة غير مكتملة.
+
+مصفوفة JSON فقط بنفس الصيغة السابقة.
+إذا لم يكن هناك شيء مطلقاً، أجب بـ: []
+
+عنوان: ${examTitle}
+النص:
+${compressed}`;
+}
+
 // ─── Response parser ──────────────────────────────────────────────────────────
 
-interface ParsedQuestion {
+export interface ParsedQuestion {
   question:      string;
   questionType:  string;
   options:       string[] | null;
@@ -214,24 +244,23 @@ function parseResponse(raw: string): ParsedQuestion[] {
   }
 }
 
-// ─── Deduplication ────────────────────────────────────────────────────────────
+// ─── Extended chunk diagnostics ───────────────────────────────────────────────
 
-function deduplicateQuestions(questions: ParsedQuestion[]): ParsedQuestion[] {
-  const seen = new Set<string>();
-  return questions.filter((q) => {
-    // Normalize: lowercase + strip whitespace for comparison
-    const key = q.question.replace(/\s+/g, ' ').trim().toLowerCase();
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+interface ChunkDiag extends ChunkDiagEntry {
+  chars: number;
+  retried: boolean;
+  cached?: boolean;
+  recovered?: boolean;
+  coverageFlag?: string;
+  pass?: number;          // highest pass that produced results (1/2/3)
 }
 
 // ─── Trigger (fire-and-forget, called from curriculumQueue) ──────────────────
 
 /**
  * Trigger question extraction for a finished exam document.
- * Designed to be called fire-and-forget: errors are logged, never thrown.
+ * Designed to be called fire-and-forget — errors are logged, never thrown.
+ * DailyQuotaExhaustedError is re-thrown so callers can stop the batch.
  */
 export async function triggerQuestionExtraction(docId: string): Promise<void> {
   const examId = examIdFromDocId(docId);
@@ -243,11 +272,8 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
       return;
     }
 
-    if (doc.docType !== 'exam') {
-      return;
-    }
+    if (doc.docType !== 'exam') return;
 
-    // Skip if already extracted
     const already = await examStore.hasQuestions(examId);
     if (already) {
       logger.info({ docId, examId }, 'triggerQuestionExtraction: already extracted, skipping');
@@ -264,7 +290,6 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
     const visibility = doc.visibility ?? 'private';
     const ownerId   = (visibility === 'public') ? null : (doc.ownerId ?? null);
 
-    // ── 3. upsertExamRecord(status:'extracting') ─────────────────────────────
     await examStore.upsertExamRecord({
       examId,
       curriculumDocId:  docId,
@@ -290,140 +315,249 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
       'triggerQuestionExtraction: starting extraction'
     );
 
-    // ── 4. Batch chunks → Gemini → JSON ─────────────────────────────────────
+    // ── Main per-chunk extraction loop ────────────────────────────────────────
     const allParsed: ParsedQuestion[] = [];
-
-    // Diagnostic tracking — written to exam_records at the end of extraction.
     let totalExtractionAttempts = 0;
-    const chunkDiagnostics: Array<{
-      chunkIndex: number;
-      chars: number;
-      arabicWords: number;
-      questionPatterns: number;
-      extracted: number;
-      retried: boolean;
-    }> = [];
+    const chunkDiags: ChunkDiag[] = [];
 
     for (const chunk of chunks) {
       if (chunk.content.trim().length < 80) continue;
 
-      // Skip chunks whose content is essentially all fill-in-blank dots with no
-      // question text (e.g. scanned exam answer sheets). Strip sequences of 2+
-      // dots and whitespace — if fewer than 30 meaningful chars remain, the chunk
-      // has no extractable questions and sending it to Gemini wastes a call.
       const meaningful = chunk.content.replace(/\.{2,}/g, '').replace(/\s+/g, '').trim();
       if (meaningful.length < 30) {
         logger.info(
           { docId, chunkIndex: chunk.chunkIndex, meaningfulChars: meaningful.length },
-          'triggerQuestionExtraction: skipping dot-only chunk (no question content)'
+          'triggerQuestionExtraction: skipping dot-only chunk'
         );
         continue;
       }
 
-      // ── Question pattern detection (diagnostic, non-destructive) ────────────
-      // Runs before Gemini to log structural signals in the chunk.
-      // Helps diagnose why a chunk may return 0 questions after extraction.
       const patternCheck      = detectQuestionPatterns(chunk.content);
       const arabicWordsInChunk = (chunk.content.match(/[\u0600-\u06FF\u0750-\u077F]{2,}/g) || []).length;
       totalExtractionAttempts++;
 
+      // ── Phase 7: Cache check ────────────────────────────────────────────────
+      const cached = getCachedExtraction<ParsedQuestion>(chunk.content);
+      if (cached !== null) {
+        allParsed.push(...cached);
+        chunkDiags.push({
+          chunkIndex:       chunk.chunkIndex,
+          chars:            chunk.content.length,
+          arabicWords:      arabicWordsInChunk,
+          questionPatterns: patternCheck.count,
+          extracted:        cached.length,
+          retried:          false,
+          cached:           true,
+          coverageFlag:     'OK',
+          pass:             0,
+        });
+        logger.debug(
+          { docId, chunkIndex: chunk.chunkIndex, cached: cached.length },
+          'triggerQuestionExtraction: cache hit'
+        );
+        continue;
+      }
+
       logger.debug(
         {
           docId,
-          chunkIndex:      chunk.chunkIndex,
-          chars:           chunk.content.length,
-          arabicWords:     arabicWordsInChunk,
+          chunkIndex:       chunk.chunkIndex,
+          chars:            chunk.content.length,
+          arabicWords:      arabicWordsInChunk,
           questionPatterns: patternCheck.count,
-          hasNumbered:     patternCheck.hasNumberedItems,
-          hasQWords:       patternCheck.hasQuestionWords,
-          hasMcq:          patternCheck.hasMcqOptions,
+          hasNumbered:      patternCheck.hasNumberedItems,
+          hasQWords:        patternCheck.hasQuestionWords,
+          hasMcq:           patternCheck.hasMcqOptions,
         },
         'triggerQuestionExtraction: pattern pre-check'
       );
 
       try {
+        // ── Pass 1: Standard extraction ───────────────────────────────────────
         const raw    = await callGemini(buildPrompt(chunk.content, examTitle));
         let parsed   = parseResponse(raw);
         let retried  = false;
+        let pass     = 1;
 
-        // ── Phase 3 hardening: retry if first pass returned [] but chunk has
-        // Arabic content. OCR artifacts (dots mixed into text, broken spacing)
-        // can confuse the main prompt even when questions are present.
-        // Also force retry when question patterns were detected (structural signal).
-        if (parsed.length === 0) {
-          const shouldRetry = arabicWordsInChunk >= 10 || patternCheck.count >= 2;
-          if (shouldRetry) {
-            logger.info(
-              { docId, chunkIndex: chunk.chunkIndex, arabicWords: arabicWordsInChunk, patterns: patternCheck.count },
-              'triggerQuestionExtraction: first pass returned [], retrying with aggressive prompt'
-            );
-            retried = true;
-            try {
-              const rawRetry    = await callGemini(buildRetryPrompt(chunk.content, examTitle));
-              const parsedRetry = parseResponse(rawRetry);
-              if (parsedRetry.length > 0) {
-                parsed = parsedRetry;
-                logger.info(
-                  { docId, chunkIndex: chunk.chunkIndex, extracted: parsedRetry.length },
-                  'triggerQuestionExtraction: retry extraction succeeded'
-                );
-              }
-            } catch (retryErr) {
-              logger.warn(
-                { docId, chunkIndex: chunk.chunkIndex, err: String(retryErr) },
-                'triggerQuestionExtraction: retry failed'
+        // ── Phase 1+2: Coverage check → trigger Pass 2 ───────────────────────
+        const chunkCov = analyzeChunkCoverage(arabicWordsInChunk, patternCheck.count, parsed.length);
+        const needsPass2 =
+          chunkCov.flag === 'LOW_EXTRACTION_COVERAGE' &&
+          (arabicWordsInChunk >= 10 || patternCheck.count >= 1);
+
+        if (needsPass2) {
+          logger.info(
+            {
+              docId, chunkIndex: chunk.chunkIndex,
+              arabicWords: arabicWordsInChunk, patterns: patternCheck.count,
+              pass1Count: parsed.length, coverageFlag: chunkCov.flag,
+            },
+            'triggerQuestionExtraction: Pass 2 — aggressive extraction (LOW_EXTRACTION_COVERAGE)'
+          );
+          retried = true;
+          try {
+            const rawRetry    = await callGemini(buildRetryPrompt(chunk.content, examTitle));
+            const parsedRetry = parseResponse(rawRetry);
+            if (parsedRetry.length > parsed.length) {
+              parsed = parsedRetry;
+              pass   = 2;
+              logger.info(
+                { docId, chunkIndex: chunk.chunkIndex, extracted: parsedRetry.length },
+                'triggerQuestionExtraction: Pass 2 succeeded'
               );
             }
+          } catch (retryErr) {
+            if (retryErr instanceof DailyQuotaExhaustedError) throw retryErr;
+            logger.warn(
+              { docId, chunkIndex: chunk.chunkIndex, err: String(retryErr) },
+              'triggerQuestionExtraction: Pass 2 failed'
+            );
           }
         }
 
-        allParsed.push(...parsed);
+        // ── Phase 7: Cache successful result ──────────────────────────────────
+        if (parsed.length > 0) {
+          setCachedExtraction(chunk.content, parsed);
+        }
 
-        chunkDiagnostics.push({
+        allParsed.push(...parsed);
+        chunkDiags.push({
           chunkIndex:       chunk.chunkIndex,
           chars:            chunk.content.length,
           arabicWords:      arabicWordsInChunk,
           questionPatterns: patternCheck.count,
           extracted:        parsed.length,
           retried,
+          cached:           false,
+          coverageFlag:     chunkCov.flag,
+          pass,
         });
 
         logger.debug(
-          { docId, chunkIndex: chunk.chunkIndex, extracted: parsed.length, retried },
+          { docId, chunkIndex: chunk.chunkIndex, extracted: parsed.length, pass, retried },
           'triggerQuestionExtraction: chunk done'
         );
+
       } catch (err) {
-        // Daily quota exhausted — propagate immediately, stop all extraction
         if (err instanceof DailyQuotaExhaustedError) throw err;
         logger.warn(
           { docId, chunkIndex: chunk.chunkIndex, err: String(err) },
           'triggerQuestionExtraction: chunk skipped — Gemini error'
         );
+        chunkDiags.push({
+          chunkIndex: chunk.chunkIndex, chars: chunk.content.length,
+          arabicWords: arabicWordsInChunk, questionPatterns: patternCheck.count,
+          extracted: 0, retried: false, cached: false, coverageFlag: 'GEMINI_ERROR',
+        });
       }
     }
 
-    // ── 5-6. Validate + deduplicate ──────────────────────────────────────────
-    const deduped = deduplicateQuestions(allParsed);
+    // ── Phase 3: Failed Chunk Recovery ───────────────────────────────────────
+    // Re-run ONLY chunks with 0 questions + credible question signals.
+    // This is a third targeted pass — never reprocesses the whole document.
+    const failedSuspicious = chunks.filter(ch => {
+      const diag = chunkDiags.find(d => d.chunkIndex === ch.chunkIndex);
+      return (
+        diag &&
+        diag.extracted === 0 &&
+        diag.questionPatterns >= 1 &&
+        !diag.cached &&
+        diag.coverageFlag !== 'GEMINI_ERROR'
+      );
+    });
 
-    // ── Aggregate diagnostics ─────────────────────────────────────────────────
-    // Compute OCR quality score from the combined chunk text (post-OCR output).
+    if (failedSuspicious.length > 0) {
+      logger.info(
+        { docId, failedChunks: failedSuspicious.length },
+        'triggerQuestionExtraction: Phase 3 — targeted failed-chunk recovery'
+      );
+
+      for (const ch of failedSuspicious) {
+        try {
+          const rawRecovery    = await callGemini(buildRecoveryPrompt(ch.content, examTitle));
+          const parsedRecovery = parseResponse(rawRecovery);
+
+          if (parsedRecovery.length > 0) {
+            allParsed.push(...parsedRecovery);
+            setCachedExtraction(ch.content, parsedRecovery);
+
+            const diag = chunkDiags.find(d => d.chunkIndex === ch.chunkIndex);
+            if (diag) {
+              diag.extracted  = parsedRecovery.length;
+              diag.recovered  = true;
+              diag.pass       = 3;
+            }
+
+            logger.info(
+              { docId, chunkIndex: ch.chunkIndex, recovered: parsedRecovery.length },
+              'triggerQuestionExtraction: Phase 3 — chunk recovered'
+            );
+          }
+        } catch (err) {
+          if (err instanceof DailyQuotaExhaustedError) throw err;
+          logger.warn(
+            { docId, chunkIndex: ch.chunkIndex, err: String(err) },
+            'triggerQuestionExtraction: Phase 3 — recovery failed'
+          );
+        }
+      }
+    }
+
+    // ── Phase 4: Normalize questions (fix OCR artifacts) ─────────────────────
+    const normalized = normalizeAll(allParsed);
+
+    // ── Phase 5: Enhanced deduplication (exact + near-match Jaccard) ─────────
+    const { deduped, exactRemoved, nearRemoved } = deduplicateEnhanced(normalized);
+
+    if (exactRemoved > 0 || nearRemoved > 0) {
+      logger.info(
+        { docId, exactRemoved, nearRemoved, before: allParsed.length, after: deduped.length },
+        'triggerQuestionExtraction: deduplication complete'
+      );
+    }
+
+    // ── Phase 1: Whole-exam coverage analysis ─────────────────────────────────
+    const coverageReport = analyzeCoverage(chunkDiags, deduped.length);
+    if (coverageReport.flag === 'LOW_EXTRACTION_COVERAGE') {
+      logger.warn(
+        { docId, examId, coverage: coverageReport },
+        'triggerQuestionExtraction: LOW_EXTRACTION_COVERAGE — check suspicious chunks'
+      );
+    }
+
+    // ── OCR quality + failure reason ──────────────────────────────────────────
     const allChunkText   = chunks.map((c) => c.content).join('\n');
     const ocrQual        = analyzeOcrText(allChunkText);
     const ocrQualityScore = Math.round(ocrQual.score);
 
-    // Build a human-readable failure reason when 0 questions are extracted.
     const failureReason = deduped.length === 0
-      ? `Extracted 0 questions from ${chunks.length} chunk(s). ` +
-        `OCR quality score: ${ocrQualityScore}/100. ` +
-        `Arabic words: ${ocrQual.arabicWordCount}. ` +
-        `Pattern signals: ${chunkDiagnostics.reduce((s, c) => s + c.questionPatterns, 0)} across ${totalExtractionAttempts} chunk(s) attempted.`
+      ? `Extracted 0 questions. Coverage: ${coverageReport.diagnosis} ` +
+        `OCR score: ${ocrQualityScore}/100.`
       : null;
 
     if (failureReason) {
       logger.warn({ docId, examId, failureReason, ocrQualityScore }, 'triggerQuestionExtraction: zero questions extracted');
     }
 
-    // ── 7. saveQuestions ──────────────────────────────────────────────────────
+    // ── Phase 6: Extraction score (0-100) ────────────────────────────────────
+    const cacheStats = getExtractionCacheStats();
+    const extractionScoreResult = computeExtractionScore({
+      ocrQualityScore,
+      coverageRatio:   coverageReport.coverageRatio,
+      successfulChunks: chunkDiags.filter(c => c.extracted > 0).length,
+      totalChunks:     chunkDiags.length,
+      exactRemoved,
+      nearRemoved,
+      totalExtracted:  allParsed.length,
+      recoveredChunks: chunkDiags.filter(c => c.recovered).length,
+    });
+
+    logger.info(
+      { docId, examId, score: extractionScoreResult.total, grade: extractionScoreResult.grade },
+      'triggerQuestionExtraction: extraction score'
+    );
+
+    // ── Save questions ────────────────────────────────────────────────────────
     const toInsert: InsertExamQuestion[] = deduped.map((q, idx) => ({
       id:               uuidv4(),
       examId,
@@ -448,46 +582,62 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
 
     await examStore.saveQuestions(toInsert);
 
-    // ── 8. upsertExamRecord(status:'done') ────────────────────────────────────
     await examStore.upsertExamRecord({
       examId,
-      curriculumDocId:   docId,
-      title:             examTitle,
-      bookTitle:         doc.bookTitle ?? null,
-      subject:           doc.subject,
-      grade:             doc.grade,
-      country:           doc.country,
-      track:             doc.track ?? '',
-      year:              null,
-      examType:          'final',
-      organization:      null,
+      curriculumDocId:    docId,
+      title:              examTitle,
+      bookTitle:          doc.bookTitle ?? null,
+      subject:            doc.subject,
+      grade:              doc.grade,
+      country:            doc.country,
+      track:              doc.track ?? '',
+      year:               null,
+      examType:           'final',
+      organization:       null,
       ownerId,
       visibility,
-      questionCount:     toInsert.length,
-      extractionStatus:  'done',
-      extractionError:   null,
-      extractedAt:       new Date(),
-      // Diagnostic fields (nullable — written once per extraction run)
+      questionCount:      toInsert.length,
+      extractionStatus:   'done',
+      extractionError:    null,
+      extractedAt:        new Date(),
       ocrQualityScore,
       extractionAttempts: totalExtractionAttempts,
       failureReason,
       ocrDiagnostics: {
-        ocrScore:      { score: ocrQualityScore, arabicWords: ocrQual.arabicWordCount, uniqueWordRatio: ocrQual.uniqueWordRatio },
-        chunkCount:    chunks.length,
+        // Phase 1: OCR + coverage
+        ocrScore: {
+          score:           ocrQualityScore,
+          arabicWords:     ocrQual.arabicWordCount,
+          uniqueWordRatio: ocrQual.uniqueWordRatio,
+        },
+        coverage: coverageReport,
+        // Phase 6: Extraction score
+        extractionScore: extractionScoreResult,
+        // Phase 4+5: Normalization + dedup stats
+        normalization: {
+          rawExtracted:  allParsed.length,
+          afterNorm:     normalized.length,
+          exactRemoved,
+          nearRemoved,
+          finalCount:    deduped.length,
+        },
+        // Phase 7: Cache stats
+        cache: cacheStats,
+        // Chunk-level detail
+        chunkCount:      chunks.length,
         chunksAttempted: totalExtractionAttempts,
-        chunks:        chunkDiagnostics,
+        chunks:          chunkDiags,
       },
     });
 
     logger.info(
-      { docId, examId, totalQuestions: toInsert.length },
+      { docId, examId, totalQuestions: toInsert.length, score: extractionScoreResult.total },
       'triggerQuestionExtraction: done'
     );
 
   } catch (err) {
-    // Daily quota: re-throw so autoRecoverPendingExams can stop processing
+    // Daily quota: re-throw so batch callers can stop
     if (err instanceof DailyQuotaExhaustedError) {
-      // Mark this exam as pending (not error) so it retries tomorrow
       try {
         const existing = await examStore.getExamRecord(examId);
         if (existing && existing.extractionStatus !== 'done') {
@@ -504,7 +654,6 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error({ docId, examId, err: msg }, 'triggerQuestionExtraction: failed');
 
-    // Mark as error (best-effort)
     try {
       const doc = getDocMeta(docId);
       const existing = await examStore.getExamRecord(examId);

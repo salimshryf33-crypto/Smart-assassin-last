@@ -11,6 +11,7 @@ import { Router } from 'express';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { setAdminClaim, getUserClaims } from '../lib/firebaseAdmin';
 import { triggerQuestionExtraction } from '../lib/questionExtractor';
+import { getExtractionCacheStats, clearExtractionCache } from '../lib/extractionCache';
 import { examStore } from '../lib/examStore';
 import { logger } from '../lib/logger';
 
@@ -118,5 +119,82 @@ router.get('/exam-status', requireAuth, requireAdmin, async (req, res) => {
     res.status(500).json({ error: String(err) });
   }
 });
+
+// ─── GET /api/admin/extraction-report — Phase 8 ───────────────────────────────
+// Full end-to-end extraction quality report for all exams.
+// Shows: OCR score, coverage, extraction score, dedup stats, cache, failed chunks.
+router.get('/extraction-report', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const records = await examStore.listExamRecords({ userId: req.user!.uid, isAdmin: true });
+    const cache   = getExtractionCacheStats();
+
+    const report = {
+      generatedAt:   new Date().toISOString(),
+      summary: {
+        totalExams:        records.length,
+        done:              records.filter(r => r.extractionStatus === 'done').length,
+        pending:           records.filter(r => r.extractionStatus === 'pending').length,
+        extracting:        records.filter(r => r.extractionStatus === 'extracting').length,
+        error:             records.filter(r => r.extractionStatus === 'error').length,
+        totalQuestions:    records.reduce((s, r) => s + (r.questionCount ?? 0), 0),
+        avgOcrScore:       avg(records.map(r => r.ocrQualityScore ?? 0).filter(Boolean)),
+        avgExtractionScore: avg(
+          records
+            .map(r => (r.ocrDiagnostics as Record<string, unknown> | null)?.extractionScore as { total?: number } | undefined)
+            .filter(Boolean)
+            .map(s => s!.total ?? 0)
+        ),
+      },
+      cache,
+      exams: records.map(r => {
+        const diag = r.ocrDiagnostics as Record<string, unknown> | null;
+        const score = diag?.extractionScore as { total?: number; grade?: string } | undefined;
+        const norm  = diag?.normalization as Record<string, number> | undefined;
+        const cov   = diag?.coverage as Record<string, unknown> | undefined;
+        const chunks = (diag?.chunks as Array<Record<string, unknown>> | undefined) ?? [];
+        return {
+          examId:          r.examId,
+          title:           r.title,
+          status:          r.extractionStatus,
+          questionCount:   r.questionCount,
+          ocrScore:        r.ocrQualityScore,
+          extractionScore: score?.total ?? null,
+          grade:           score?.grade ?? null,
+          coverageFlag:    cov?.flag ?? null,
+          coverageRatio:   cov?.coverageRatio ?? null,
+          dedup: {
+            exactRemoved: norm?.exactRemoved ?? 0,
+            nearRemoved:  norm?.nearRemoved ?? 0,
+          },
+          chunks: {
+            total:     chunks.length,
+            succeeded: chunks.filter((c) => (c.extracted as number) > 0).length,
+            recovered: chunks.filter((c) => c.recovered).length,
+            failed:    chunks.filter((c) => (c.extracted as number) === 0).length,
+            cached:    chunks.filter((c) => c.cached).length,
+          },
+          failureReason: r.failureReason ?? null,
+        };
+      }),
+    };
+
+    res.json(report);
+  } catch (err) {
+    logger.error({ err }, 'extraction-report: error');
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ─── POST /api/admin/cache/clear ──────────────────────────────────────────────
+router.post('/cache/clear', requireAuth, requireAdmin, (_req, res) => {
+  clearExtractionCache();
+  res.json({ ok: true, message: 'Extraction cache cleared' });
+});
+
+/** Compute average of a number array, returns 0 for empty. */
+function avg(nums: number[]): number {
+  if (nums.length === 0) return 0;
+  return Math.round(nums.reduce((s, n) => s + n, 0) / nums.length);
+}
 
 export default router;

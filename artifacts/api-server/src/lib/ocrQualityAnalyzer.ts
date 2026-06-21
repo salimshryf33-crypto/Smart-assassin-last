@@ -48,7 +48,8 @@ const MIN_ARABIC_WORDS_FOR_GOOD = 5;  // below this always low confidence
 
 const ARABIC_WORD_RE      = /[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]{2,}/g;
 const NUMBERED_ITEM_RE    = /[١٢٣٤٥٦٧٨٩\d][\s.)-]/;
-const QUESTION_WORD_RE    = /اشرح|عرّف|عرف|اذكر|قارن|وضّح|وضح|احسب|أكمل|اختر|بيّن|بين|ما\s+هو|ما\s+هي|السؤال/;
+// Phase 1 enhancement: added علل، فسّر/فسر، ما المقصود، عِلَّة، ناقش، برهن، أثبت
+const QUESTION_WORD_RE    = /اشرح|عرّف|عرف|اذكر|قارن|وضّح|وضح|احسب|أكمل|اختر|بيّن|بين|ما\s+هو|ما\s+هي|السؤال|علّل|علل|فسّر|فسر|ما\s+المقصود|ناقش|برهن|أثبت|استنتج|صنّف|صنف|حدد|قيّم|قيم|ارسم|احسب/;
 const QUESTION_MARK_RE    = /[؟?]/;
 const MCQ_OPTION_RE       = /[أابجدABCD][\s)/.-]/i;
 
