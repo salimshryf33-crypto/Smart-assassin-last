@@ -105,5 +105,28 @@
     "ownerId": "JlLBDDgQpkRtgJ3efZ8Lp7yhijr2",
     "visibility": "private",
     "bookTitle": "إمتحان الأحياء 2024"
+  },
+  {
+    "id": "27f26d45-7724-42c9-bd66-c4c766e02583",
+    "country": "sudan",
+    "grade": "grade12",
+    "subject": "chemistry",
+    "track": "",
+    "filename": "كيمياء ثالث ثانوي- السودان (١).pdf",
+    "totalPages": 409,
+    "chunkCount": 101,
+    "status": "done",
+    "uploadedAt": 1782124782130,
+    "processedAt": 1782124784630,
+    "docType": "book",
+    "extractionMethod": "text",
+    "extractedChars": 350384,
+    "avgCharsPerPage": 857,
+    "extractedPages": 397,
+    "pdfStoragePath": "/home/runner/workspace/artifacts/api-server/data/pdfs/27f26d45-7724-42c9-bd66-c4c766e02583.pdf",
+    "lastRenderedPage": 409,
+    "ownerId": null,
+    "visibility": "public",
+    "bookTitle": "كيمياء ثالث ثانوي- السودان (١)"
   }
 ]
