@@ -1,7 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { startResumeScheduler } from "./lib/resumeScheduler";
-import { migrateIndex, relabelChapters, generateMissingEmbeddings } from "./lib/curriculumStorage";
+import { migrateIndex, relabelChapters, generateMissingEmbeddings, readIndex } from "./lib/curriculumStorage";
 import { triggerQuestionExtraction, DailyQuotaExhaustedError } from "./lib/questionExtractor";
 import { examStore } from "./lib/examStore";
 import { runStartupMigrations } from "./lib/dbMigrations";
@@ -29,7 +29,7 @@ app.listen(port, (err) => {
 
   logger.info({ port }, "Server listening");
 
-  // Phase 1: Create security/stability DB tables if they don't exist yet
+  // Phase 1: Create all DB tables if they don't exist yet (idempotent)
   runStartupMigrations().catch((err) =>
     logger.error({ err }, 'runStartupMigrations: unexpected error')
   );
@@ -37,49 +37,91 @@ app.listen(port, (err) => {
   // Run safe startup migration (adds visibility/bookTitle defaults to legacy docs)
   migrateIndex();
 
-  // Re-apply improved chapter detection to existing chunks (Phase 2 fix)
-  // No-op when all chunks already have meaningful labels.
+  // Re-apply improved chapter detection to existing chunks — no-op when done.
   relabelChapters();
 
   // Generate vector embeddings for chunks that don't have them yet.
-  // Runs fully async in the background — never blocks the server.
-  // Embeddings are stored in existing chunk JSON files, no DB writes.
   generateMissingEmbeddings().catch((err) =>
     logger.error({ err }, 'generateMissingEmbeddings: unexpected error')
   );
 
   startResumeScheduler();
 
-  // Feature 4: Start daily backup scheduler (runs at 02:00 UTC)
+  // Start daily backup scheduler (runs at 02:00 UTC)
   startBackupScheduler();
 
-  // Auto-recover pending/stuck exam records — runs once on startup.
-  // Safe: no-op if all exams are already 'done'.
-  autoRecoverPendingExams().catch((err) =>
-    logger.error({ err }, 'autoRecoverPendingExams: unexpected error')
+  // Permanent fix: sync exam docs from index.json → exam_records, then extract.
+  // Runs on every startup. Safe no-op if all records already exist and are done.
+  syncAndRecoverExams().catch((err) =>
+    logger.error({ err }, 'syncAndRecoverExams: unexpected error')
   );
 });
 
-// ─── Startup auto-recovery for pending exam records ───────────────────────────
-async function autoRecoverPendingExams(): Promise<void> {
-  // Small delay to let the server fully warm up first
+// ─── Sync index.json exam docs → exam_records, then extract pending ───────────
+//
+// This is the "forever fix":
+//   1. Read all docs with docType='exam' from index.json (disk — survives Git)
+//   2. For each one missing from exam_records, insert a 'pending' record
+//   3. Then run extraction on all pending/error/stuck records
+//
+// Result: migrating to any new Replit account / DB just requires a server start.
+async function syncAndRecoverExams(): Promise<void> {
+  // Small delay to let DB tables finish being created
   await new Promise(r => setTimeout(r, 5_000));
 
+  // ── Step 1: sync index.json → exam_records ────────────────────────────────
+  try {
+    const allDocs = readIndex();
+    const examDocs = allDocs.filter(d => d.docType === 'exam');
+
+    if (examDocs.length > 0) {
+      const existingRecords = await examStore.listExamRecords({ userId: '', isAdmin: true });
+      const existingIds = new Set(existingRecords.map(r => r.examId));
+
+      const missing = examDocs.filter(d => !existingIds.has(d.id));
+
+      if (missing.length > 0) {
+        logger.info({ count: missing.length }, 'syncAndRecoverExams: inserting missing exam records from index.json');
+        for (const doc of missing) {
+          await examStore.upsertExamRecord({
+            examId:           doc.id,
+            curriculumDocId:  doc.id,
+            title:            doc.filename ?? doc.id,
+            subject:          doc.subject,
+            grade:            doc.grade,
+            country:          doc.country,
+            track:            doc.track ?? null,
+            ownerId:          doc.ownerId ?? null,
+            visibility:       doc.visibility ?? 'private',
+            examType:         'final',
+            extractionStatus: 'pending',
+            questionCount:    0,
+          });
+          logger.info({ docId: doc.id, title: doc.filename }, 'syncAndRecoverExams: created pending record');
+        }
+      } else {
+        logger.info('syncAndRecoverExams: all exam docs already have records');
+      }
+    }
+  } catch (err) {
+    logger.error({ err }, 'syncAndRecoverExams: sync step failed');
+  }
+
+  // ── Step 2: extract pending/stuck records ─────────────────────────────────
   const all = await examStore.listExamRecords({ userId: '', isAdmin: true });
   const pending = all.filter(r =>
     r.extractionStatus === 'pending' ||
     r.extractionStatus === 'extracting' ||
     r.extractionStatus === 'error' ||
-    // 'done' with 0 questions means extraction was blocked (e.g. by daily quota)
     (r.extractionStatus === 'done' && r.questionCount === 0)
   );
 
   if (pending.length === 0) {
-    logger.info('autoRecoverPendingExams: no pending exams found');
+    logger.info('syncAndRecoverExams: no pending exams — all done');
     return;
   }
 
-  logger.info({ count: pending.length }, 'autoRecoverPendingExams: starting recovery');
+  logger.info({ count: pending.length }, 'syncAndRecoverExams: starting extraction');
 
   for (let i = 0; i < pending.length; i++) {
     const rec = pending[i]!;
@@ -87,21 +129,21 @@ async function autoRecoverPendingExams(): Promise<void> {
       // 45s cooldown between exams to avoid Gemini rate limits
       await new Promise(r => setTimeout(r, 45_000));
     }
-    logger.info({ examId: rec.examId, title: rec.title }, 'autoRecoverPendingExams: triggering extraction');
+    logger.info({ examId: rec.examId, title: rec.title }, 'syncAndRecoverExams: triggering extraction');
     try {
       await triggerQuestionExtraction(rec.curriculumDocId);
-      logger.info({ examId: rec.examId }, 'autoRecoverPendingExams: extraction complete');
+      logger.info({ examId: rec.examId }, 'syncAndRecoverExams: extraction complete');
     } catch (err) {
       if (err instanceof DailyQuotaExhaustedError) {
         logger.error(
           { examId: rec.examId, remaining: pending.length - i - 1 },
-          'autoRecoverPendingExams: daily Gemini quota exhausted — stopping. Remaining exams will retry on next restart'
+          'syncAndRecoverExams: daily Gemini quota exhausted — will retry on next restart'
         );
-        return; // Stop processing — quota resets at UTC midnight
+        return;
       }
-      logger.error({ err, examId: rec.examId }, 'autoRecoverPendingExams: extraction failed');
+      logger.error({ err, examId: rec.examId }, 'syncAndRecoverExams: extraction failed');
     }
   }
 
-  logger.info({ count: pending.length }, 'autoRecoverPendingExams: all done');
+  logger.info({ count: pending.length }, 'syncAndRecoverExams: all extractions complete');
 }
