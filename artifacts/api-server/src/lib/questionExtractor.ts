@@ -41,8 +41,11 @@ interface GeminiResponse {
   }>;
 }
 
-/** Backoff delays (ms) for 429 rate-limit retries (per-minute only). */
+/** Backoff delays (ms) for 429 per-minute rate-limit retries. */
 const RATE_LIMIT_DELAYS = [15_000, 30_000, 60_000];
+
+/** Backoff delays (ms) for 503 UNAVAILABLE retries (shorter — usually transient). */
+const UNAVAILABLE_DELAYS = [5_000, 15_000, 30_000];
 
 /**
  * Thrown when the Gemini daily free-tier quota is exhausted.
@@ -61,7 +64,7 @@ function isDailyQuota(body: unknown): boolean {
   return str.includes('PerDay') || str.includes('per_day') || str.includes('RESOURCE_EXHAUSTED');
 }
 
-async function callGemini(prompt: string, attempt = 0): Promise<string> {
+async function callGemini(prompt: string, attempt = 0, unavailableAttempt = 0): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
 
@@ -97,10 +100,27 @@ async function callGemini(prompt: string, attempt = 0): Promise<string> {
         'callGemini: rate-limited (429) — retrying after backoff'
       );
       await new Promise((r) => setTimeout(r, delay));
-      return callGemini(prompt, attempt + 1);
+      return callGemini(prompt, attempt + 1, unavailableAttempt);
     }
 
     throw new Error(`Gemini error 429 (max retries exceeded): ${JSON.stringify(data)}`);
+  }
+
+  // 503 UNAVAILABLE — transient "high demand" error, retry with short backoff
+  if (res.status === 503) {
+    const data = await res.json().catch(() => ({}));
+
+    if (unavailableAttempt < UNAVAILABLE_DELAYS.length) {
+      const delay = UNAVAILABLE_DELAYS[unavailableAttempt];
+      logger.warn(
+        { unavailableAttempt, delayMs: delay },
+        'callGemini: Gemini 503 UNAVAILABLE — retrying after backoff'
+      );
+      await new Promise((r) => setTimeout(r, delay));
+      return callGemini(prompt, attempt, unavailableAttempt + 1);
+    }
+
+    throw new Error(`Gemini error 503 (max retries exceeded): ${JSON.stringify(data)}`);
   }
 
   if (!res.ok) {
@@ -455,14 +475,15 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
     // ── Phase 3: Failed Chunk Recovery ───────────────────────────────────────
     // Re-run ONLY chunks with 0 questions + credible question signals.
     // This is a third targeted pass — never reprocesses the whole document.
+    // NOTE: GEMINI_ERROR chunks are INCLUDED — a transient 503 on pass 1/2 should
+    // not permanently discard a chunk that has strong question-pattern signals.
     const failedSuspicious = chunks.filter(ch => {
       const diag = chunkDiags.find(d => d.chunkIndex === ch.chunkIndex);
       return (
         diag &&
         diag.extracted === 0 &&
         diag.questionPatterns >= 1 &&
-        !diag.cached &&
-        diag.coverageFlag !== 'GEMINI_ERROR'
+        !diag.cached
       );
     });
 
