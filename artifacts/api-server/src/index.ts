@@ -6,6 +6,7 @@ import { triggerQuestionExtraction, DailyQuotaExhaustedError } from "./lib/quest
 import { examStore } from "./lib/examStore";
 import { runStartupMigrations } from "./lib/dbMigrations";
 import { startBackupScheduler } from "./lib/backupScheduler";
+import { hasQuestionsSnapshot, loadQuestionsFromFile } from "./lib/questionStorage";
 
 const rawPort = process.env["PORT"];
 
@@ -123,13 +124,51 @@ async function syncAndRecoverExams(): Promise<void> {
 
   logger.info({ count: pending.length }, 'syncAndRecoverExams: starting extraction');
 
+  // Track whether any exam still needs Gemini (for cooldown logic)
+  let geminiCallIndex = 0;
+
   for (let i = 0; i < pending.length; i++) {
     const rec = pending[i]!;
-    if (i > 0) {
-      // 45s cooldown between exams to avoid Gemini rate limits
+
+    // ── JSON snapshot restore: instant, no Gemini, no quota ──────────────────
+    if (hasQuestionsSnapshot(rec.examId)) {
+      logger.info(
+        { examId: rec.examId, title: rec.title },
+        'syncAndRecoverExams: JSON snapshot found — restoring from disk (no Gemini)'
+      );
+      try {
+        const questions = loadQuestionsFromFile(rec.examId);
+        if (questions && questions.length > 0) {
+          await examStore.saveQuestions(questions);
+          await examStore.upsertExamRecord({
+            ...rec,
+            extractionStatus: 'done',
+            questionCount:    questions.length,
+            extractionError:  null,
+            extractedAt:      new Date(),
+          });
+          logger.info(
+            { examId: rec.examId, count: questions.length },
+            'syncAndRecoverExams: restored from JSON snapshot successfully'
+          );
+          continue;   // skip Gemini for this exam
+        }
+      } catch (restoreErr) {
+        logger.warn(
+          { examId: rec.examId, err: String(restoreErr) },
+          'syncAndRecoverExams: JSON restore failed — falling through to Gemini extraction'
+        );
+      }
+    }
+
+    // ── Gemini extraction (only when no JSON snapshot exists) ─────────────────
+    if (geminiCallIndex > 0) {
+      // 45s cooldown between Gemini calls to avoid rate limits
       await new Promise(r => setTimeout(r, 45_000));
     }
-    logger.info({ examId: rec.examId, title: rec.title }, 'syncAndRecoverExams: triggering extraction');
+    geminiCallIndex++;
+
+    logger.info({ examId: rec.examId, title: rec.title }, 'syncAndRecoverExams: triggering Gemini extraction');
     try {
       await triggerQuestionExtraction(rec.curriculumDocId);
       logger.info({ examId: rec.examId }, 'syncAndRecoverExams: extraction complete');

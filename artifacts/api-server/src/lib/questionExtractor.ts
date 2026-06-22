@@ -29,6 +29,7 @@ import {
 } from './coverageAnalyzer';
 import { normalizeAll, deduplicateEnhanced } from './questionNormalizer';
 import { getCachedExtraction, setCachedExtraction, getExtractionCacheStats } from './extractionCache';
+import { saveQuestionsToFile } from './questionStorage';
 import type { InsertExamQuestion } from '@workspace/db';
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
@@ -602,6 +603,9 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
     }));
 
     await examStore.saveQuestions(toInsert);
+
+    // ── Persist to JSON snapshot (survives DB resets) ─────────────────────────
+    saveQuestionsToFile(examId, toInsert);
 
     await examStore.upsertExamRecord({
       examId,
