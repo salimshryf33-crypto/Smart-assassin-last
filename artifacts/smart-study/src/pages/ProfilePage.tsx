@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { User, Flame, BookOpen, Timer, Edit3, Check, Target, GraduationCap, X, Settings, LogOut, Zap, Globe, MapPin } from 'lucide-react';
+import { User, Flame, BookOpen, Timer, Edit3, Check, Target, GraduationCap, X, Settings, LogOut, Zap, Globe, MapPin, ShieldCheck } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import { useAuth } from '../contexts/AuthContext';
 import { saveUserProfile } from '../lib/firestore';
+import { getMe } from '../utils/curriculumApi';
 import { getDateForCountry, getLast28Days } from '../lib/streakEngine';
 import PageWrapper from '../components/layout/PageWrapper';
 import GlassCard from '../components/ui/GlassCard';
@@ -65,7 +66,12 @@ export default function ProfilePage() {
   const gamification = useAppStore((s) => s.gamification);
   const studentProfile = useAppStore((s) => s.studentProfile);
   const { user, logout } = useAuth();
+  const [isAdmin, setIsAdmin] = useState(false);
   const [editing, setEditing] = useState(false);
+
+  useEffect(() => {
+    getMe().then((me) => setIsAdmin(me?.isAdmin ?? false));
+  }, []);
   const [editName, setEditName] = useState(userProfile.name);
   const [editGoal, setEditGoal] = useState(userProfile.studyGoal ?? '');
   const [editCurriculum, setEditCurriculum] = useState(userProfile.curriculum ?? '');
@@ -116,6 +122,17 @@ export default function ProfilePage() {
             <h1 className="text-2xl font-bold text-white">Profile</h1>
           </div>
           <div className="flex gap-2">
+            {isAdmin && (
+              <motion.button
+                whileTap={{ scale: 0.9 }}
+                onClick={() => setPage('admin-dashboard')}
+                className="flex h-9 w-9 items-center justify-center rounded-xl"
+                style={{ background: 'rgba(0,198,255,0.08)', border: '1px solid rgba(0,198,255,0.22)' }}
+                title="لوحة الإدارة"
+              >
+                <ShieldCheck size={16} className="text-[#00c6ff]" />
+              </motion.button>
+            )}
             <motion.button
               whileTap={{ scale: 0.9 }}
               onClick={() => setPage('settings')}

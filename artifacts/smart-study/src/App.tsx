@@ -18,9 +18,10 @@ import ExamsPage from './pages/ExamsPage';
 import ExamSolverPage from './pages/ExamSolverPage';
 import ExamResultsPage from './pages/ExamResultsPage';
 import ExamGeneratorPage from './pages/ExamGeneratorPage';
+import AdminDashboard from './pages/AdminDashboard';
 import { Brain, MailWarning, X } from 'lucide-react';
 
-const NO_NAV_PAGES = new Set(['splash', 'profile-setup', 'login', 'curriculum-manager', 'exam-solver', 'exam-generator']);
+const NO_NAV_PAGES = new Set(['splash', 'profile-setup', 'login', 'curriculum-manager', 'exam-solver', 'exam-generator', 'admin-dashboard']);
 
 // ─── Loading Screen ───────────────────────────────────────────────────────────
 
@@ -174,6 +175,7 @@ function AppContent() {
       case 'exam-solver':        return <ExamSolverPage key="exam-solver" />;
       case 'exam-results':       return <ExamResultsPage key="exam-results" />;
       case 'exam-generator':     return <ExamGeneratorPage key="exam-generator" />;
+      case 'admin-dashboard':    return <AdminDashboard key="admin-dashboard" />;
       default:                   return <HomeDashboard key="home" />;
     }
   };

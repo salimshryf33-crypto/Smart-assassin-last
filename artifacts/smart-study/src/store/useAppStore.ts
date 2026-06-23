@@ -3,7 +3,7 @@ import { persist } from 'zustand/middleware';
 import { type GamificationData, DEFAULT_GAMIFICATION } from '../lib/gamification';
 import { type DailyChecklist, DEFAULT_DAILY_CHECKLIST } from '../lib/streakEngine';
 
-export type Page = 'splash' | 'profile-setup' | 'home' | 'flashcards' | 'focus' | 'chat' | 'search' | 'profile' | 'settings' | 'curriculum-manager' | 'exams' | 'exam-solver' | 'exam-results' | 'exam-generator';
+export type Page = 'splash' | 'profile-setup' | 'home' | 'flashcards' | 'focus' | 'chat' | 'search' | 'profile' | 'settings' | 'curriculum-manager' | 'exams' | 'exam-solver' | 'exam-results' | 'exam-generator' | 'admin-dashboard';
 
 export type Country = 'egypt' | 'sudan';
 export type Level = 'primary' | 'preparatory' | 'secondary';
