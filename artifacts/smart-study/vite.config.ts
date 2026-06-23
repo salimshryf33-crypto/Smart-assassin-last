@@ -10,7 +10,7 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-const basePath = process.env.BASE_PATH ?? "/smart-study/";
+const basePath = process.env.BASE_PATH ?? "/";
 
 const isReplitDev =
   process.env.NODE_ENV !== "production" &&
