@@ -10,7 +10,7 @@
 import { Router } from 'express';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { setAdminClaim, getUserClaims } from '../lib/firebaseAdmin';
-import { triggerQuestionExtraction } from '../lib/questionExtractor';
+import { triggerQuestionExtraction, DailyQuotaExhaustedError } from '../lib/questionExtractor';
 import { getExtractionCacheStats, clearExtractionCache } from '../lib/extractionCache';
 import { examStore } from '../lib/examStore';
 import { logger } from '../lib/logger';
@@ -82,11 +82,15 @@ router.post('/recover-exams', requireAuth, requireAdmin, async (req, res) => {
         const rec = pending[i]!;
         logger.info({ examId: rec.examId, title: rec.title }, 'admin recover-exams: triggering extraction');
         if (i > 0) {
-          await new Promise(r => setTimeout(r, 30_000));
+          await new Promise(r => setTimeout(r, 45_000));
         }
         try {
           await triggerQuestionExtraction(rec.curriculumDocId);
         } catch (err) {
+          if (err instanceof DailyQuotaExhaustedError) {
+            logger.error({ examId: rec.examId, remaining: pending.length - i - 1 }, 'admin recover-exams: daily quota exhausted — stopping batch');
+            break;
+          }
           logger.error({ err, examId: rec.examId }, 'admin recover-exams: extraction failed');
         }
       }

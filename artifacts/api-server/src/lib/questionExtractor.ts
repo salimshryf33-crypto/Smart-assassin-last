@@ -62,7 +62,8 @@ export class DailyQuotaExhaustedError extends Error {
 /** Returns true when the 429 body signals a per-day quota, not a per-minute rate limit. */
 function isDailyQuota(body: unknown): boolean {
   const str = JSON.stringify(body);
-  return str.includes('PerDay') || str.includes('per_day') || str.includes('RESOURCE_EXHAUSTED');
+  // Only daily quota when explicitly marked per-day — plain RESOURCE_EXHAUSTED is a per-minute rate limit
+  return str.includes('PerDay') || str.includes('per_day') || str.includes('Daily') || str.includes('daily');
 }
 
 async function callGemini(prompt: string, attempt = 0, unavailableAttempt = 0): Promise<string> {
@@ -83,28 +84,29 @@ async function callGemini(prompt: string, attempt = 0, unavailableAttempt = 0): 
 
   if (res.status === 429) {
     const data = await res.json().catch(() => ({}));
+    const body = JSON.stringify(data);
 
     // Daily quota exhausted — stop immediately, no retry
     if (isDailyQuota(data)) {
       logger.error(
-        { attempt },
+        { attempt, geminiBody: body },
         'callGemini: daily free-tier quota exhausted — stopping extraction until tomorrow UTC'
       );
-      throw new DailyQuotaExhaustedError(`Gemini daily quota exhausted: ${JSON.stringify(data)}`);
+      throw new DailyQuotaExhaustedError(`Gemini daily quota exhausted: ${body}`);
     }
 
     // Per-minute rate limit — retry with exponential backoff
     if (attempt < RATE_LIMIT_DELAYS.length) {
       const delay = RATE_LIMIT_DELAYS[attempt];
       logger.warn(
-        { attempt, delayMs: delay },
+        { attempt, delayMs: delay, geminiBody: body },
         'callGemini: rate-limited (429) — retrying after backoff'
       );
       await new Promise((r) => setTimeout(r, delay));
       return callGemini(prompt, attempt + 1, unavailableAttempt);
     }
 
-    throw new Error(`Gemini error 429 (max retries exceeded): ${JSON.stringify(data)}`);
+    throw new Error(`Gemini error 429 (max retries exceeded): ${body}`);
   }
 
   // 503 UNAVAILABLE — transient "high demand" error, retry with short backoff
