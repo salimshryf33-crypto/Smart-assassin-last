@@ -3,8 +3,13 @@ import cors from "cors";
 import pinoHttp from "pino-http";
 import router from "./routes";
 import { logger } from "./lib/logger";
+import { securityHeaders } from "./middleware/securityHeaders";
+import { requestId } from "./middleware/requestId";
 
 const app: Express = express();
+
+app.use(requestId);
+app.use(securityHeaders);
 
 app.use(
   pinoHttp({

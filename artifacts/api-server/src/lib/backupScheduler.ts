@@ -62,13 +62,17 @@ export async function runBackup(): Promise<void> {
     const sizeBytes = fs.statSync(filePath).size;
     const sizeKB    = Math.round(sizeBytes / 1024);
 
-    // Update log — success
+    // Store backup data in PostgreSQL (survives Replit container restarts)
+    const backupBytes = fs.readFileSync(filePath);
+
+    // Update log — success + persist backup data
     if (logId) {
       await db.query(
         `UPDATE db_backup_log
-         SET status = 'success', finished_at = now(), file_size_kb = $2, verified = true
+         SET status = 'success', finished_at = now(), file_size_kb = $2, verified = true,
+             backup_data = $3
          WHERE id = $1`,
-        [logId, sizeKB]
+        [logId, sizeKB, backupBytes]
       );
     }
 

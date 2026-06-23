@@ -8,6 +8,7 @@
  */
 
 import { Router } from 'express';
+import os from 'node:os';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { setAdminClaim, getUserClaims } from '../lib/firebaseAdmin';
 import { triggerQuestionExtraction, DailyQuotaExhaustedError } from '../lib/questionExtractor';
@@ -17,8 +18,65 @@ import { logger } from '../lib/logger';
 import { grantRole, revokeRole, getUserRoles, listUsersWithRole, type Role } from '../lib/rbac';
 import { resetUserBucket, getBucketStatus } from '../middleware/rateLimiter';
 import { getBackupHealth, runBackup } from '../lib/backupScheduler';
+import { audit, listAuditLog, type AuditAction } from '../lib/auditLog';
+import { getMigrationPool } from '../lib/dbMigrations';
 
 const router = Router();
+
+// ─── GET /api/admin/system-health ────────────────────────────────────────────
+// Full platform health dashboard — DB, backup, rate limits, memory, uptime.
+router.get('/system-health', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const db = getMigrationPool();
+
+    // DB connectivity + table counts
+    const [dbPing, auditCount, bucketCount, roleCount, backupHealth] = await Promise.all([
+      db.query<{ now: Date }>('SELECT now()').then(r => ({ ok: true, ts: r.rows[0]?.now })).catch(() => ({ ok: false, ts: null })),
+      db.query<{ count: string }>('SELECT COUNT(*) as count FROM audit_log').then(r => parseInt(r.rows[0]?.count ?? '0', 10)).catch(() => 0),
+      db.query<{ count: string }>('SELECT COUNT(*) as count FROM rate_limit_buckets').then(r => parseInt(r.rows[0]?.count ?? '0', 10)).catch(() => 0),
+      db.query<{ count: string }>('SELECT COUNT(*) as count FROM user_roles').then(r => parseInt(r.rows[0]?.count ?? '0', 10)).catch(() => 0),
+      getBackupHealth(),
+    ]);
+
+    const memMB = (bytes: number) => Math.round(bytes / 1024 / 1024);
+    const mem   = process.memoryUsage();
+
+    res.json({
+      status:    dbPing.ok ? 'healthy' : 'degraded',
+      timestamp: new Date().toISOString(),
+      server: {
+        uptimeSeconds: Math.floor(process.uptime()),
+        nodeVersion:   process.version,
+        platform:      process.platform,
+        memory: {
+          heapUsedMB:  memMB(mem.heapUsed),
+          heapTotalMB: memMB(mem.heapTotal),
+          rssMB:       memMB(mem.rss),
+        },
+        cpus:    os.cpus().length,
+        loadAvg: os.loadavg(),
+      },
+      database: {
+        connected:   dbPing.ok,
+        serverTime:  dbPing.ts,
+        auditEntries:  auditCount,
+        rateBuckets:   bucketCount,
+        assignedRoles: roleCount,
+      },
+      backup: backupHealth,
+      security: {
+        rateLimitingEnabled: true,
+        pdfValidationEnabled: true,
+        rbacEnabled: true,
+        auditLogEnabled: true,
+        securityHeadersEnabled: true,
+      },
+    });
+  } catch (err) {
+    logger.error({ err }, 'system-health: error');
+    res.status(500).json({ error: String(err) });
+  }
+});
 
 // ─── POST /api/admin/set-claim ────────────────────────────────────────────────
 router.post('/set-claim', requireAuth, requireAdmin, async (req, res) => {
@@ -35,6 +93,7 @@ router.post('/set-claim', requireAuth, requireAdmin, async (req, res) => {
 
   try {
     await setAdminClaim(uid, admin);
+    audit({ uid: req.user!.uid, action: 'admin_claim_set', resourceType: 'user', resourceId: uid, metadata: { admin }, req });
     logger.info({ callerUid: req.user!.uid, targetUid: uid, admin }, 'Admin claim updated');
     res.json({ ok: true, uid, admin });
   } catch (err) {
@@ -141,6 +200,7 @@ router.post('/roles/grant', requireAuth, requireAdmin, async (req, res) => {
 
   try {
     await grantRole(uid, role as Role, req.user!.uid);
+    audit({ uid: req.user!.uid, action: 'role_grant', resourceType: 'user', resourceId: uid, metadata: { role }, req });
     res.json({ ok: true, uid, role });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -154,6 +214,7 @@ router.post('/roles/revoke', requireAuth, requireAdmin, async (req, res) => {
 
   try {
     await revokeRole(uid, role as Role);
+    audit({ uid: req.user!.uid, action: 'role_revoke', resourceType: 'user', resourceId: uid, metadata: { role }, req });
     res.json({ ok: true, uid, role });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -218,7 +279,8 @@ router.get('/backup/health', requireAuth, requireAdmin, async (_req, res) => {
 });
 
 // POST /api/admin/backup/run — manually trigger a backup (fire-and-forget)
-router.post('/backup/run', requireAuth, requireAdmin, (_req, res) => {
+router.post('/backup/run', requireAuth, requireAdmin, (req, res) => {
+  audit({ uid: req.user?.uid, action: 'backup_run', req });
   runBackup().catch(err => logger.error({ err }, 'manual backup: failed'));
   res.json({ ok: true, message: 'Backup started in background — check /backup/health for status' });
 });
@@ -289,9 +351,59 @@ router.get('/extraction-report', requireAuth, requireAdmin, async (req, res) => 
 });
 
 // ─── POST /api/admin/cache/clear ──────────────────────────────────────────────
-router.post('/cache/clear', requireAuth, requireAdmin, (_req, res) => {
+router.post('/cache/clear', requireAuth, requireAdmin, (req, res) => {
   clearExtractionCache();
+  audit({ uid: req.user?.uid, action: 'cache_clear', req });
   res.json({ ok: true, message: 'Extraction cache cleared' });
+});
+
+// ─── GET /api/admin/audit-log ─────────────────────────────────────────────────
+// Returns the most recent audit entries. Supports ?uid=, ?action=, ?limit=
+router.get('/audit-log', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const limit  = Math.min(parseInt(String(req.query['limit'] ?? '100'), 10), 500);
+    const uid    = req.query['uid']    as string | undefined;
+    const action = req.query['action'] as AuditAction | undefined;
+
+    const entries = await listAuditLog({ limit, uid, action });
+    res.json({ total: entries.length, entries });
+  } catch (err) {
+    logger.error({ err }, 'audit-log: query error');
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ─── GET /api/admin/backup/download ──────────────────────────────────────────
+// Download the most recent successful backup as a .sql.gz file.
+router.get('/backup/download', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const db  = getMigrationPool();
+    const row = await db.query<{ id: number; started_at: Date; backup_data: Buffer | null; file_size_kb: number | null }>(
+      `SELECT id, started_at, backup_data, file_size_kb
+       FROM db_backup_log
+       WHERE status = 'success' AND backup_data IS NOT NULL
+       ORDER BY started_at DESC LIMIT 1`
+    );
+
+    if (row.rows.length === 0 || !row.rows[0]?.backup_data) {
+      res.status(404).json({ error: 'No backup available yet. Run POST /api/admin/backup/run first.' });
+      return;
+    }
+
+    const latest = row.rows[0];
+    const ts     = latest.started_at.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const name   = `sage-backup-${ts}.sql.gz`;
+
+    audit({ uid: req.user?.uid, action: 'backup_run', metadata: { download: true, backupId: latest.id }, req });
+
+    res.setHeader('Content-Type',        'application/gzip');
+    res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+    if (latest.file_size_kb) res.setHeader('Content-Length', latest.file_size_kb * 1024);
+    res.send(latest.backup_data);
+  } catch (err) {
+    logger.error({ err }, 'backup/download: error');
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 /** Compute average of a number array, returns 0 for empty. */

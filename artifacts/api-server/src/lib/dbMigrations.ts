@@ -69,8 +69,27 @@ const CREATE_BACKUP_LOG = `
     file_path     TEXT,
     file_size_kb  INTEGER,
     error_message TEXT,
-    verified      BOOLEAN     NOT NULL DEFAULT false
+    verified      BOOLEAN     NOT NULL DEFAULT false,
+    backup_data   BYTEA
   );
+`;
+
+// ─── Audit Log ────────────────────────────────────────────────────────────────
+const CREATE_AUDIT_LOG = `
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id            SERIAL      PRIMARY KEY,
+    uid           TEXT,
+    action        TEXT        NOT NULL,
+    resource_type TEXT,
+    resource_id   TEXT,
+    metadata      JSONB,
+    ip_address    TEXT,
+    request_id    TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS idx_audit_uid        ON audit_log (uid);
+  CREATE INDEX IF NOT EXISTS idx_audit_action     ON audit_log (action);
+  CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_log (created_at DESC);
 `;
 
 // ─── Exam Records (parent) ────────────────────────────────────────────────────
@@ -191,11 +210,14 @@ export async function runStartupMigrations(): Promise<void> {
     await db.query(CREATE_USER_ROLES);
     await db.query(CREATE_PDF_UPLOAD_HASHES);
     await db.query(CREATE_BACKUP_LOG);
+    await db.query(CREATE_AUDIT_LOG);
     await db.query(CREATE_EXAM_RECORDS);
     await db.query(CREATE_EXAM_QUESTIONS);
     await db.query(CREATE_EXAM_ATTEMPTS);
     await db.query(CREATE_EXAM_ANSWERS);
     await db.query(CREATE_WEAKNESS_SNAPSHOTS);
+    // Backward-compatible: add backup_data column if missing on existing installs
+    await db.query(`ALTER TABLE db_backup_log ADD COLUMN IF NOT EXISTS backup_data BYTEA`);
     logger.info('dbMigrations: all startup tables created/verified');
   } catch (err) {
     logger.error({ err }, 'dbMigrations: migration failed');
