@@ -35,7 +35,7 @@ waitForPort = 5000
 [agent]
 stack = "BEST_EFFORT_FALLBACK"
 expertMode = true
-integrations = ["javascript_gemini_ai_integrations:2.0.0", "javascript_log_in_with_replit:2.0.0", "javascript_database:1.0.0"]
+integrations = ["javascript_gemini_ai_integrations:2.0.0", "javascript_log_in_with_replit:2.0.0", "javascript_database:1.0.0", "javascript_object_storage:2.0.0"]
 
 [postMerge]
 path = "scripts/post-merge.sh"
