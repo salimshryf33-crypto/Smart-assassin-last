@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import * as cache from '../services/cacheService';
 
 const router = Router();
 
@@ -20,6 +21,16 @@ router.post('/generate', async (req, res) => {
     [key: string]: unknown;
   };
 
+  // ── Cache lookup (body-content hash = deterministic per conversation state) ──
+  const bodyHash  = cache.hashPart({ model, ...body });
+  const cacheKey  = cache.chatKey(bodyHash);
+  const cached    = await cache.get<unknown>(cacheKey, true);
+  if (cached !== null) {
+    res.setHeader('X-Cache', 'HIT');
+    res.json(cached);
+    return;
+  }
+
   try {
     const upstream = await fetch(
       `${GEMINI_BASE}/v1beta/models/${model}:generateContent?key=${apiKey}`,
@@ -37,6 +48,10 @@ router.post('/generate', async (req, res) => {
       return;
     }
 
+    // Store in cache (fire-and-forget — never delays response)
+    cache.set(cacheKey, data, cache.TTL.CHAT).catch(() => undefined);
+
+    res.setHeader('X-Cache', 'MISS');
     res.json(data);
   } catch (err) {
     req.log.error({ err }, 'Gemini proxy error');

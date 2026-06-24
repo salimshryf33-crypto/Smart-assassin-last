@@ -412,4 +412,31 @@ function avg(nums: number[]): number {
   return Math.round(nums.reduce((s, n) => s + n, 0) / nums.length);
 }
 
+// ─── GET /api/admin/cache-health ─────────────────────────────────────────────
+// Read-only. Returns Redis/memory backend status + hit/miss metrics.
+router.get('/cache-health', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const { getCacheHealth } = await import('../services/cacheService');
+    const health = await getCacheHealth();
+    res.json(health);
+  } catch (err) {
+    logger.error({ err }, 'cache-health: error');
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ─── POST /api/admin/cache/flush ─────────────────────────────────────────────
+// Flush entire cache. Admin only.
+router.post('/cache/flush', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { flushAll } = await import('../services/cacheService');
+    const deleted = await flushAll();
+    audit({ uid: req.user?.uid, action: 'cache_clear', req });
+    res.json({ ok: true, deleted });
+  } catch (err) {
+    logger.error({ err }, 'cache/flush: error');
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 export default router;

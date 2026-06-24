@@ -20,6 +20,7 @@ import { examStore } from '../lib/examStore';
 import { gradeAttempt } from '../lib/autoGrader';
 import { updateWeaknessFromAttempt, getStudentWeakTopics } from '../lib/weaknessAnalyzer';
 import { requireAuth, isAdmin } from '../middleware/auth';
+import * as cache from '../services/cacheService';
 
 const router = Router();
 const str = (v: string | string[] | undefined): string =>
@@ -75,9 +76,17 @@ router.post('/start', requireAuth, async (req, res) => {
 // ─── GET /weakness/list ───────────────────────────────────────────────────────
 // Must come before /:attemptId to avoid param conflict
 router.get('/weakness/list', requireAuth, async (req, res) => {
+  const uid      = req.user!.uid;
+  const cacheKey = cache.weaknessListKey(uid);
+  const cached   = await cache.get<unknown>(cacheKey);
+  if (cached !== null) { res.setHeader('X-Cache', 'HIT'); res.json(cached); return; }
+
   try {
-    const snapshots = await examSolverStore.listWeaknessSnapshots(req.user!.uid);
-    res.json({ snapshots });
+    const snapshots = await examSolverStore.listWeaknessSnapshots(uid);
+    const result = { snapshots };
+    cache.set(cacheKey, result, cache.TTL.DASHBOARD).catch(() => undefined);
+    res.setHeader('X-Cache', 'MISS');
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
@@ -91,9 +100,17 @@ router.get('/weakness/topics', requireAuth, async (req, res) => {
     res.status(400).json({ error: 'country and grade query params required' });
     return;
   }
+  const uid      = req.user!.uid;
+  const cacheKey = cache.weaknessTopicsKey(uid, country, grade);
+  const cached   = await cache.get<unknown>(cacheKey);
+  if (cached !== null) { res.setHeader('X-Cache', 'HIT'); res.json(cached); return; }
+
   try {
-    const topics = await getStudentWeakTopics(req.user!.uid, country, grade);
-    res.json({ topics });
+    const topics = await getStudentWeakTopics(uid, country, grade);
+    const result = { topics };
+    cache.set(cacheKey, result, cache.TTL.DASHBOARD).catch(() => undefined);
+    res.setHeader('X-Cache', 'MISS');
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }

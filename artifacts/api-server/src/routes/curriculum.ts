@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import * as cache from '../services/cacheService';
 import multer from 'multer';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -350,6 +351,17 @@ router.get('/search', requireAuth, async (req, res) => {
     return;
   }
 
+  // ── Cache lookup ────────────────────────────────────────────────────────────
+  const uid       = req.user!.uid;
+  const queryHash = cache.hashPart({ query, topK, bookTitle });
+  const cacheKey  = cache.searchKey(uid, country, grade, subject, queryHash);
+  const cached    = await cache.get<unknown>(cacheKey);
+  if (cached !== null) {
+    res.setHeader('X-Cache', 'HIT');
+    res.json(cached);
+    return;
+  }
+
   // Pre-compute query embedding for hybrid (keyword + semantic) search.
   // Falls back to keyword-only gracefully if embedding API is unavailable.
   let queryEmbedding: number[] | undefined;
@@ -366,9 +378,13 @@ router.get('/search', requireAuth, async (req, res) => {
   const chunks = searchChunks(
     country, grade, subject, query,
     topK ? parseInt(topK) : 10,
-    { bookTitle: bookTitle || undefined, userId: req.user!.uid, queryEmbedding }
+    { bookTitle: bookTitle || undefined, userId: uid, queryEmbedding }
   );
-  res.json({ chunks, count: chunks.length });
+
+  const result = { chunks, count: chunks.length };
+  cache.set(cacheKey, result, cache.TTL.SEARCH).catch(() => undefined);
+  res.setHeader('X-Cache', 'MISS');
+  res.json(result);
 });
 
 // ─── GET /api/curriculum/chunks/:docId ───────────────────────────────────────
