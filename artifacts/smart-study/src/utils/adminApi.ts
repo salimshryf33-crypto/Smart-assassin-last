@@ -63,6 +63,65 @@ export interface AuditLogResponse {
   entries: AuditEntry[];
 }
 
+export interface MetricsSnapshot {
+  generatedAt: string;
+  uptime: { startedAt: string; uptimeSeconds: number };
+  requests: { total: number; active: number; errors: number };
+  gemini: {
+    callsToday: number;
+    callsTotal: number;
+    failures: number;
+    quotaErrors: number;
+    avgResponseMs: number;
+    successRate: number;
+  };
+  search: {
+    total: number;
+    avgLatencyMs: number;
+    topSubjects: Array<{ name: string; count: number }>;
+    topGrades:   Array<{ name: string; count: number }>;
+  };
+}
+
+export interface UsageSummary {
+  generatedAt: string;
+  curriculum: {
+    totalDocs: number;
+    books: number;
+    examDocs: number;
+    totalChunks: number;
+  };
+  ocr: { done: number; processing: number; failed: number };
+  storage: { pdfCount: number; pdfSizeKB: number; pdfSizeMB: number };
+  exams: {
+    byStatus: Record<string, number>;
+    totalDone: number;
+    totalPending: number;
+    totalError: number;
+    questionsExtracted: number;
+  };
+  search: {
+    total: number;
+    avgLatencyMs: number;
+    topSubjects: Array<{ name: string; count: number }>;
+    topGrades:   Array<{ name: string; count: number }>;
+  };
+}
+
+export interface CacheMetrics {
+  generatedAt: string;
+  backend: string;
+  connected: boolean;
+  hits: number;
+  misses: number;
+  errors: number;
+  hitRatioPct: number;
+  setOps: number;
+  invalidations: number;
+  savedGeminiCalls: number;
+  inFlightKeys: number;
+}
+
 // ─── API calls ────────────────────────────────────────────────────────────────
 
 export async function fetchSystemHealth(): Promise<SystemHealth> {
@@ -88,4 +147,22 @@ export async function triggerBackup(): Promise<void> {
     headers: await authHeaders(),
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+}
+
+export async function fetchMetrics(): Promise<MetricsSnapshot> {
+  const res = await fetch('/api/admin/metrics', { headers: await authHeaders() });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchUsageSummary(): Promise<UsageSummary> {
+  const res = await fetch('/api/admin/usage-summary', { headers: await authHeaders() });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchCacheMetrics(): Promise<CacheMetrics> {
+  const res = await fetch('/api/admin/cache-metrics', { headers: await authHeaders() });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
 }

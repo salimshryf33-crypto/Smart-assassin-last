@@ -9,6 +9,8 @@
 
 import { Router } from 'express';
 import os from 'node:os';
+import fs from 'node:fs';
+import path from 'node:path';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { setAdminClaim, getUserClaims } from '../lib/firebaseAdmin';
 import { triggerQuestionExtraction, DailyQuotaExhaustedError } from '../lib/questionExtractor';
@@ -20,6 +22,8 @@ import { resetUserBucket, getBucketStatus } from '../middleware/rateLimiter';
 import { getBackupHealth, runBackup } from '../lib/backupScheduler';
 import { audit, listAuditLog, type AuditAction } from '../lib/auditLog';
 import { getMigrationPool } from '../lib/dbMigrations';
+import { getSnapshot as getMetricsSnapshot } from '../services/metricsService';
+import { readIndex } from '../lib/curriculumStorage';
 
 const router = Router();
 
@@ -411,6 +415,135 @@ function avg(nums: number[]): number {
   if (nums.length === 0) return 0;
   return Math.round(nums.reduce((s, n) => s + n, 0) / nums.length);
 }
+
+// ─── GET /api/admin/metrics ───────────────────────────────────────────────────
+// All operational metrics: requests, Gemini, search.
+router.get('/metrics', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    res.json(getMetricsSnapshot());
+  } catch (err) {
+    logger.error({ err }, 'admin/metrics: error');
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ─── GET /api/admin/ai-metrics ────────────────────────────────────────────────
+// Gemini-focused: calls today, failures, quota errors, avg latency.
+router.get('/ai-metrics', requireAuth, requireAdmin, (_req, res) => {
+  try {
+    const snap = getMetricsSnapshot();
+    res.json({
+      generatedAt:   snap.generatedAt,
+      gemini:        snap.gemini,
+    });
+  } catch (err) {
+    logger.error({ err }, 'admin/ai-metrics: error');
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ─── GET /api/admin/usage-summary ────────────────────────────────────────────
+// High-level summary: docs, exams, questions, OCR status, search stats.
+router.get('/usage-summary', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const db   = getMigrationPool();
+    const snap = getMetricsSnapshot();
+
+    // ── Curriculum docs (in-memory index) ────────────────────────────────────
+    const allDocs  = readIndex();
+    const books    = allDocs.filter(d => d.docType === 'book' || !d.docType);
+    const exams    = allDocs.filter(d => d.docType === 'exam');
+    const ocrDone  = allDocs.filter(d => d.status === 'done').length;
+    const ocrFail  = allDocs.filter(d => d.status === 'error').length;
+    const ocrProc  = allDocs.filter(d => d.status === 'processing' || d.status === 'ocr_running').length;
+    const totalChunks = allDocs.reduce((s, d) => s + (d.chunkCount ?? 0), 0);
+
+    // ── PDF files on disk ─────────────────────────────────────────────────────
+    const PDF_DIR  = path.resolve('data/pdfs');
+    let pdfCount   = 0;
+    let pdfSizeKB  = 0;
+    try {
+      const files = fs.readdirSync(PDF_DIR).filter(f => f.endsWith('.pdf'));
+      pdfCount    = files.length;
+      pdfSizeKB   = files.reduce((s, f) => {
+        try { return s + Math.round(fs.statSync(path.join(PDF_DIR, f)).size / 1024); }
+        catch { return s; }
+      }, 0);
+    } catch { /* PDF dir may not exist */ }
+
+    // ── Exam records from DB ──────────────────────────────────────────────────
+    const [questionCount, examRecords] = await Promise.all([
+      db.query<{ count: string }>('SELECT COUNT(*) AS count FROM exam_questions')
+        .then(r => parseInt(r.rows[0]?.count ?? '0', 10))
+        .catch(() => 0),
+      db.query<{ extraction_status: string; count: string }>(
+        'SELECT extraction_status, COUNT(*) AS count FROM exam_records GROUP BY extraction_status'
+      ).then(r => r.rows).catch(() => [] as Array<{ extraction_status: string; count: string }>),
+    ]);
+
+    const examsByStatus = Object.fromEntries(
+      examRecords.map(r => [r.extraction_status, parseInt(r.count, 10)])
+    );
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      curriculum: {
+        totalDocs:    allDocs.length,
+        books:        books.length,
+        examDocs:     exams.length,
+        totalChunks,
+      },
+      ocr: {
+        done:         ocrDone,
+        processing:   ocrProc,
+        failed:       ocrFail,
+      },
+      storage: {
+        pdfCount,
+        pdfSizeKB,
+        pdfSizeMB: Math.round(pdfSizeKB / 1024 * 10) / 10,
+      },
+      exams: {
+        byStatus:     examsByStatus,
+        totalDone:    examsByStatus['done']    ?? 0,
+        totalPending: examsByStatus['pending'] ?? 0,
+        totalError:   examsByStatus['error']   ?? 0,
+        questionsExtracted: questionCount,
+      },
+      search: snap.search,
+    });
+  } catch (err) {
+    logger.error({ err }, 'admin/usage-summary: error');
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ─── GET /api/admin/cache-metrics ────────────────────────────────────────────
+// Cache hit/miss stats (delegates to existing getCacheHealth).
+router.get('/cache-metrics', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const { getCacheHealth } = await import('../services/cacheService');
+    const health = await getCacheHealth();
+    const m = health.metrics;
+    const total = m.hits + m.misses;
+    res.json({
+      generatedAt: new Date().toISOString(),
+      backend:     health.backend ?? 'memory',
+      connected:   health.connected ?? true,
+      hits:        m.hits,
+      misses:      m.misses,
+      errors:      m.errors,
+      hitRatioPct: total === 0 ? 0 : Math.round((m.hits / total) * 100),
+      setOps:      m.setOperations,
+      invalidations: m.invalidations,
+      savedGeminiCalls: m.savedGeminiCalls,
+      inFlightKeys: health.inFlightKeys ?? 0,
+    });
+  } catch (err) {
+    logger.error({ err }, 'admin/cache-metrics: error');
+    res.status(500).json({ error: String(err) });
+  }
+});
 
 // ─── GET /api/admin/cache-health ─────────────────────────────────────────────
 // Read-only. Returns Redis/memory backend status + hit/miss metrics.

@@ -5,11 +5,13 @@ import router from "./routes";
 import { logger } from "./lib/logger";
 import { securityHeaders } from "./middleware/securityHeaders";
 import { requestId } from "./middleware/requestId";
+import { metricsMiddleware } from "./middleware/metricsMiddleware";
 
 const app: Express = express();
 
 app.use(requestId);
 app.use(securityHeaders);
+app.use(metricsMiddleware);
 
 app.use(
   pinoHttp({
