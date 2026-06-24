@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { logger } from './logger';
 import { deletePdfFromDb } from './pdfPersistence';
+import { deletePdf as deletePdfFromStorage } from '../services/storageService';
 import { extractChapterLabel } from './chunker';
 import { getEmbedding, cosineSimilarity, generateEmbeddingsBatch } from './embeddingService';
 import { upsertDocMetaToDB, saveChunksToDB, deleteDocFromDB } from './curriculumPersistence';
@@ -145,6 +146,13 @@ export function deleteDoc(id: string) {
   deletePdfFromDb(id).catch((err) =>
     logger.error({ err, docId: id }, 'deleteDoc: failed to remove PDF from DB')
   );
+
+  // Mirror delete to object storage (fire-and-forget)
+  deletePdfFromStorage(id).then((result) => {
+    if (!result.ok) {
+      logger.warn({ docId: id, error: result.error }, 'deleteDoc: object storage delete failed — may need manual cleanup');
+    }
+  }).catch(() => {});
 
   // Mirror delete to PostgreSQL
   deleteDocFromDB(id).catch((err) =>

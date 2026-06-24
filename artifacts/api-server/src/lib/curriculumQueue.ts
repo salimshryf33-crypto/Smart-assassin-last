@@ -19,6 +19,7 @@ import { extractPdf, QuotaExhaustedError, ServiceUnavailableError } from './pdfE
 import { chunkText } from './chunker';
 import { savePdfToDb } from './pdfPersistence';
 import { triggerQuestionExtraction } from './questionExtractor';
+import { uploadPdf, downloadPdf } from '../services/storageService';
 
 export type JobStatus = 'queued' | 'processing' | 'ocr_running' | 'partial' | 'done' | 'error';
 
@@ -101,6 +102,13 @@ export function enqueueJob(data: Omit<Job, 'id' | 'status' | 'progress' | 'creat
     logger.error({ err, docId: data.docId }, 'enqueueJob: failed to persist PDF to database')
   );
 
+  // Mirror PDF to object storage (fire-and-forget — local disk stays authoritative)
+  uploadPdf(data.docId, permanentPath).then((result) => {
+    if (!result.ok) {
+      logger.warn({ docId: data.docId, error: result.error }, 'enqueueJob: object storage upload failed — disk+DB remain durable');
+    }
+  }).catch(() => {});
+
   const job: Job = {
     ...rest,
     filePath: permanentPath,
@@ -163,6 +171,13 @@ export async function reindexDoc(docId: string, newFilePath: string, meta: {
     logger.error({ err, docId }, 'reindexDoc: failed to persist PDF to database')
   );
 
+  // Mirror updated PDF to object storage (fire-and-forget)
+  uploadPdf(docId, permanentPath).then((result) => {
+    if (!result.ok) {
+      logger.warn({ docId, error: result.error }, 'reindexDoc: object storage upload failed — disk+DB remain durable');
+    }
+  }).catch(() => {});
+
   const id = uuidv4();
   const job: Job = {
     id,
@@ -206,11 +221,16 @@ export async function resumeDoc(docId: string): Promise<Job> {
   // a legacy relative path from an earlier server run and cannot be trusted.
   const pdfPath = getPdfPath(docId);
   if (!fs.existsSync(pdfPath)) {
-    throw new Error(
-      `PDF file not found at '${pdfPath}'. ` +
-      `The original PDF must be present for resume. ` +
-      `Use POST /api/curriculum/reindex/${docId} to upload a new copy.`
-    );
+    // Attempt to restore from object storage before giving up
+    logger.info({ docId, pdfPath }, 'resumeDoc: local PDF missing — attempting restore from object storage');
+    const restored = await downloadPdf(docId, pdfPath);
+    if (!restored.ok) {
+      throw new Error(
+        `PDF file not found at '${pdfPath}' and object storage restore failed (${restored.error}). ` +
+        `Use POST /api/curriculum/reindex/${docId} to upload a new copy.`
+      );
+    }
+    logger.info({ docId, pdfPath }, 'resumeDoc: PDF restored from object storage successfully');
   }
 
   // Resume from the page after the last successfully rendered page.
