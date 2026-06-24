@@ -187,6 +187,64 @@ const CREATE_EXAM_ANSWERS = `
   CREATE INDEX IF NOT EXISTS exam_answers_question_idx  ON exam_answers (question_id);
 `;
 
+// ─── Curriculum Documents ─────────────────────────────────────────────────────
+// Source-of-truth for index.json. Disk is cache only.
+const CREATE_CURRICULUM_DOCUMENTS = `
+  CREATE TABLE IF NOT EXISTS curriculum_documents (
+    id                   TEXT        PRIMARY KEY,
+    country              TEXT        NOT NULL DEFAULT '',
+    grade                TEXT        NOT NULL DEFAULT '',
+    subject              TEXT        NOT NULL DEFAULT '',
+    track                TEXT        NOT NULL DEFAULT '',
+    filename             TEXT        NOT NULL DEFAULT '',
+    total_pages          INTEGER     NOT NULL DEFAULT 0,
+    chunk_count          INTEGER     NOT NULL DEFAULT 0,
+    status               TEXT        NOT NULL DEFAULT 'queued',
+    error_message        TEXT,
+    uploaded_at          BIGINT      NOT NULL DEFAULT 0,
+    processed_at         BIGINT,
+    doc_type             TEXT,
+    owner_id             TEXT,
+    visibility           TEXT        NOT NULL DEFAULT 'public',
+    book_title           TEXT,
+    extraction_method    TEXT,
+    extracted_chars      INTEGER,
+    avg_chars_per_page   REAL,
+    extracted_pages      INTEGER,
+    last_rendered_page   INTEGER,
+    pdf_storage_path     TEXT,
+    last_resume_attempt  BIGINT,
+    resume_attempts      INTEGER,
+    last_resume_error    TEXT,
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS idx_cd_country_grade ON curriculum_documents (country, grade, subject);
+  CREATE INDEX IF NOT EXISTS idx_cd_status        ON curriculum_documents (status);
+  CREATE INDEX IF NOT EXISTS idx_cd_owner         ON curriculum_documents (owner_id);
+`;
+
+// ─── Curriculum Chunks ────────────────────────────────────────────────────────
+// Source-of-truth for docs/*.json. Disk is cache only.
+const CREATE_CURRICULUM_CHUNKS = `
+  CREATE TABLE IF NOT EXISTS curriculum_chunks (
+    id                   TEXT        PRIMARY KEY,
+    doc_id               TEXT        NOT NULL,
+    country              TEXT        NOT NULL DEFAULT '',
+    grade                TEXT        NOT NULL DEFAULT '',
+    subject              TEXT        NOT NULL DEFAULT '',
+    chapter              TEXT        NOT NULL DEFAULT '',
+    page_range           TEXT        NOT NULL DEFAULT '',
+    chunk_index          INTEGER     NOT NULL DEFAULT 0,
+    content              TEXT        NOT NULL DEFAULT '',
+    content_normalized   TEXT        NOT NULL DEFAULT '',
+    keywords             JSONB       NOT NULL DEFAULT '[]',
+    embedding            JSONB,
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS idx_cc_doc_id  ON curriculum_chunks (doc_id);
+  CREATE INDEX IF NOT EXISTS idx_cc_search  ON curriculum_chunks (country, grade, subject);
+`;
+
 // ─── Weakness Snapshots (independent) ────────────────────────────────────────
 const CREATE_WEAKNESS_SNAPSHOTS = `
   CREATE TABLE IF NOT EXISTS weakness_snapshots (
@@ -216,6 +274,8 @@ export async function runStartupMigrations(): Promise<void> {
     await db.query(CREATE_EXAM_ATTEMPTS);
     await db.query(CREATE_EXAM_ANSWERS);
     await db.query(CREATE_WEAKNESS_SNAPSHOTS);
+    await db.query(CREATE_CURRICULUM_DOCUMENTS);
+    await db.query(CREATE_CURRICULUM_CHUNKS);
     // Backward-compatible: add backup_data column if missing on existing installs
     await db.query(`ALTER TABLE db_backup_log ADD COLUMN IF NOT EXISTS backup_data BYTEA`);
     logger.info('dbMigrations: all startup tables created/verified');
