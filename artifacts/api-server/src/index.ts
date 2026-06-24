@@ -6,6 +6,7 @@ import { triggerQuestionExtraction, DailyQuotaExhaustedError } from "./lib/quest
 import { examStore } from "./lib/examStore";
 import { runStartupMigrations } from "./lib/dbMigrations";
 import { startBackupScheduler } from "./lib/backupScheduler";
+import { restoreCurriculumFromDB } from "./lib/curriculumPersistence";
 import { hasQuestionsSnapshot, loadQuestionsFromFile } from "./lib/questionStorage";
 
 const rawPort = process.env["PORT"];
@@ -31,15 +32,19 @@ app.listen(port, (err) => {
   logger.info({ port }, "Server listening");
 
   // Phase 1: Create all DB tables if they don't exist yet (idempotent)
-  runStartupMigrations().catch((err) =>
-    logger.error({ err }, 'runStartupMigrations: unexpected error')
-  );
-
-  // Run safe startup migration (adds visibility/bookTitle defaults to legacy docs)
-  migrateIndex();
-
-  // Re-apply improved chapter detection to existing chunks — no-op when done.
-  relabelChapters();
+  runStartupMigrations()
+    .then(() =>
+      // Phase 2: Restore disk cache from PostgreSQL (or seed DB from disk on first run).
+      // Must run AFTER tables exist and BEFORE migrateIndex / relabelChapters.
+      restoreCurriculumFromDB()
+    )
+    .then(() => {
+      migrateIndex();
+      relabelChapters();
+    })
+    .catch((err) =>
+      logger.error({ err }, 'startup: curriculum restore/migration failed')
+    );
 
   // Generate vector embeddings for chunks that don't have them yet.
   generateMissingEmbeddings().catch((err) =>

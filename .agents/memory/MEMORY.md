@@ -12,3 +12,4 @@
 - [Exam Recovery & Gemini Quota](exam-recovery-quota.md) — autoRecoverPendingExams on startup; DailyQuotaExhaustedError stops retries; free tier = 20 req/day; resets UTC midnight.
 - [Extraction Quality Engine](extraction-quality-engine.md) — 8-phase upgrade: coverageAnalyzer+questionNormalizer+extractionCache; 3-pass extraction; Jaccard dedup; ExtractionScore 0-100; Phase 8 report at GET /api/admin/extraction-report.
 - [Security Stability Layer](security-stability-layer.md) — Phase 1: Token bucket rate limiting (PG), PDF validator (SHA-256 dedup + magic bytes + malicious pattern), RBAC (user_roles PG table), daily DB backup scheduler. All additive — no existing routes broken.
+- [Curriculum DB Persistence](curriculum-db-persistence.md) — curriculum_documents + curriculum_chunks tables; curriculumPersistence.ts bridges disk↔PG; fire-and-forget DB writes; startup restore chain: runStartupMigrations→restoreCurriculumFromDB→migrateIndex+relabelChapters.

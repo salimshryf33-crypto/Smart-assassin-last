@@ -4,6 +4,7 @@ import { logger } from './logger';
 import { deletePdfFromDb } from './pdfPersistence';
 import { extractChapterLabel } from './chunker';
 import { getEmbedding, cosineSimilarity, generateEmbeddingsBatch } from './embeddingService';
+import { upsertDocMetaToDB, saveChunksToDB, deleteDocFromDB } from './curriculumPersistence';
 
 // ─── Chunk ────────────────────────────────────────────────────────────────────
 
@@ -119,6 +120,11 @@ export function upsertDocMeta(doc: UpsertDocInput): void {
   };
 
   writeIndex([...all.filter((d) => d.id !== merged.id), merged]);
+
+  // Mirror to PostgreSQL (fire-and-forget — never blocks disk write)
+  upsertDocMetaToDB(merged).catch((err) =>
+    logger.error({ err, docId: merged.id }, 'upsertDocMeta: DB sync failed')
+  );
 }
 
 export function getDocMeta(id: string): CurriculumDocument | null {
@@ -138,6 +144,11 @@ export function deleteDoc(id: string) {
 
   deletePdfFromDb(id).catch((err) =>
     logger.error({ err, docId: id }, 'deleteDoc: failed to remove PDF from DB')
+  );
+
+  // Mirror delete to PostgreSQL
+  deleteDocFromDB(id).catch((err) =>
+    logger.error({ err, docId: id }, 'deleteDoc: DB delete failed')
   );
 
   invalidateChunkCache(id);
@@ -262,6 +273,11 @@ export function saveChunks(docId: string, chunks: CurriculumChunk[]) {
   ensureDirs();
   fs.writeFileSync(path.join(DOCS_DIR, `${docId}.json`), JSON.stringify(chunks));
   invalidateChunkCache(docId);
+
+  // Mirror to PostgreSQL (fire-and-forget)
+  saveChunksToDB(docId, chunks).catch((err) =>
+    logger.error({ err, docId }, 'saveChunks: DB sync failed')
+  );
 }
 
 export function appendChunks(docId: string, newChunks: CurriculumChunk[]) {
