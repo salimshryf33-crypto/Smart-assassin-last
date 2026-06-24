@@ -35,6 +35,20 @@ Redis is optional. If REDIS_URL is not set or Redis crashes, the system silently
 All cached routes respond with X-Cache: HIT or X-Cache: MISS.
 Error responses (non-ok upstream, catch blocks) do NOT cache and do NOT set X-Cache.
 
+## Feature 1: Cache Invalidation
+- Triggered on: upload, delete, resume (OCR), reindex in `routes/curriculum.ts`
+- Function: `invalidateSubjectSearch(country, grade, subject)` in cacheService.ts
+- Pattern: `:{country}:{grade}:{subject}:` — matches ONLY search keys for that subject
+- Unrelated keys (chat, weakness, other subjects) are never touched
+- All calls are fire-and-forget (`.catch(() => undefined)`) — never blocks response
+
+## Feature 2: Cache Stampede Protection (Single-Flight)
+- Function: `getOrCompute(key, compute, ttl, isGemini?)` in cacheService.ts
+- In-flight Map<string, Promise>: atomic check-then-set (no await between has/set)
+- 100 concurrent requests → 1 compute() → 99 served from single-flight
+- Used in: gemini route (POST /api/gemini/generate)
+- Errors from compute() are NOT cached — typed UpstreamError thrown and caught in route
+
 ## How to apply
 - To add caching to a new GET route: use `cacheMiddleware(keyFn, ttl)` from middlewares/cacheMiddleware.ts.
 - To add caching to a POST route: inline get/set calls from cacheService.ts.

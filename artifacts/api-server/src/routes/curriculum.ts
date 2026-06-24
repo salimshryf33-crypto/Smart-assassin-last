@@ -179,6 +179,10 @@ router.post('/upload', requireAuth, rateLimit('pdf_upload'), upload.single('pdf'
     },
     'Curriculum upload queued'
   );
+
+  // Invalidate search cache for this subject — new content makes old results stale.
+  cache.invalidateSubjectSearch(country, grade, subject).catch(() => undefined);
+
   res.status(202).json({ jobId, docId, status: 'queued' });
 });
 
@@ -250,6 +254,8 @@ router.delete('/docs/:id', requireAuth, (req, res) => {
   }
 
   deleteDoc(docId);
+  // Invalidate search cache for the deleted doc's subject.
+  cache.invalidateSubjectSearch(doc.country, doc.grade, doc.subject).catch(() => undefined);
   req.log.info({ docId, deletedBy: user.uid }, 'Deleted curriculum doc');
   res.json({ success: true });
 });
@@ -283,6 +289,8 @@ router.post('/docs/:docId/resume', requireAuth, requireAdmin, async (req, res) =
 
   try {
     const job = await resumeDoc(docId);
+    // Invalidate search cache — resumed OCR will produce new/updated chunks.
+    cache.invalidateSubjectSearch(doc.country, doc.grade, doc.subject).catch(() => undefined);
     req.log.info(
       { jobId: job.id, docId, resumeFromPage: job.resumeFromPage },
       'OCR resume queued'
@@ -323,6 +331,8 @@ router.post('/reindex/:id', requireAuth, requireAdmin, upload.single('pdf'), asy
       subject: existing.subject, track: existing.track,
       filename: existing.filename,
     });
+    // Invalidate search cache — reindex produces new chunks.
+    cache.invalidateSubjectSearch(existing.country, existing.grade, existing.subject).catch(() => undefined);
     res.status(202).json({ jobId: job.id, docId, status: 'queued', source: 'stored_pdf' });
     return;
   }
@@ -335,6 +345,8 @@ router.post('/reindex/:id', requireAuth, requireAdmin, upload.single('pdf'), asy
     subject: existing.subject, track: existing.track,
     filename: reindexFilename,
   });
+  // Invalidate search cache — reindex produces new chunks.
+  cache.invalidateSubjectSearch(existing.country, existing.grade, existing.subject).catch(() => undefined);
   res.status(202).json({ jobId: job.id, docId, status: 'queued', source: 'new_upload' });
 });
 

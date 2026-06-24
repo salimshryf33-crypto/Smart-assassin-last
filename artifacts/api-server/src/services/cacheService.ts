@@ -147,9 +147,101 @@ export async function invalidatePattern(pattern: string): Promise<void> {
   }
 }
 
+// ─── Feature 1: Targeted cache invalidation ───────────────────────────────────
+//
+// Invalidates ALL cached search results for a given (country, grade, subject).
+// Pattern targets: sage:search:{any_uid}:{country}:{grade}:{subject}:{any_hash}
+// Does NOT touch unrelated chat, weakness, or other cache entries.
+
+export async function invalidateSubjectSearch(
+  country: string,
+  grade: string,
+  subject: string
+): Promise<void> {
+  // Substring `:country:grade:subject:` is unique within search keys only.
+  const pattern = `:${country}:${grade}:${subject}:`;
+  try {
+    await cacheDelByPattern(pattern);
+    metrics.invalidations++;
+    logger.info(
+      { country, grade, subject, pattern },
+      'cache: invalidated search cache for subject'
+    );
+  } catch (err) {
+    logger.warn({ err, country, grade, subject }, 'cache: subject invalidation error — skipped');
+  }
+}
+
+// ─── Feature 2: Cache Stampede Protection (Single-Flight) ────────────────────
+//
+// In-process registry of in-flight compute promises.
+// If 100 concurrent requests miss the cache for the same key,
+// only ONE compute() runs. All others await the SAME promise.
+//
+// Node.js single-thread guarantee: between `inFlight.has()` and `inFlight.set()`
+// no other code runs (no await between them), so the check-then-set is atomic.
+
+const inFlight = new Map<string, Promise<unknown>>();
+
+export interface OrComputeResult<T> {
+  value: T;
+  fromCache: boolean;  // true = served from cache or single-flight wait
+}
+
+/**
+ * Cache-aside with single-flight protection.
+ *
+ * 1. Cache HIT  → return immediately.
+ * 2. In-flight  → wait for the running compute, return its result (no duplicate compute).
+ * 3. Cache MISS → run compute(), store in cache, return result.
+ *
+ * Errors from compute() are re-thrown and do NOT poison the cache.
+ */
+export async function getOrCompute<T>(
+  key: string,
+  compute: () => Promise<T>,
+  ttlSeconds: number,
+  isGemini = false
+): Promise<OrComputeResult<T>> {
+  // ── 1. Cache lookup ─────────────────────────────────────────────────────────
+  const cached = await get<T>(key, isGemini);
+  if (cached !== null) return { value: cached, fromCache: true };
+
+  // ── 2. Check in-flight (synchronous — no await between has() and set()) ────
+  const existing = inFlight.get(key) as Promise<T> | undefined;
+  if (existing) {
+    metrics.hits++;
+    if (isGemini) metrics.savedGeminiCalls++;
+    logger.debug({ key }, 'cache: single-flight wait');
+    const value = await existing;
+    return { value, fromCache: true };
+  }
+
+  // ── 3. Start compute + register flight ──────────────────────────────────────
+  const promise = (async (): Promise<T> => {
+    try {
+      const result = await compute();
+      // Only cache successful results — errors are NOT cached
+      await set(key, result, ttlSeconds);
+      return result;
+    } finally {
+      inFlight.delete(key);
+    }
+  })();
+
+  inFlight.set(key, promise);    // ← atomic with the has() check above (no await between)
+  const value = await promise;
+  return { value, fromCache: false };
+}
+
 // ─── Health snapshot ──────────────────────────────────────────────────────────
 
 export async function getCacheHealth() {
-  const info = await getRedisInfo();
-  return { ...info, metrics: getMetrics() };
+  const info  = await getRedisInfo();
+  const m     = getMetrics();
+  return {
+    ...info,
+    metrics: m,
+    inFlightKeys: inFlight.size,
+  };
 }

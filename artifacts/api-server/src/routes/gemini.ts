@@ -21,39 +21,52 @@ router.post('/generate', async (req, res) => {
     [key: string]: unknown;
   };
 
-  // ── Cache lookup (body-content hash = deterministic per conversation state) ──
-  const bodyHash  = cache.hashPart({ model, ...body });
-  const cacheKey  = cache.chatKey(bodyHash);
-  const cached    = await cache.get<unknown>(cacheKey, true);
-  if (cached !== null) {
-    res.setHeader('X-Cache', 'HIT');
-    res.json(cached);
-    return;
-  }
+  // ── Cache + Single-Flight (stampede protection) ───────────────────────────
+  // getOrCompute ensures only ONE Gemini call runs for identical concurrent requests.
+  // Errors are NOT cached — they propagate to the typed catch block below.
+  const bodyHash = cache.hashPart({ model, ...body });
+  const cacheKey = cache.chatKey(bodyHash);
+
+  interface UpstreamError { __upstreamError: true; status: number; data: unknown; }
 
   try {
-    const upstream = await fetch(
-      `${GEMINI_BASE}/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      }
+    const { value: data, fromCache } = await cache.getOrCompute<unknown>(
+      cacheKey,
+      async () => {
+        const upstream = await fetch(
+          `${GEMINI_BASE}/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          }
+        );
+        const json = await upstream.json() as unknown;
+
+        if (!upstream.ok) {
+          // Throw a typed error so getOrCompute skips caching this response.
+          const err: UpstreamError = {
+            __upstreamError: true,
+            status: upstream.status,
+            data: json,
+          };
+          throw err;
+        }
+
+        return json;
+      },
+      cache.TTL.CHAT,
+      true // isGemini — increments savedGeminiCalls on cache/flight hit
     );
 
-    const data = await upstream.json();
-
-    if (!upstream.ok) {
-      res.status(upstream.status).json(data);
+    res.setHeader('X-Cache', fromCache ? 'HIT' : 'MISS');
+    res.json(data);
+  } catch (err: unknown) {
+    const typed = err as Partial<UpstreamError>;
+    if (typed.__upstreamError) {
+      res.status(typed.status!).json(typed.data);
       return;
     }
-
-    // Store in cache (fire-and-forget — never delays response)
-    cache.set(cacheKey, data, cache.TTL.CHAT).catch(() => undefined);
-
-    res.setHeader('X-Cache', 'MISS');
-    res.json(data);
-  } catch (err) {
     req.log.error({ err }, 'Gemini proxy error');
     res.status(502).json({ error: 'Failed to reach Gemini API' });
   }
