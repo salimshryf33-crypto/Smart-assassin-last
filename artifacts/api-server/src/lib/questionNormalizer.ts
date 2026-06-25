@@ -92,6 +92,43 @@ export function normalizeAll<T extends { question: string }>(questions: T[]): T[
 
 // ─── Phase 5: Enhanced Deduplication ─────────────────────────────────────────
 
+// ─── Structural-sequence guard ────────────────────────────────────────────────
+// Questions that are part of a numbered/labelled sequence must NOT be
+// near-deduplicated even when their similarity is high, because they are
+// structurally distinct items with different answers.
+//
+// Examples that must be preserved:
+//   "سمّ الجزء رقم ١ في الرسم"   vs   "سمّ الجزء رقم ٢ في الرسم"   → sim ≈ 0.86
+//   "أكمل الفراغ (أ): ..."        vs   "أكمل الفراغ (ب): ..."        → sim ≈ 0.85
+//   "اكتب اسم الجزء (i)"          vs   "اكتب اسم الجزء (ii)"         → sim ≈ 0.88
+
+const STRUCTURAL_PATTERNS: RegExp[] = [
+  // Arabic-Indic numerals with separator: ١- ٢. ٣) ٤]
+  /[٠١٢٣٤٥٦٧٨٩]+\s*[-–.)\]]/,
+  // Western numerals with separator: 1- 2. 3) 4]
+  /\b\d+\s*[-–.)\]]/,
+  // Parenthesised numbers: (1) (٢) (٣)
+  /\(\s*[٠١٢٣٤٥٦٧٨٩\d]+\s*\)/,
+  // Roman numerals in parens: (i) (ii) (iii) (iv) (v) … (x)
+  /\(\s*(?:i{1,3}|iv|vi{0,3}|ix|x{1,3}|xi{0,3}|xiv|xv)\s*\)/i,
+  // Arabic letter part-markers: أ/ ب/ جـ/ or (أ) (ب) (جـ)
+  /[\u0600-\u06FF]\s*[\/\)]/,
+  // Explicit number references (keyword + digit)
+  /(?:رقم|شكل|الجزء|جزء|عنصر|العضو|الخانة|المربع|الصف|العمود|الجدول|الخطوة|المرحلة|البند)\s+[٠١٢٣٤٥٦٧٨٩\d]/,
+  // Phrases like "الأجزاء المرقمة" or "جزء رقم"
+  /الأجزاء\s+المرقمة/,
+  /جزء\s+رقم/,
+];
+
+/**
+ * Returns true if the question text contains a structural sequence indicator —
+ * meaning it belongs to a numbered/labelled series and must never be
+ * near-deduplicated against a sibling question in the same series.
+ */
+function hasStructuralMarker(text: string): boolean {
+  return STRUCTURAL_PATTERNS.some(p => p.test(text));
+}
+
 /** Normalize text for comparison: lowercase, no diacritics, no punctuation, collapsed spaces. */
 function normalizeForComparison(text: string): string {
   return text
@@ -180,6 +217,17 @@ export function deduplicateEnhanced<T extends { question: string }>(
 
       const sim = jaccardSimilarity(best.question, afterExact[j]!.question);
       if (sim >= NEAR_DUPLICATE_THRESHOLD) {
+        // ── Structural-sequence guard ──────────────────────────────────────
+        // If either question carries a structural marker (numbered item,
+        // part label, figure reference, etc.) they are siblings in a series,
+        // NOT true duplicates — skip removal even at high similarity.
+        if (
+          hasStructuralMarker(best.question) ||
+          hasStructuralMarker(afterExact[j]!.question)
+        ) {
+          continue;
+        }
+
         best = pickBetter(best, afterExact[j]!);
         removed.add(j);
         nearRemoved++;
