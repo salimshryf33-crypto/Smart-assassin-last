@@ -109,12 +109,22 @@ const STRUCTURAL_PATTERNS: RegExp[] = [
   /\b\d+\s*[-–.)\]]/,
   // Parenthesised numbers: (1) (٢) (٣)
   /\(\s*[٠١٢٣٤٥٦٧٨٩\d]+\s*\)/,
+  // Square-bracketed labels: [1] [٢] [أ]
+  /\[\s*[\u0600-\u06FF٠١٢٣٤٥٦٧٨٩\d]+\s*\]/,
   // Roman numerals in parens: (i) (ii) (iii) (iv) (v) … (x)
   /\(\s*(?:i{1,3}|iv|vi{0,3}|ix|x{1,3}|xi{0,3}|xiv|xv)\s*\)/i,
-  // Arabic letter part-markers: أ/ ب/ جـ/ or (أ) (ب) (جـ)
+  // Arabic letter part-markers with / or ): أ/ ب/ (أ) (ب)
   /[\u0600-\u06FF]\s*[\/\)]/,
-  // Explicit number references (keyword + digit)
-  /(?:رقم|شكل|الجزء|جزء|عنصر|العضو|الخانة|المربع|الصف|العمود|الجدول|الخطوة|المرحلة|البند)\s+[٠١٢٣٤٥٦٧٨٩\d]/,
+  // Standalone Arabic letter sub-labels with dash or colon: أ- ب- أ: ب:
+  // Requires preceding whitespace / start / open-paren to avoid matching mid-word hyphens.
+  /(?:^|[\s(،])[\u0600-\u06FF]\s*[-–:]/,
+  // Explicit number references (keyword + digit, with or without surrounding parens)
+  /(?:رقم|شكل|الجزء|جزء|عنصر|العضو|الخانة|المربع|الصف|العمود|الجدول|الخطوة|المرحلة|البند)\s*[(\[]?\s*[٠١٢٣٤٥٦٧٨٩\d]/,
+  // Arabic ordinal sequence words: أولاً ثانياً ثالثاً …
+  /(?:أولاً|ثانياً|ثالثاً|رابعاً|خامساً|سادساً|سابعاً|ثامناً|تاسعاً|عاشراً)/,
+  // Quantity-specific questions: "اذكر/عدد ثلاثة/أربعة …" — different counts = different questions
+  // Note: no \b — \b does not work on Arabic chars (they are \W in JS regex)
+  /(?:اذكر|عدّد|عدد|سمّ|سم|اكتب)\s+(?:اثنين|اثنتين|ثلاثة|ثلاث|أربعة|أربع|خمسة|خمس|ستة|ست|سبعة|سبع|ثمانية|ثمان|تسعة|تسع|عشرة|عشر)/,
   // Phrases like "الأجزاء المرقمة" or "جزء رقم"
   /الأجزاء\s+المرقمة/,
   /جزء\s+رقم/,
@@ -173,14 +183,32 @@ export interface DeduplicationResult<T> {
   nearRemoved: number;
 }
 
+export interface DeduplicationOptions<T> {
+  /**
+   * Optional field name on T whose value distinguishes otherwise-similar
+   * questions. If both questions have a non-null, non-empty value for this
+   * field AND those values differ, the pair is never treated as a near-duplicate
+   * regardless of text similarity.
+   *
+   * Typical usage: pass `'correctAnswer'` so that two questions with the same
+   * stem but different correct answers are always preserved.
+   */
+  discriminatorField?: keyof T;
+}
+
 /**
  * Enhanced deduplication: exact match + near-match (Jaccard ≥ 0.80).
  * Keeps the highest-quality version of each duplicate pair.
  *
  * Phase 5 of the extraction quality engine.
+ *
+ * Guards applied before any near-removal:
+ *  1. Structural-sequence guard — either question has a numbered/labelled marker.
+ *  2. Answer discriminator    — both questions have distinct non-empty answers.
  */
 export function deduplicateEnhanced<T extends { question: string }>(
   questions: T[],
+  options?: DeduplicationOptions<T>,
 ): DeduplicationResult<T> {
   if (questions.length === 0) {
     return { deduped: [], exactRemoved: 0, nearRemoved: 0 };
@@ -207,6 +235,8 @@ export function deduplicateEnhanced<T extends { question: string }>(
   const removed = new Set<number>();
   const deduped: T[] = [];
 
+  const discField = options?.discriminatorField;
+
   for (let i = 0; i < afterExact.length; i++) {
     if (removed.has(i)) continue;
 
@@ -217,7 +247,7 @@ export function deduplicateEnhanced<T extends { question: string }>(
 
       const sim = jaccardSimilarity(best.question, afterExact[j]!.question);
       if (sim >= NEAR_DUPLICATE_THRESHOLD) {
-        // ── Structural-sequence guard ──────────────────────────────────────
+        // ── Guard 1: Structural-sequence ──────────────────────────────────
         // If either question carries a structural marker (numbered item,
         // part label, figure reference, etc.) they are siblings in a series,
         // NOT true duplicates — skip removal even at high similarity.
@@ -226,6 +256,21 @@ export function deduplicateEnhanced<T extends { question: string }>(
           hasStructuralMarker(afterExact[j]!.question)
         ) {
           continue;
+        }
+
+        // ── Guard 2: Answer discriminator ─────────────────────────────────
+        // If both questions have distinct non-empty answers they cannot be
+        // the same question, regardless of how similar the stem looks.
+        if (discField !== undefined) {
+          const ansA = best[discField];
+          const ansB = afterExact[j]![discField];
+          if (
+            ansA !== null && ansA !== undefined && ansA !== '' &&
+            ansB !== null && ansB !== undefined && ansB !== '' &&
+            ansA !== ansB
+          ) {
+            continue;
+          }
         }
 
         best = pickBetter(best, afterExact[j]!);

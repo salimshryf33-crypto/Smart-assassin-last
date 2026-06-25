@@ -531,7 +531,9 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
     const normalized = normalizeAll(allParsed);
 
     // ── Phase 5: Enhanced deduplication (exact + near-match Jaccard) ─────────
-    const { deduped, exactRemoved, nearRemoved } = deduplicateEnhanced(normalized);
+    const { deduped, exactRemoved, nearRemoved } = deduplicateEnhanced(normalized, {
+      discriminatorField: 'correctAnswer',
+    });
 
     if (exactRemoved > 0 || nearRemoved > 0) {
       logger.info(
