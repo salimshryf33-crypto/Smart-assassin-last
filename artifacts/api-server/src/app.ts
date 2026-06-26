@@ -33,7 +33,19 @@ app.use(
     },
   }),
 );
-app.use(cors());
+// CORS — controlled via ALLOWED_ORIGINS env var (comma-separated).
+// In dev (not set) → allows all origins.
+// In production → set ALLOWED_ORIGINS=https://yourdomain.com
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim())
+  : null;
+
+app.use(
+  cors({
+    origin: allowedOrigins ?? true,
+    credentials: true,
+  }),
+);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 

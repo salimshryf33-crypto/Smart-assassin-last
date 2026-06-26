@@ -21,6 +21,7 @@ import { gradeAttempt } from '../lib/autoGrader';
 import { updateWeaknessFromAttempt, getStudentWeakTopics } from '../lib/weaknessAnalyzer';
 import { requireAuth, isAdmin } from '../middleware/auth';
 import * as cache from '../services/cacheService';
+import { audit } from '../lib/auditLog';
 
 const router = Router();
 const str = (v: string | string[] | undefined): string =>
@@ -51,6 +52,15 @@ router.post('/start', requireAuth, async (req, res) => {
       scorePct:       null,
       startedAt:      new Date(),
       completedAt:    null,
+    });
+
+    audit({
+      uid:          uid,
+      action:       'exam_solve_start',
+      resourceType: 'exam_attempt',
+      resourceId:   attempt.id,
+      metadata:     { examId },
+      req,
     });
 
     const questions = await examStore.getQuestionsByExam(examId);
@@ -179,6 +189,20 @@ router.post('/:attemptId/submit', requireAuth, async (req, res) => {
   try {
     const result = await gradeAttempt(attemptId);
     updateWeaknessFromAttempt(attemptId, req.user!.uid).catch(() => undefined);
+
+    audit({
+      uid:          req.user!.uid,
+      action:       'exam_solve_complete',
+      resourceType: 'exam_attempt',
+      resourceId:   attemptId,
+      metadata:     {
+        examId:         attempt.examId,
+        totalQuestions: result.totalQuestions,
+        correctCount:   result.correctCount,
+        scorePct:       result.scorePct,
+      },
+      req,
+    });
 
     res.json({
       attemptId,

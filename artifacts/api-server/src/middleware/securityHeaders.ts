@@ -17,11 +17,15 @@ import { type RequestHandler } from 'express';
 
 export const securityHeaders: RequestHandler = (_req, res, next) => {
   res.removeHeader('X-Powered-By');
-  res.setHeader('X-Content-Type-Options',  'nosniff');
-  res.setHeader('X-Frame-Options',          'DENY');
-  res.setHeader('X-XSS-Protection',         '1; mode=block');
-  res.setHeader('Referrer-Policy',          'strict-origin-when-cross-origin');
-  res.setHeader('Permissions-Policy',       'camera=(), microphone=(), geolocation=(), payment=()');
-  res.setHeader('X-Sage-Version',           '2.0');
+  res.setHeader('X-Content-Type-Options',      'nosniff');
+  res.setHeader('X-Frame-Options',              'DENY');
+  res.setHeader('X-XSS-Protection',             '1; mode=block');
+  res.setHeader('Referrer-Policy',              'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy',           'camera=(), microphone=(), geolocation=(), payment=()');
+  res.setHeader('X-Sage-Version',               '2.0');
+  // HSTS — force HTTPS for 1 year (production only; ignored over HTTP in dev)
+  res.setHeader('Strict-Transport-Security',    'max-age=31536000; includeSubDomains');
+  // CSP — API server returns JSON; block framing and restrict sources
+  res.setHeader('Content-Security-Policy',      "default-src 'none'; frame-ancestors 'none'");
   next();
 };

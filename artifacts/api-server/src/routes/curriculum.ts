@@ -18,6 +18,7 @@ import {
 } from '../lib/curriculumStorage';
 import { requireAuth, requireAdmin, isAdmin } from '../middleware/auth';
 import { rateLimit } from '../middleware/rateLimiter';
+import { audit } from '../lib/auditLog';
 import { validatePdf, recordPdfHash } from '../lib/pdfValidator';
 
 const TMP_DIR = path.join(process.cwd(), 'data', 'tmp');
@@ -109,7 +110,10 @@ router.post('/upload', requireAuth, rateLimit('pdf_upload'), upload.single('pdf'
     return;
   }
 
-  const isPublic   = validDocType === 'book';
+  // Books   → always public (admin only upload enforced above)
+  // Exams   → public if uploaded by admin, private if uploaded by student
+  // Notes   → always private (personal to uploader)
+  const isPublic   = validDocType === 'book' || (validDocType === 'exam' && adminCaller);
   const visibility = isPublic ? 'public' : 'private';
   const ownerId    = isPublic ? null : caller.uid;
 
@@ -179,6 +183,16 @@ router.post('/upload', requireAuth, rateLimit('pdf_upload'), upload.single('pdf'
     },
     'Curriculum upload queued'
   );
+
+  // Audit trail — fire-and-forget
+  audit({
+    uid:          caller.uid,
+    action:       'pdf_upload',
+    resourceType: 'curriculum_doc',
+    resourceId:   docId,
+    metadata:     { filename: originalname, docType: validDocType, visibility, sizeKB: pdfCheck.sizeKB },
+    req,
+  });
 
   // Invalidate search cache for this subject — new content makes old results stale.
   cache.invalidateSubjectSearch(country, grade, subject).catch(() => undefined);
@@ -257,6 +271,15 @@ router.delete('/docs/:id', requireAuth, (req, res) => {
   // Invalidate search cache for the deleted doc's subject.
   cache.invalidateSubjectSearch(doc.country, doc.grade, doc.subject).catch(() => undefined);
   req.log.info({ docId, deletedBy: user.uid }, 'Deleted curriculum doc');
+  // Audit trail — fire-and-forget
+  audit({
+    uid:          user.uid,
+    action:       'doc_delete',
+    resourceType: 'curriculum_doc',
+    resourceId:   docId,
+    metadata:     { filename: doc.filename, docType: doc.docType, visibility: doc.visibility },
+    req,
+  });
   res.json({ success: true });
 });
 

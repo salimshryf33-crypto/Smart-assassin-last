@@ -261,6 +261,31 @@ const CREATE_WEAKNESS_SNAPSHOTS = `
   CREATE INDEX IF NOT EXISTS weakness_snapshots_student_idx ON weakness_snapshots (student_id);
 `;
 
+// ─── Flashcards ───────────────────────────────────────────────────────────────
+const CREATE_FLASHCARDS = `
+  CREATE TABLE IF NOT EXISTS flashcards (
+    id            TEXT        PRIMARY KEY,
+    student_id    TEXT        NOT NULL,
+    exam_id       TEXT,
+    attempt_id    TEXT,
+    question_id   TEXT,
+    front         TEXT        NOT NULL,
+    back          TEXT        NOT NULL,
+    source        TEXT        NOT NULL DEFAULT 'exam_mistake',
+    topic         TEXT,
+    subject       TEXT,
+    grade         TEXT,
+    country       TEXT,
+    times_seen    INTEGER     NOT NULL DEFAULT 0,
+    times_correct INTEGER     NOT NULL DEFAULT 0,
+    last_seen_at  TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS idx_fc_student   ON flashcards (student_id);
+  CREATE INDEX IF NOT EXISTS idx_fc_subject   ON flashcards (student_id, subject, grade);
+  CREATE INDEX IF NOT EXISTS idx_fc_attempt   ON flashcards (attempt_id);
+`;
+
 export async function runStartupMigrations(): Promise<void> {
   const db = getPool();
   try {
@@ -276,8 +301,20 @@ export async function runStartupMigrations(): Promise<void> {
     await db.query(CREATE_WEAKNESS_SNAPSHOTS);
     await db.query(CREATE_CURRICULUM_DOCUMENTS);
     await db.query(CREATE_CURRICULUM_CHUNKS);
-    // Backward-compatible: add backup_data column if missing on existing installs
+    await db.query(CREATE_FLASHCARDS);
+    // Backward-compatible additive column migrations
     await db.query(`ALTER TABLE db_backup_log ADD COLUMN IF NOT EXISTS backup_data BYTEA`);
+    await db.query(`ALTER TABLE weakness_snapshots ADD COLUMN IF NOT EXISTS weak_topics_json TEXT`);
+    // Orphan cleanup: remove ghost exam_records with no matching curriculum_documents
+    await db.query(`
+      DELETE FROM exam_records
+      WHERE curriculum_doc_id NOT IN (SELECT id FROM curriculum_documents)
+    `);
+    // Data fixes: ensure doc_type is never null
+    await db.query(`
+      UPDATE curriculum_documents SET doc_type = 'book'
+      WHERE doc_type IS NULL
+    `);
     logger.info('dbMigrations: all startup tables created/verified');
   } catch (err) {
     logger.error({ err }, 'dbMigrations: migration failed');
