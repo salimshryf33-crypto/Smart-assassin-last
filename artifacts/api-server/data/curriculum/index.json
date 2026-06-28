@@ -107,28 +107,6 @@
     "bookTitle": "كيمياء ثالث ثانوي- السودان (١)"
   },
   {
-    "id": "49285e0a-ddd1-4a05-9334-27947d38fafc",
-    "country": "sudan",
-    "grade": "grade12",
-    "subject": "biology",
-    "track": "",
-    "filename": "إمتحان الأحياء 2022 (1).pdf",
-    "totalPages": 8,
-    "chunkCount": 1,
-    "status": "done",
-    "uploadedAt": 1782405256525,
-    "processedAt": 1782405303419,
-    "docType": "book",
-    "extractionMethod": "ocr",
-    "extractedChars": 4564,
-    "avgCharsPerPage": 1521,
-    "extractedPages": 3,
-    "pdfStoragePath": "/home/runner/workspace/artifacts/api-server/data/pdfs/49285e0a-ddd1-4a05-9334-27947d38fafc.pdf",
-    "lastRenderedPage": 4,
-    "visibility": "public",
-    "bookTitle": "إمتحان الأحياء 2022 (1)"
-  },
-  {
     "id": "afdbb30c-a81c-40fa-a128-6fc2f489e1b8",
     "country": "sudan",
     "grade": "grade12",
