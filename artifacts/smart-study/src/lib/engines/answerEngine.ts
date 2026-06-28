@@ -17,6 +17,14 @@
 import { searchCurriculum, formatCurriculumContext } from '../../utils/curriculumSearch';
 import type { ConversationMessage, CurriculumContext } from '../../utils/ai';
 import { resolveModel } from './modelResolver';
+import { getAppCheckToken } from '../appCheckToken';
+
+async function geminiHeaders(): Promise<HeadersInit> {
+  const acToken = await getAppCheckToken();
+  const h: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (acToken) h['X-Firebase-AppCheck'] = acToken;
+  return h;
+}
 
 /**
  * Returned verbatim when no curriculum context is found.
@@ -173,7 +181,7 @@ async function callGemini(
   const attempt1 = async () => {
     const res = await fetch('/api/gemini/generate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await geminiHeaders(),
       body: JSON.stringify({
         model: modelId,
         system_instruction: { parts: [{ text: systemPrompt }] },
@@ -208,7 +216,7 @@ async function callGemini(
   const attempt2 = async () => {
     const res = await fetch('/api/gemini/generate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await geminiHeaders(),
       body: JSON.stringify({
         model: modelId,
         contents: [

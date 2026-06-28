@@ -6,6 +6,7 @@ import { logger } from "./lib/logger";
 import { securityHeaders } from "./middleware/securityHeaders";
 import { requestId } from "./middleware/requestId";
 import { metricsMiddleware } from "./middleware/metricsMiddleware";
+import { appCheckMiddleware } from "./middleware/appCheck";
 
 const app: Express = express();
 
@@ -48,6 +49,7 @@ app.use(
 );
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(appCheckMiddleware);
 
 app.use("/api", router);
 

@@ -1,11 +1,14 @@
 import { getAuth } from 'firebase/auth';
+import { getAppCheckToken } from '../lib/appCheckToken';
 
 async function authHeaders(): Promise<HeadersInit> {
   try {
     const user = getAuth().currentUser;
     if (!user) return {};
-    const token = await user.getIdToken();
-    return { Authorization: `Bearer ${token}` };
+    const [token, acToken] = await Promise.all([user.getIdToken(), getAppCheckToken()]);
+    const h: Record<string, string> = { Authorization: `Bearer ${token}` };
+    if (acToken) h['X-Firebase-AppCheck'] = acToken;
+    return h;
   } catch {
     return {};
   }

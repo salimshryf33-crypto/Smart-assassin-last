@@ -5,6 +5,7 @@
  * identify the caller and enforce ownership / admin checks.
  */
 import { getAuth } from 'firebase/auth';
+import { getAppCheckToken } from '../lib/appCheckToken';
 
 // ─── Types — Curriculum ───────────────────────────────────────────────────────
 
@@ -240,14 +241,19 @@ async function getIdToken(): Promise<string | null> {
 }
 
 async function authHeaders(): Promise<HeadersInit> {
-  const token = await getIdToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  const [token, acToken] = await Promise.all([getIdToken(), getAppCheckToken()]);
+  const h: Record<string, string> = {};
+  if (token)   h['Authorization']      = `Bearer ${token}`;
+  if (acToken) h['X-Firebase-AppCheck'] = acToken;
+  return h;
 }
 
 async function authJson(): Promise<HeadersInit> {
-  const token = await getIdToken();
-  const base: HeadersInit = { 'Content-Type': 'application/json' };
-  return token ? { ...base, Authorization: `Bearer ${token}` } : base;
+  const [token, acToken] = await Promise.all([getIdToken(), getAppCheckToken()]);
+  const h: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token)   h['Authorization']      = `Bearer ${token}`;
+  if (acToken) h['X-Firebase-AppCheck'] = acToken;
+  return h;
 }
 
 // ─── Base paths ───────────────────────────────────────────────────────────────
