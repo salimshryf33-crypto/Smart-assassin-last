@@ -20,7 +20,7 @@ import { logger } from './logger';
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: false },
+  ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: true },
   max: 3,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 5_000,

@@ -25,7 +25,7 @@ if (!DB_URL)     throw new Error('DATABASE_URL not set');
 
 const pool = new pg.Pool({
   connectionString: DB_URL,
-  ssl: DB_URL.includes('localhost') ? false : { rejectUnauthorized: false },
+  ssl: DB_URL.includes('localhost') ? false : { rejectUnauthorized: true },
 });
 
 // ─── Types ────────────────────────────────────────────────────────────────────

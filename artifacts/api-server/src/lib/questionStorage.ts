@@ -31,7 +31,17 @@ const DATA_DIR = path.resolve(
   '../../data/curriculum/questions'
 );
 
+/** Strict UUID v4 pattern — rejects any path-traversal attempts (e.g. "../etc"). */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function assertSafeExamId(examId: string): void {
+  if (!UUID_RE.test(examId)) {
+    throw new Error(`Invalid examId — must be a UUID: "${examId}"`);
+  }
+}
+
 function questionFilePath(examId: string): string {
+  assertSafeExamId(examId);
   return path.join(DATA_DIR, `${examId}.json`);
 }
 
