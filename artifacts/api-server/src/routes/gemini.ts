@@ -5,6 +5,18 @@ const router = Router();
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
 
+/**
+ * Context Mode validation — backend source of truth.
+ * Must stay in sync with contextMode.ts on the frontend.
+ * Backend validates all incoming modes; unknown modes are rejected with 400.
+ */
+const VALID_CONTEXT_MODES = new Set([
+  'BOOK_MODE',
+  'NOTES_MODE',
+  'EXAM_MODE',
+  'QUIZ_MODE',
+]);
+
 function getApiKey(): string | null {
   return process.env.GEMINI_API_KEY ?? null;
 }
@@ -16,10 +28,21 @@ router.post('/generate', async (req, res) => {
     return;
   }
 
-  const { model = 'gemini-1.5-flash-latest', ...body } = req.body as {
+  const { model = 'gemini-1.5-flash-latest', mode, ...body } = req.body as {
     model?: string;
+    mode?: string;
     [key: string]: unknown;
   };
+
+  // ── Mode validation ───────────────────────────────────────────────────────
+  // If a mode is provided, it must be a known registered ContextMode.
+  // Requests without a mode are accepted for backward compatibility (legacy calls).
+  if (mode !== undefined && !VALID_CONTEXT_MODES.has(mode)) {
+    res.status(400).json({ error: `Unknown context mode: "${mode}". Valid modes: ${[...VALID_CONTEXT_MODES].join(', ')}` });
+    return;
+  }
+  // mode is stripped from body — never forwarded to Gemini API.
+  // ─────────────────────────────────────────────────────────────────────────
 
   // ── Cache + Single-Flight (stampede protection) ───────────────────────────
   // getOrCompute ensures only ONE Gemini call runs for identical concurrent requests.

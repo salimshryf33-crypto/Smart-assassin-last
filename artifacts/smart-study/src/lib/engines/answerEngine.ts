@@ -18,6 +18,7 @@ import { searchCurriculum, formatCurriculumContext } from '../../utils/curriculu
 import type { ConversationMessage, CurriculumContext } from '../../utils/ai';
 import { resolveModel } from './modelResolver';
 import { getAppCheckToken } from '../appCheckToken';
+import { type ContextMode, type ContextObject, buildContextObject, DEFAULT_MODE } from './contextMode';
 
 async function geminiHeaders(): Promise<HeadersInit> {
   const acToken = await getAppCheckToken();
@@ -47,7 +48,14 @@ export interface AnswerRequest {
   message: string;
   history: ConversationMessage[];
   curriculum: CurriculumContext;
+  /**
+   * The active Context Mode for this request.
+   * Defaults to BOOK_MODE when not provided (backward compatible).
+   */
+  mode?: ContextMode;
 }
+
+export type { ContextMode, ContextObject };
 
 export interface AnswerResult {
   text: string;
@@ -171,7 +179,8 @@ async function callGemini(
   modelId: string,
   systemPrompt: string,
   history: ConversationMessage[],
-  userMessage: string
+  userMessage: string,
+  mode: ContextMode = DEFAULT_MODE
 ): Promise<string> {
   const contents: ConversationMessage[] = [
     ...history,
@@ -184,6 +193,7 @@ async function callGemini(
       headers: await geminiHeaders(),
       body: JSON.stringify({
         model: modelId,
+        mode,
         system_instruction: { parts: [{ text: systemPrompt }] },
         contents,
         generationConfig: { maxOutputTokens: 1024, temperature: 0.3 },
@@ -219,6 +229,7 @@ async function callGemini(
       headers: await geminiHeaders(),
       body: JSON.stringify({
         model: modelId,
+        mode,
         contents: [
           { role: 'user', parts: [{ text: systemPrompt }] },
           { role: 'model', parts: [{ text: 'مفهوم. سأجيب فقط من المقاطع المُستخرجة.' }] },
@@ -297,12 +308,17 @@ export async function answerQuestion(req: AnswerRequest): Promise<AnswerResult> 
   // Step 2 — Build strict RAG-only system prompt (subject + country + level locked)
   const systemPrompt = buildStrictRAGPrompt(req.curriculum, ragResult.formatted);
 
-  // Step 3 — Call Gemini via backend proxy with retrieved context only
+  // Step 3 — Resolve Context Object for this mode (defaults to BOOK_MODE)
+  const activeMode = req.mode ?? DEFAULT_MODE;
+  buildContextObject(activeMode); // validates mode is registered; result used by Phase 2 handlers
+
+  // Step 4 — Call Gemini via backend proxy with retrieved context only
   const text = await callGemini(
     modelId,
     systemPrompt,
     req.history,
-    req.message
+    req.message,
+    activeMode
   );
 
   return {

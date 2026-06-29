@@ -16,6 +16,7 @@
 
 import { answerQuestion } from './answerEngine';
 import type { AnswerRequest, AnswerResult } from './answerEngine';
+import { type ContextMode, DEFAULT_MODE } from './contextMode';
 
 import { generateCards, evaluateAnswer } from './flashcardGenEngine';
 import type { CardGenRequest, CardGenResult, EvalRequest } from './flashcardGenEngine';
@@ -41,6 +42,11 @@ export interface OrchestratorRequest {
   studentProfile: CardGenRequest['studentProfile'];
   /** Past comprehension check results (for weakness scoring) */
   checkHistory?: UnderstandingRecord[];
+  /**
+   * Active Context Mode — controls which resources Sage consults.
+   * Defaults to BOOK_MODE when not provided (backward compatible).
+   */
+  mode?: ContextMode;
 }
 
 export interface OrchestratorResult {
@@ -153,6 +159,7 @@ export async function orchestrate(
       message: req.message,
       history: req.history,
       curriculum: req.curriculum,
+      mode: req.mode ?? DEFAULT_MODE,
     });
   } catch (err) {
     throw mapAnswerError(err);

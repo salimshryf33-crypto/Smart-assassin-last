@@ -18,6 +18,7 @@ import { getSubjects, getSubjectLabel } from '../utils/curriculum';
 import { formatDate } from '../utils/format';
 import { orchestrate, type UnderstandingCheck, type EvaluationResult } from '../lib/engines/aiOrchestrator';
 import { evaluateAnswer } from '../lib/engines/flashcardGenEngine';
+import { resourceIdToMode, DEFAULT_MODE } from '../lib/engines/contextMode';
 
 // ─── Resource categories ──────────────────────────────────────────────────────
 
@@ -650,6 +651,7 @@ export default function AIChat() {
             level: studentProfile?.level ?? '',
             track: studentProfile?.track ?? '',
           },
+          mode: activeResource ? resourceIdToMode(activeResource) : DEFAULT_MODE,
         },
         {
           generateFlashcards: true,
