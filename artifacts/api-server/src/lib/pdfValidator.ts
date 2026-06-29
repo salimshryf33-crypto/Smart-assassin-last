@@ -155,7 +155,7 @@ export async function validatePdf(
     try {
       const db  = getMigrationPool();
       const row = await db.query<{ doc_id: string; owner_id: string | null }>(
-        `SELECT doc_id, owner_id FROM pdf_upload_hashes WHERE sha256 = $1 LIMIT 1`,
+        `SELECT doc_id, owner_id FROM public.pdf_upload_hashes WHERE sha256 = $1 LIMIT 1`,
         [sha256]
       );
 
@@ -195,7 +195,7 @@ export async function recordPdfHash(
   try {
     const db = getMigrationPool();
     await db.query(
-      `INSERT INTO pdf_upload_hashes (sha256, doc_id, owner_id)
+      `INSERT INTO public.pdf_upload_hashes (sha256, doc_id, owner_id)
        VALUES ($1, $2, $3)
        ON CONFLICT (sha256) DO NOTHING`,
       [sha256, docId, ownerId]
@@ -210,7 +210,7 @@ export async function recordPdfHash(
 export async function removePdfHash(docId: string): Promise<void> {
   try {
     const db = getMigrationPool();
-    await db.query('DELETE FROM pdf_upload_hashes WHERE doc_id = $1', [docId]);
+    await db.query('DELETE FROM public.pdf_upload_hashes WHERE doc_id = $1', [docId]);
   } catch (err) {
     logger.warn({ err, docId }, 'pdfValidator: failed to remove hash — non-fatal');
   }

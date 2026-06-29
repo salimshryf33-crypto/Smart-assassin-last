@@ -15,20 +15,10 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import pg from 'pg';
 import { logger } from './logger';
+import { getSharedPool } from './dbPool';
 
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: true },
-  max: 3,
-  idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis: 5_000,
-});
-
-pool.on('error', (err) => {
-  logger.error({ err }, 'PdfPersistence: idle client error');
-});
+const pool = getSharedPool();
 
 /**
  * Save a PDF file from disk into the database.
@@ -37,7 +27,7 @@ pool.on('error', (err) => {
 export async function savePdfToDb(docId: string, filePath: string): Promise<void> {
   const content = fs.readFileSync(filePath);
   await pool.query(
-    `INSERT INTO curriculum_pdfs (doc_id, content, byte_size, updated_at)
+    `INSERT INTO public.curriculum_pdfs (doc_id, content, byte_size, updated_at)
      VALUES ($1, $2, $3, NOW())
      ON CONFLICT (doc_id) DO UPDATE
        SET content    = EXCLUDED.content,
@@ -54,7 +44,7 @@ export async function savePdfToDb(docId: string, filePath: string): Promise<void
  */
 export async function restorePdfFromDb(docId: string, destPath: string): Promise<boolean> {
   const res = await pool.query<{ content: Buffer }>(
-    'SELECT content FROM curriculum_pdfs WHERE doc_id = $1',
+    'SELECT content FROM public.curriculum_pdfs WHERE doc_id = $1',
     [docId]
   );
   if (res.rows.length === 0) return false;
@@ -70,7 +60,7 @@ export async function restorePdfFromDb(docId: string, destPath: string): Promise
  */
 export async function pdfExistsInDb(docId: string): Promise<boolean> {
   const res = await pool.query(
-    'SELECT 1 FROM curriculum_pdfs WHERE doc_id = $1',
+    'SELECT 1 FROM public.curriculum_pdfs WHERE doc_id = $1',
     [docId]
   );
   return res.rows.length > 0;
@@ -80,6 +70,6 @@ export async function pdfExistsInDb(docId: string): Promise<boolean> {
  * Delete a PDF record from the database. Called when a curriculum doc is deleted.
  */
 export async function deletePdfFromDb(docId: string): Promise<void> {
-  await pool.query('DELETE FROM curriculum_pdfs WHERE doc_id = $1', [docId]);
+  await pool.query('DELETE FROM public.curriculum_pdfs WHERE doc_id = $1', [docId]);
   logger.info({ docId }, 'PdfPersistence: deleted from database');
 }

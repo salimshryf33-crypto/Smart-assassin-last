@@ -41,7 +41,7 @@ export async function grantRole(
 ): Promise<void> {
   const db = getMigrationPool();
   await db.query(
-    `INSERT INTO user_roles (uid, role, granted_by) VALUES ($1, $2, $3)
+    `INSERT INTO public.user_roles (uid, role, granted_by) VALUES ($1, $2, $3)
      ON CONFLICT (uid, role) DO NOTHING`,
     [uid, role, grantedBy ?? null]
   );
@@ -50,14 +50,14 @@ export async function grantRole(
 
 export async function revokeRole(uid: string, role: Role): Promise<void> {
   const db = getMigrationPool();
-  await db.query('DELETE FROM user_roles WHERE uid = $1 AND role = $2', [uid, role]);
+  await db.query('DELETE FROM public.user_roles WHERE uid = $1 AND role = $2', [uid, role]);
   logger.info({ uid, role }, 'rbac: role revoked');
 }
 
 export async function getUserRoles(uid: string): Promise<Role[]> {
   const db = getMigrationPool();
   const res = await db.query<{ role: Role }>(
-    'SELECT role FROM user_roles WHERE uid = $1',
+    'SELECT role FROM public.user_roles WHERE uid = $1',
     [uid]
   );
   return res.rows.map(r => r.role);
@@ -89,7 +89,7 @@ export async function listUsersWithRole(role: Role): Promise<Array<{
   const res = await db.query<{
     uid: string; role: Role; granted_by: string | null; created_at: Date;
   }>(
-    'SELECT uid, role, granted_by, created_at FROM user_roles WHERE role = $1 ORDER BY created_at',
+    'SELECT uid, role, granted_by, created_at FROM public.user_roles WHERE role = $1 ORDER BY created_at',
     [role]
   );
   return res.rows.map(r => ({

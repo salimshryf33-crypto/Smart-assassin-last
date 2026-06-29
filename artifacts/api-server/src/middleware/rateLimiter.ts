@@ -63,7 +63,7 @@ async function consumeToken(uid: string, action: string): Promise<BucketResult> 
       tokens: number;
       last_refill_at: Date;
     }>(
-      'SELECT tokens, last_refill_at FROM rate_limit_buckets WHERE id = $1 FOR UPDATE',
+      'SELECT tokens, last_refill_at FROM public.rate_limit_buckets WHERE id = $1 FOR UPDATE',
       [bucketId]
     );
 
@@ -77,7 +77,7 @@ async function consumeToken(uid: string, action: string): Promise<BucketResult> 
       lastRefillAt = now;
 
       await client.query(
-        `INSERT INTO rate_limit_buckets (id, tokens, last_refill_at, updated_at)
+        `INSERT INTO public.rate_limit_buckets (id, tokens, last_refill_at, updated_at)
          VALUES ($1, $2, $3, $3)
          ON CONFLICT (id) DO NOTHING`,
         [bucketId, tokens, now]
@@ -90,7 +90,7 @@ async function consumeToken(uid: string, action: string): Promise<BucketResult> 
       tokens           = refilled - 1;
 
       await client.query(
-        `UPDATE rate_limit_buckets
+        `UPDATE public.rate_limit_buckets
          SET tokens = $2, last_refill_at = $3, updated_at = $3
          WHERE id = $1`,
         [bucketId, Math.max(tokens, -1), now]
@@ -167,7 +167,7 @@ export async function resetUserBucket(uid: string, action: string): Promise<void
   const cfg = getConfig(action);
   const db  = getMigrationPool();
   await db.query(
-    `INSERT INTO rate_limit_buckets (id, tokens, last_refill_at, updated_at)
+    `INSERT INTO public.rate_limit_buckets (id, tokens, last_refill_at, updated_at)
      VALUES ($1, $2, now(), now())
      ON CONFLICT (id) DO UPDATE
        SET tokens = $2, last_refill_at = now(), updated_at = now()`,
@@ -182,7 +182,7 @@ export async function getBucketStatus(uid: string): Promise<Record<string, {
 }>> {
   const db = getMigrationPool();
   const res = await db.query<{ id: string; tokens: number }>(
-    `SELECT id, tokens FROM rate_limit_buckets WHERE id LIKE $1`,
+    `SELECT id, tokens FROM public.rate_limit_buckets WHERE id LIKE $1`,
     [`${uid}:%`]
   );
   const out: Record<string, { tokens: number; capacity: number; action: string }> = {};

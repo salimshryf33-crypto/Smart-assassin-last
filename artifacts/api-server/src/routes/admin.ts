@@ -36,9 +36,9 @@ router.get('/system-health', requireAuth, requireAdmin, async (req, res) => {
     // DB connectivity + table counts
     const [dbPing, auditCount, bucketCount, roleCount, backupHealth] = await Promise.all([
       db.query<{ now: Date }>('SELECT now()').then(r => ({ ok: true, ts: r.rows[0]?.now })).catch(() => ({ ok: false, ts: null })),
-      db.query<{ count: string }>('SELECT COUNT(*) as count FROM audit_log').then(r => parseInt(r.rows[0]?.count ?? '0', 10)).catch(() => 0),
-      db.query<{ count: string }>('SELECT COUNT(*) as count FROM rate_limit_buckets').then(r => parseInt(r.rows[0]?.count ?? '0', 10)).catch(() => 0),
-      db.query<{ count: string }>('SELECT COUNT(*) as count FROM user_roles').then(r => parseInt(r.rows[0]?.count ?? '0', 10)).catch(() => 0),
+      db.query<{ count: string }>('SELECT COUNT(*) as count FROM public.audit_log').then(r => parseInt(r.rows[0]?.count ?? '0', 10)).catch(() => 0),
+      db.query<{ count: string }>('SELECT COUNT(*) as count FROM public.rate_limit_buckets').then(r => parseInt(r.rows[0]?.count ?? '0', 10)).catch(() => 0),
+      db.query<{ count: string }>('SELECT COUNT(*) as count FROM public.user_roles').then(r => parseInt(r.rows[0]?.count ?? '0', 10)).catch(() => 0),
       getBackupHealth(),
     ]);
 
@@ -384,7 +384,7 @@ router.get('/backup/download', requireAuth, requireAdmin, async (req, res) => {
     const db  = getMigrationPool();
     const row = await db.query<{ id: number; started_at: Date; backup_data: Buffer | null; file_size_kb: number | null }>(
       `SELECT id, started_at, backup_data, file_size_kb
-       FROM db_backup_log
+       FROM public.db_backup_log
        WHERE status = 'success' AND backup_data IS NOT NULL
        ORDER BY started_at DESC LIMIT 1`
     );
@@ -473,11 +473,11 @@ router.get('/usage-summary', requireAuth, requireAdmin, async (_req, res) => {
 
     // ── Exam records from DB ──────────────────────────────────────────────────
     const [questionCount, examRecords] = await Promise.all([
-      db.query<{ count: string }>('SELECT COUNT(*) AS count FROM exam_questions')
+      db.query<{ count: string }>('SELECT COUNT(*) AS count FROM public.exam_questions')
         .then(r => parseInt(r.rows[0]?.count ?? '0', 10))
         .catch(() => 0),
       db.query<{ extraction_status: string; count: string }>(
-        'SELECT extraction_status, COUNT(*) AS count FROM exam_records GROUP BY extraction_status'
+        'SELECT extraction_status, COUNT(*) AS count FROM public.exam_records GROUP BY extraction_status'
       ).then(r => r.rows).catch(() => [] as Array<{ extraction_status: string; count: string }>),
     ]);
 

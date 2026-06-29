@@ -15,21 +15,14 @@
 
 import fs   from 'node:fs';
 import path from 'node:path';
-import { Pool } from 'pg';
 import { logger } from './logger';
+import { getSharedPool } from './dbPool';
 import type { CurriculumDocument, CurriculumChunk } from './curriculumStorage';
 
-// ─── DB pool (reuses DATABASE_URL) ───────────────────────────────────────────
+// ─── DB pool (shared singleton) ───────────────────────────────────────────────
 
-let _pool: Pool | null = null;
-
-function getPool(): Pool {
-  if (!_pool) {
-    const url = process.env['DATABASE_URL'];
-    if (!url) throw new Error('DATABASE_URL not set');
-    _pool = new Pool({ connectionString: url, max: 3 });
-  }
-  return _pool;
+function getPool() {
+  return getSharedPool();
 }
 
 // ─── Disk paths (kept in sync with curriculumStorage) ────────────────────────
@@ -47,7 +40,7 @@ function ensureDirs() {
 export async function upsertDocMetaToDB(doc: CurriculumDocument): Promise<void> {
   const db = getPool();
   await db.query(
-    `INSERT INTO curriculum_documents (
+    `INSERT INTO public.curriculum_documents (
        id, country, grade, subject, track, filename,
        total_pages, chunk_count, status, error_message,
        uploaded_at, processed_at, doc_type, owner_id,
@@ -105,7 +98,7 @@ export async function saveChunksToDB(docId: string, chunks: CurriculumChunk[]): 
   if (chunks.length === 0) return;
   const db = getPool();
 
-  await db.query('DELETE FROM curriculum_chunks WHERE doc_id = $1', [docId]);
+  await db.query('DELETE FROM public.curriculum_chunks WHERE doc_id = $1', [docId]);
 
   // Bulk insert in batches of 50 to stay within parameter limits
   const BATCH = 50;
@@ -125,7 +118,7 @@ export async function saveChunksToDB(docId: string, chunks: CurriculumChunk[]): 
     });
 
     await db.query(
-      `INSERT INTO curriculum_chunks
+      `INSERT INTO public.curriculum_chunks
          (id,doc_id,country,grade,subject,chapter,page_range,chunk_index,
           content,content_normalized,keywords,embedding)
        VALUES ${placeholders.join(',')}
@@ -145,8 +138,8 @@ export async function saveChunksToDB(docId: string, chunks: CurriculumChunk[]): 
 
 export async function deleteDocFromDB(docId: string): Promise<void> {
   const db = getPool();
-  await db.query('DELETE FROM curriculum_chunks  WHERE doc_id = $1', [docId]);
-  await db.query('DELETE FROM curriculum_documents WHERE id = $1',    [docId]);
+  await db.query('DELETE FROM public.curriculum_chunks  WHERE doc_id = $1', [docId]);
+  await db.query('DELETE FROM public.curriculum_documents WHERE id = $1',    [docId]);
 }
 
 // ─── Startup: restore disk from DB ───────────────────────────────────────────
@@ -164,7 +157,7 @@ export async function restoreCurriculumFromDB(): Promise<void> {
 
   // 1. Fetch all docs from DB
   const { rows: dbDocs } = await db.query<Record<string, unknown>>(
-    'SELECT * FROM curriculum_documents ORDER BY uploaded_at ASC'
+    'SELECT * FROM public.curriculum_documents ORDER BY uploaded_at ASC'
   );
 
   if (dbDocs.length === 0) {

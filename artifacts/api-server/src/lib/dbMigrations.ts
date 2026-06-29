@@ -5,38 +5,34 @@
  * All statements use IF NOT EXISTS — safe to run on every restart.
  * Never drops or alters existing columns.
  *
+ * All table names are schema-qualified (public.<table>) because the Neon role
+ * in this project has an empty default search_path.
+ *
  * Order matters: parent tables must be created before child tables
  * that reference them via foreign keys.
  */
-import { Pool } from 'pg';
 import { logger } from './logger';
+import { getSharedPool } from './dbPool';
 
-let pool: Pool | null = null;
-
-function getPool(): Pool {
-  if (!pool) {
-    const url = process.env['DATABASE_URL'];
-    if (!url) throw new Error('DATABASE_URL not set');
-    pool = new Pool({ connectionString: url, max: 3 });
-  }
-  return pool;
+function getPool() {
+  return getSharedPool();
 }
 
 // ─── Rate Limit Buckets ───────────────────────────────────────────────────────
 const CREATE_RATE_LIMIT_BUCKETS = `
-  CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+  CREATE TABLE IF NOT EXISTS public.rate_limit_buckets (
     id              TEXT        PRIMARY KEY,
     tokens          REAL        NOT NULL DEFAULT 0,
     last_refill_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
   );
-  CREATE INDEX IF NOT EXISTS idx_rlb_updated ON rate_limit_buckets (updated_at);
+  CREATE INDEX IF NOT EXISTS idx_rlb_updated ON public.rate_limit_buckets (updated_at);
 `;
 
 // ─── User Roles ───────────────────────────────────────────────────────────────
 const CREATE_USER_ROLES = `
-  CREATE TABLE IF NOT EXISTS user_roles (
+  CREATE TABLE IF NOT EXISTS public.user_roles (
     uid         TEXT        NOT NULL,
     role        TEXT        NOT NULL
                             CHECK (role IN ('student','teacher','moderator','admin','super_admin')),
@@ -44,23 +40,23 @@ const CREATE_USER_ROLES = `
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (uid, role)
   );
-  CREATE INDEX IF NOT EXISTS idx_user_roles_uid ON user_roles (uid);
+  CREATE INDEX IF NOT EXISTS idx_user_roles_uid ON public.user_roles (uid);
 `;
 
 // ─── PDF Upload Hashes ────────────────────────────────────────────────────────
 const CREATE_PDF_UPLOAD_HASHES = `
-  CREATE TABLE IF NOT EXISTS pdf_upload_hashes (
+  CREATE TABLE IF NOT EXISTS public.pdf_upload_hashes (
     sha256      TEXT        PRIMARY KEY,
     doc_id      TEXT        NOT NULL,
     owner_id    TEXT,
     uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
-  CREATE INDEX IF NOT EXISTS idx_puh_owner ON pdf_upload_hashes (owner_id);
+  CREATE INDEX IF NOT EXISTS idx_puh_owner ON public.pdf_upload_hashes (owner_id);
 `;
 
 // ─── DB Backup Log ────────────────────────────────────────────────────────────
 const CREATE_BACKUP_LOG = `
-  CREATE TABLE IF NOT EXISTS db_backup_log (
+  CREATE TABLE IF NOT EXISTS public.db_backup_log (
     id            SERIAL      PRIMARY KEY,
     started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     finished_at   TIMESTAMPTZ,
@@ -76,7 +72,7 @@ const CREATE_BACKUP_LOG = `
 
 // ─── Audit Log ────────────────────────────────────────────────────────────────
 const CREATE_AUDIT_LOG = `
-  CREATE TABLE IF NOT EXISTS audit_log (
+  CREATE TABLE IF NOT EXISTS public.audit_log (
     id            SERIAL      PRIMARY KEY,
     uid           TEXT,
     action        TEXT        NOT NULL,
@@ -87,14 +83,14 @@ const CREATE_AUDIT_LOG = `
     request_id    TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
   );
-  CREATE INDEX IF NOT EXISTS idx_audit_uid        ON audit_log (uid);
-  CREATE INDEX IF NOT EXISTS idx_audit_action     ON audit_log (action);
-  CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_log (created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_audit_uid        ON public.audit_log (uid);
+  CREATE INDEX IF NOT EXISTS idx_audit_action     ON public.audit_log (action);
+  CREATE INDEX IF NOT EXISTS idx_audit_created_at ON public.audit_log (created_at DESC);
 `;
 
 // ─── Exam Records (parent) ────────────────────────────────────────────────────
 const CREATE_EXAM_RECORDS = `
-  CREATE TABLE IF NOT EXISTS exam_records (
+  CREATE TABLE IF NOT EXISTS public.exam_records (
     exam_id             TEXT        PRIMARY KEY,
     curriculum_doc_id   TEXT        NOT NULL,
     title               TEXT        NOT NULL,
@@ -119,16 +115,16 @@ const CREATE_EXAM_RECORDS = `
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
   );
-  CREATE INDEX IF NOT EXISTS exam_records_curriculum_idx ON exam_records (curriculum_doc_id);
-  CREATE INDEX IF NOT EXISTS exam_records_owner_idx      ON exam_records (owner_id);
-  CREATE INDEX IF NOT EXISTS exam_records_status_idx     ON exam_records (extraction_status);
+  CREATE INDEX IF NOT EXISTS exam_records_curriculum_idx ON public.exam_records (curriculum_doc_id);
+  CREATE INDEX IF NOT EXISTS exam_records_owner_idx      ON public.exam_records (owner_id);
+  CREATE INDEX IF NOT EXISTS exam_records_status_idx     ON public.exam_records (extraction_status);
 `;
 
 // ─── Exam Questions (child of exam_records) ───────────────────────────────────
 const CREATE_EXAM_QUESTIONS = `
-  CREATE TABLE IF NOT EXISTS exam_questions (
+  CREATE TABLE IF NOT EXISTS public.exam_questions (
     id                  TEXT        PRIMARY KEY,
-    exam_id             TEXT        NOT NULL REFERENCES exam_records(exam_id) ON DELETE CASCADE,
+    exam_id             TEXT        NOT NULL REFERENCES public.exam_records(exam_id) ON DELETE CASCADE,
     question            TEXT        NOT NULL,
     question_type       TEXT        NOT NULL DEFAULT 'mcq',
     options             JSONB,
@@ -148,16 +144,16 @@ const CREATE_EXAM_QUESTIONS = `
     question_order      INTEGER,
     extracted_at        TIMESTAMPTZ DEFAULT now()
   );
-  CREATE INDEX IF NOT EXISTS exam_questions_exam_idx    ON exam_questions (exam_id);
-  CREATE INDEX IF NOT EXISTS exam_questions_type_idx    ON exam_questions (exam_id, question_type);
-  CREATE INDEX IF NOT EXISTS exam_questions_search_idx  ON exam_questions (country, grade, subject, question_order);
+  CREATE INDEX IF NOT EXISTS exam_questions_exam_idx    ON public.exam_questions (exam_id);
+  CREATE INDEX IF NOT EXISTS exam_questions_type_idx    ON public.exam_questions (exam_id, question_type);
+  CREATE INDEX IF NOT EXISTS exam_questions_search_idx  ON public.exam_questions (country, grade, subject, question_order);
 `;
 
 // ─── Exam Attempts (child of exam_records) ────────────────────────────────────
 const CREATE_EXAM_ATTEMPTS = `
-  CREATE TABLE IF NOT EXISTS exam_attempts (
+  CREATE TABLE IF NOT EXISTS public.exam_attempts (
     id              TEXT        PRIMARY KEY,
-    exam_id         TEXT        NOT NULL REFERENCES exam_records(exam_id) ON DELETE CASCADE,
+    exam_id         TEXT        NOT NULL REFERENCES public.exam_records(exam_id) ON DELETE CASCADE,
     student_id      TEXT        NOT NULL,
     status          TEXT        NOT NULL DEFAULT 'in_progress',
     total_questions INTEGER     DEFAULT 0,
@@ -166,31 +162,31 @@ const CREATE_EXAM_ATTEMPTS = `
     started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at    TIMESTAMPTZ
   );
-  CREATE INDEX IF NOT EXISTS exam_attempts_exam_idx     ON exam_attempts (exam_id);
-  CREATE INDEX IF NOT EXISTS exam_attempts_student_idx  ON exam_attempts (student_id);
-  CREATE INDEX IF NOT EXISTS exam_attempts_status_idx   ON exam_attempts (student_id, status);
+  CREATE INDEX IF NOT EXISTS exam_attempts_exam_idx     ON public.exam_attempts (exam_id);
+  CREATE INDEX IF NOT EXISTS exam_attempts_student_idx  ON public.exam_attempts (student_id);
+  CREATE INDEX IF NOT EXISTS exam_attempts_status_idx   ON public.exam_attempts (student_id, status);
 `;
 
 // ─── Exam Answers (child of exam_attempts + exam_questions) ──────────────────
 const CREATE_EXAM_ANSWERS = `
-  CREATE TABLE IF NOT EXISTS exam_answers (
+  CREATE TABLE IF NOT EXISTS public.exam_answers (
     id              TEXT        PRIMARY KEY,
-    attempt_id      TEXT        NOT NULL REFERENCES exam_attempts(id) ON DELETE CASCADE,
-    question_id     TEXT        NOT NULL REFERENCES exam_questions(id),
+    attempt_id      TEXT        NOT NULL REFERENCES public.exam_attempts(id) ON DELETE CASCADE,
+    question_id     TEXT        NOT NULL REFERENCES public.exam_questions(id),
     student_answer  TEXT,
     is_correct      BOOLEAN,
     grading_method  TEXT        DEFAULT 'pending',
     ai_feedback     TEXT,
     answered_at     TIMESTAMPTZ NOT NULL DEFAULT now()
   );
-  CREATE INDEX IF NOT EXISTS exam_answers_attempt_idx   ON exam_answers (attempt_id);
-  CREATE INDEX IF NOT EXISTS exam_answers_question_idx  ON exam_answers (question_id);
+  CREATE INDEX IF NOT EXISTS exam_answers_attempt_idx   ON public.exam_answers (attempt_id);
+  CREATE INDEX IF NOT EXISTS exam_answers_question_idx  ON public.exam_answers (question_id);
 `;
 
 // ─── Curriculum Documents ─────────────────────────────────────────────────────
 // Source-of-truth for index.json. Disk is cache only.
 const CREATE_CURRICULUM_DOCUMENTS = `
-  CREATE TABLE IF NOT EXISTS curriculum_documents (
+  CREATE TABLE IF NOT EXISTS public.curriculum_documents (
     id                   TEXT        PRIMARY KEY,
     country              TEXT        NOT NULL DEFAULT '',
     grade                TEXT        NOT NULL DEFAULT '',
@@ -218,15 +214,15 @@ const CREATE_CURRICULUM_DOCUMENTS = `
     last_resume_error    TEXT,
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
   );
-  CREATE INDEX IF NOT EXISTS idx_cd_country_grade ON curriculum_documents (country, grade, subject);
-  CREATE INDEX IF NOT EXISTS idx_cd_status        ON curriculum_documents (status);
-  CREATE INDEX IF NOT EXISTS idx_cd_owner         ON curriculum_documents (owner_id);
+  CREATE INDEX IF NOT EXISTS idx_cd_country_grade ON public.curriculum_documents (country, grade, subject);
+  CREATE INDEX IF NOT EXISTS idx_cd_status        ON public.curriculum_documents (status);
+  CREATE INDEX IF NOT EXISTS idx_cd_owner         ON public.curriculum_documents (owner_id);
 `;
 
 // ─── Curriculum Chunks ────────────────────────────────────────────────────────
 // Source-of-truth for docs/*.json. Disk is cache only.
 const CREATE_CURRICULUM_CHUNKS = `
-  CREATE TABLE IF NOT EXISTS curriculum_chunks (
+  CREATE TABLE IF NOT EXISTS public.curriculum_chunks (
     id                   TEXT        PRIMARY KEY,
     doc_id               TEXT        NOT NULL,
     country              TEXT        NOT NULL DEFAULT '',
@@ -241,13 +237,13 @@ const CREATE_CURRICULUM_CHUNKS = `
     embedding            JSONB,
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
   );
-  CREATE INDEX IF NOT EXISTS idx_cc_doc_id  ON curriculum_chunks (doc_id);
-  CREATE INDEX IF NOT EXISTS idx_cc_search  ON curriculum_chunks (country, grade, subject);
+  CREATE INDEX IF NOT EXISTS idx_cc_doc_id  ON public.curriculum_chunks (doc_id);
+  CREATE INDEX IF NOT EXISTS idx_cc_search  ON public.curriculum_chunks (country, grade, subject);
 `;
 
 // ─── Weakness Snapshots (independent) ────────────────────────────────────────
 const CREATE_WEAKNESS_SNAPSHOTS = `
-  CREATE TABLE IF NOT EXISTS weakness_snapshots (
+  CREATE TABLE IF NOT EXISTS public.weakness_snapshots (
     id           SERIAL      PRIMARY KEY,
     student_id   TEXT        NOT NULL,
     country      TEXT        NOT NULL,
@@ -258,12 +254,12 @@ const CREATE_WEAKNESS_SNAPSHOTS = `
     last_updated TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (student_id, country, grade, subject)
   );
-  CREATE INDEX IF NOT EXISTS weakness_snapshots_student_idx ON weakness_snapshots (student_id);
+  CREATE INDEX IF NOT EXISTS weakness_snapshots_student_idx ON public.weakness_snapshots (student_id);
 `;
 
 // ─── Flashcards ───────────────────────────────────────────────────────────────
 const CREATE_FLASHCARDS = `
-  CREATE TABLE IF NOT EXISTS flashcards (
+  CREATE TABLE IF NOT EXISTS public.flashcards (
     id            TEXT        PRIMARY KEY,
     student_id    TEXT        NOT NULL,
     exam_id       TEXT,
@@ -281,9 +277,9 @@ const CREATE_FLASHCARDS = `
     last_seen_at  TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
   );
-  CREATE INDEX IF NOT EXISTS idx_fc_student   ON flashcards (student_id);
-  CREATE INDEX IF NOT EXISTS idx_fc_subject   ON flashcards (student_id, subject, grade);
-  CREATE INDEX IF NOT EXISTS idx_fc_attempt   ON flashcards (attempt_id);
+  CREATE INDEX IF NOT EXISTS idx_fc_student   ON public.flashcards (student_id);
+  CREATE INDEX IF NOT EXISTS idx_fc_subject   ON public.flashcards (student_id, subject, grade);
+  CREATE INDEX IF NOT EXISTS idx_fc_attempt   ON public.flashcards (attempt_id);
 `;
 
 export async function runStartupMigrations(): Promise<void> {
@@ -303,16 +299,16 @@ export async function runStartupMigrations(): Promise<void> {
     await db.query(CREATE_CURRICULUM_CHUNKS);
     await db.query(CREATE_FLASHCARDS);
     // Backward-compatible additive column migrations
-    await db.query(`ALTER TABLE db_backup_log ADD COLUMN IF NOT EXISTS backup_data BYTEA`);
-    await db.query(`ALTER TABLE weakness_snapshots ADD COLUMN IF NOT EXISTS weak_topics_json TEXT`);
+    await db.query(`ALTER TABLE public.db_backup_log ADD COLUMN IF NOT EXISTS backup_data BYTEA`);
+    await db.query(`ALTER TABLE public.weakness_snapshots ADD COLUMN IF NOT EXISTS weak_topics_json TEXT`);
     // Orphan cleanup: remove ghost exam_records with no matching curriculum_documents
     await db.query(`
-      DELETE FROM exam_records
-      WHERE curriculum_doc_id NOT IN (SELECT id FROM curriculum_documents)
+      DELETE FROM public.exam_records
+      WHERE curriculum_doc_id NOT IN (SELECT id FROM public.curriculum_documents)
     `);
     // Data fixes: ensure doc_type is never null
     await db.query(`
-      UPDATE curriculum_documents SET doc_type = 'book'
+      UPDATE public.curriculum_documents SET doc_type = 'book'
       WHERE doc_type IS NULL
     `);
     logger.info('dbMigrations: all startup tables created/verified');

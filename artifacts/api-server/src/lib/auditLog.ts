@@ -60,7 +60,7 @@ export function audit(entry: AuditEntry): void {
 
   const db = getMigrationPool();
   db.query(
-    `INSERT INTO audit_log
+    `INSERT INTO public.audit_log
        (uid, action, resource_type, resource_id, metadata, ip_address, request_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
     [
@@ -116,7 +116,7 @@ export async function listAuditLog(opts: {
   }>(
     `SELECT id, uid, action, resource_type, resource_id, metadata,
             ip_address, request_id, created_at
-     FROM audit_log
+     FROM public.audit_log
      ${whereClause}
      ORDER BY created_at DESC
      LIMIT $${params.length}`,
