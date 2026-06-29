@@ -19,6 +19,7 @@ import type { ConversationMessage, CurriculumContext } from '../../utils/ai';
 import { resolveModel } from './modelResolver';
 import { getAppCheckToken } from '../appCheckToken';
 import { type ContextMode, type ContextObject, buildContextObject, DEFAULT_MODE } from './contextMode';
+import { fetchExamContext, type ExamChatContext } from './examContextBuilder';
 
 async function geminiHeaders(): Promise<HeadersInit> {
   const acToken = await getAppCheckToken();
@@ -259,16 +260,132 @@ async function callGemini(
   }
 }
 
+// ─── EXAM_MODE: Socratic Tutor Prompt ────────────────────────────────────────
+
+/**
+ * Build a Socratic tutor system prompt that blends:
+ *   - Weakness-targeted exam questions (from exam bank)
+ *   - Curriculum RAG context (for explanations when student answers wrong)
+ *
+ * The model acts as a tutor, not a search engine.
+ * It presents one question at a time and evaluates student answers.
+ */
+function buildExamTutorPrompt(
+  curriculum: CurriculumContext,
+  examCtx: ExamChatContext | null,
+  ragContext: string | null
+): string {
+  const countryLabel =
+    curriculum.country === 'egypt'  ? 'مصر'     :
+    curriculum.country === 'sudan'  ? 'السودان' :
+    curriculum.country ?? 'غير محدد';
+
+  const levelLabel =
+    curriculum.level === 'primary'      ? 'المرحلة الابتدائية' :
+    curriculum.level === 'preparatory'  ? 'المرحلة الإعدادية'  :
+    curriculum.level === 'secondary'    ? 'المرحلة الثانوية'   :
+    curriculum.level ?? 'غير محدد';
+
+  const weakSection = examCtx?.hasWeaknessData && examCtx.weakTopics.length > 0
+    ? `نقاط الضعف المرصودة (مرتبة من الأضعف إلى الأقوى):\n${examCtx.weakTopics.slice(0, 6).map((t, i) => `  ${i + 1}. ${t}`).join('\n')}`
+    : 'لا توجد بيانات امتحانات سابقة للطالب — سيتم اختيار أسئلة متنوعة.';
+
+  const examSection = examCtx?.formattedContext ?? 'لا توجد أسئلة في بنك الامتحانات لهذه المادة حالياً.';
+
+  const ragSection = ragContext
+    ? `== مقاطع الكتاب المدرسي (للاستخدام في الشرح فقط) ==\n${ragContext}`
+    : 'لا توجد مقاطع منهجية متاحة حالياً.';
+
+  return `أنت Sage — مدرس خصوصي ذكي في وضع "تدريب الامتحانات".
+
+==================================================
+النطاق المحدد
+==================================================
+- الدولة: ${countryLabel}
+- المرحلة: ${levelLabel}
+- المادة: ${curriculum.subject ?? 'غير محدد'}
+
+==================================================
+${weakSection}
+==================================================
+
+${examSection}
+
+==================================================
+${ragSection}
+==================================================
+
+==================================================
+دورك كمدرس خصوصي — قواعد لا تتجاوزها
+==================================================
+1. عندما يطلب الطالب التدريب أو المراجعة أو الامتحان:
+   → اطرح سؤالاً واحداً فقط من قائمة الأسئلة أعلاه.
+   → ابدأ دائماً بمواضيع الضعف المرصودة.
+   → لا تكشف الإجابة الصحيحة قبل أن يجيب الطالب.
+
+2. عندما يجيب الطالب على سؤال:
+   → قيّم إجابته فوراً (صحيحة / خاطئة / جزئية).
+   → إذا أصاب: امدحه بإيجاز وانتقل للسؤال التالي.
+   → إذا أخطأ: اشرح الإجابة الصحيحة مستخدماً مقاطع الكتاب المدرسي أعلاه.
+
+3. إذا سأل الطالب سؤالاً نظرياً أو مفاهيمياً:
+   → أجب فقط من مقاطع الكتاب المدرسي أعلاه.
+   → لا تستخدم معرفة خارجية أو ذاكرة النموذج.
+
+4. ركّز دائماً على المواضيع الضعيفة قبل القوية.
+5. إذا نفدت أسئلة الضعف، انتقل للأسئلة الأخرى.
+6. لا تخرج عن نطاق المادة والمرحلة المحددتين.
+7. أجب بالعربية الفصحى الواضحة. استخدم markdown وLaTeX للمعادلات.`;
+}
+
+// ─── EXAM_MODE: Socratic Tutor Handler ───────────────────────────────────────
+
+/**
+ * Handles EXAM_MODE requests using the Socratic Tutor approach:
+ *   1. Fetches weakness-targeted exam questions in parallel with RAG retrieval
+ *   2. Builds a tutor system prompt that blends both contexts
+ *   3. Gemini acts as a one-question-at-a-time tutor, not a search engine
+ *
+ * Unlike BOOK_MODE, does NOT gate on RAG returning chunks — exam questions
+ * can still be used for tutoring even without curriculum context.
+ */
+async function answerWithExamMode(req: AnswerRequest): Promise<AnswerResult> {
+  const [modelId, examCtx, ragResult] = await Promise.all([
+    resolveModel(),
+    fetchExamContext(req.curriculum),
+    retrieveContext(req.curriculum, req.message),
+  ]);
+
+  const systemPrompt = buildExamTutorPrompt(
+    req.curriculum,
+    examCtx,
+    ragResult?.formatted ?? null
+  );
+
+  const text = await callGemini(
+    modelId,
+    systemPrompt,
+    req.history,
+    req.message,
+    'EXAM_MODE'
+  );
+
+  return {
+    text,
+    ragChunksFound: ragResult?.chunks ?? 0,
+    retrievedContext: examCtx?.formattedContext ?? ragResult?.formatted ?? null,
+    modelUsed: modelId,
+    noSubject: false,
+    noContext: false,
+  };
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Answer a student question using STRICT RAG-only grounding.
- *
- * Hard gate enforced in code:
- *   - If RAG retrieval returns no chunks → Gemini is NOT called.
- *     Returns NO_CONTEXT_RESPONSE with noContext: true.
- *   - If RAG retrieval returns chunks → Gemini is called with a strict
- *     prompt that forbids any use of general knowledge.
+ * Answer a student question. Dispatches to the correct handler based on mode:
+ *   - EXAM_MODE  → Socratic Tutor (weakness-targeted exam questions + RAG)
+ *   - All others → Strict RAG-only (BOOK_MODE behavior)
  *
  * @throws Error with code 'NO_API_KEY' | 'QUOTA_EXCEEDED' | 'EMPTY_RESPONSE'
  */
@@ -284,7 +401,17 @@ export async function answerQuestion(req: AnswerRequest): Promise<AnswerResult> 
       noContext: false,
     };
   }
+
+  // ── Mode dispatch ──────────────────────────────────────────────────────────
+  const activeMode = req.mode ?? DEFAULT_MODE;
+  buildContextObject(activeMode); // validates mode is registered
+
+  if (activeMode === 'EXAM_MODE') {
+    return answerWithExamMode(req);
+  }
   // ──────────────────────────────────────────────────────────────────────────
+
+  // ── BOOK_MODE (and all non-EXAM modes): Strict RAG path ───────────────────
 
   // Step 1 — RAG retrieval (runs in parallel with model discovery)
   const [modelId, ragResult] = await Promise.all([
@@ -305,14 +432,10 @@ export async function answerQuestion(req: AnswerRequest): Promise<AnswerResult> 
   }
   // ──────────────────────────────────────────────────────────────────────────
 
-  // Step 2 — Build strict RAG-only system prompt (subject + country + level locked)
+  // Step 2 — Build strict RAG-only system prompt
   const systemPrompt = buildStrictRAGPrompt(req.curriculum, ragResult.formatted);
 
-  // Step 3 — Resolve Context Object for this mode (defaults to BOOK_MODE)
-  const activeMode = req.mode ?? DEFAULT_MODE;
-  buildContextObject(activeMode); // validates mode is registered; result used by Phase 2 handlers
-
-  // Step 4 — Call Gemini via backend proxy with retrieved context only
+  // Step 3 — Call Gemini via backend proxy with retrieved context only
   const text = await callGemini(
     modelId,
     systemPrompt,

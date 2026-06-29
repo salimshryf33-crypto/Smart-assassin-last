@@ -83,7 +83,7 @@ const MODE_REGISTRY: Record<ContextMode, ContextObject> = {
     useNotes: false,
     allowExternalKnowledge: false,
     curriculumOnly: true,
-    requiresStudentAnalytics: false,
+    requiresStudentAnalytics: true,
   },
   QUIZ_MODE: {
     mode: 'QUIZ_MODE',

@@ -6,6 +6,7 @@ import adminRouter from "./admin";
 import examRouter from "./exam";
 import examSolverRouter from "./examSolver";
 import examGeneratorRouter from "./examGenerator";
+import examChatRouter from "./examChat";
 
 const router: IRouter = Router();
 
@@ -16,5 +17,6 @@ router.use('/admin', adminRouter);
 router.use('/exams', examRouter);
 router.use('/exams/solve', examSolverRouter);
 router.use('/exams', examGeneratorRouter);
+router.use('/exams', examChatRouter);
 
 export default router;
