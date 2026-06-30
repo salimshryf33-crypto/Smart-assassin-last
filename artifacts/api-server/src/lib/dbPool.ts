@@ -22,8 +22,8 @@ let _pool: Pool | null = null;
 export function getSharedPool(): Pool {
   if (_pool) return _pool;
 
-  const url = process.env['DATABASE_URL'];
-  if (!url) throw new Error('DATABASE_URL not set');
+  const url = process.env['NEON_DATABASE_URL'] ?? process.env['DATABASE_URL'];
+  if (!url) throw new Error('NEON_DATABASE_URL or DATABASE_URL not set');
 
   _pool = new Pool({
     connectionString:        url,

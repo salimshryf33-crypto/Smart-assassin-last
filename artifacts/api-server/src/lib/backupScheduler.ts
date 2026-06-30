@@ -59,8 +59,8 @@ export async function runBackup(): Promise<void> {
     );
     logId = logRes.rows[0]?.id ?? null;
 
-    const dbUrl = process.env['DATABASE_URL'];
-    if (!dbUrl) throw new Error('DATABASE_URL not set');
+    const dbUrl = process.env['NEON_DATABASE_URL'] ?? process.env['DATABASE_URL'];
+    if (!dbUrl) throw new Error('NEON_DATABASE_URL or DATABASE_URL not set');
 
     logger.info({ filePath }, 'backupScheduler: starting pg_dump');
 
