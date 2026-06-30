@@ -20,6 +20,7 @@ import { resolveModel } from './modelResolver';
 import { getAppCheckToken } from '../appCheckToken';
 import { type ContextMode, type ContextObject, buildContextObject, DEFAULT_MODE } from './contextMode';
 import { fetchExamContext, type ExamChatContext } from './examContextBuilder';
+import { buildQuizPrompt, NO_QUIZ_CONTENT_RESPONSE } from './quizEngine';
 
 async function geminiHeaders(): Promise<HeadersInit> {
   const acToken = await getAppCheckToken();
@@ -380,11 +381,71 @@ async function answerWithExamMode(req: AnswerRequest): Promise<AnswerResult> {
   };
 }
 
+// ─── QUIZ_MODE: Quiz Master Handler ──────────────────────────────────────────
+
+/**
+ * Handles QUIZ_MODE requests using a quiz-master approach:
+ *   1. Retrieves curriculum RAG context (REQUIRED — no quiz without source material)
+ *   2. Builds a quiz-master system prompt via quizEngine.buildQuizPrompt()
+ *   3. Gemini generates one question per turn, evaluates answers, explains mistakes
+ *
+ * Hard gate: if RAG returns no chunks → returns NO_QUIZ_CONTENT_RESPONSE.
+ * Gemini is NOT called in that case (same gate as BOOK_MODE).
+ *
+ * Differs from EXAM_MODE:
+ *   - Questions come from curriculum RAG (generated on-the-fly), not the exam bank.
+ *   - No weakness targeting (student uses it for immediate self-testing).
+ */
+async function answerWithQuizMode(req: AnswerRequest): Promise<AnswerResult> {
+  const [modelId, ragResult] = await Promise.all([
+    resolveModel(),
+    retrieveContext(req.curriculum, req.message),
+  ]);
+
+  // Hard gate: quiz requires curriculum content to generate questions from
+  if (!ragResult) {
+    return {
+      text: NO_QUIZ_CONTENT_RESPONSE,
+      ragChunksFound: 0,
+      retrievedContext: null,
+      modelUsed: 'none',
+      noSubject: false,
+      noContext: true,
+    };
+  }
+
+  const systemPrompt = buildQuizPrompt({
+    country:    req.curriculum.country,
+    level:      req.curriculum.level,
+    subject:    req.curriculum.subject ?? '',
+    track:      req.curriculum.track,
+    ragContext: ragResult.formatted,
+  });
+
+  const text = await callGemini(
+    modelId,
+    systemPrompt,
+    req.history,
+    req.message,
+    'QUIZ_MODE'
+  );
+
+  return {
+    text,
+    ragChunksFound: ragResult.chunks,
+    retrievedContext: ragResult.formatted,
+    modelUsed: modelId,
+    noSubject: false,
+    noContext: false,
+  };
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
  * Answer a student question. Dispatches to the correct handler based on mode:
  *   - EXAM_MODE  → Socratic Tutor (weakness-targeted exam questions + RAG)
+ *   - QUIZ_MODE  → Quiz Master (curriculum RAG-generated questions, one per turn)
  *   - All others → Strict RAG-only (BOOK_MODE behavior)
  *
  * @throws Error with code 'NO_API_KEY' | 'QUOTA_EXCEEDED' | 'EMPTY_RESPONSE'
@@ -409,9 +470,13 @@ export async function answerQuestion(req: AnswerRequest): Promise<AnswerResult> 
   if (activeMode === 'EXAM_MODE') {
     return answerWithExamMode(req);
   }
+
+  if (activeMode === 'QUIZ_MODE') {
+    return answerWithQuizMode(req);
+  }
   // ──────────────────────────────────────────────────────────────────────────
 
-  // ── BOOK_MODE (and all non-EXAM modes): Strict RAG path ───────────────────
+  // ── BOOK_MODE (and all non-QUIZ/EXAM modes): Strict RAG path ──────────────
 
   // Step 1 — RAG retrieval (runs in parallel with model discovery)
   const [modelId, ragResult] = await Promise.all([
