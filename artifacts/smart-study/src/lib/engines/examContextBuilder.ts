@@ -30,6 +30,8 @@ export interface ExamChatContext {
   weakTopics: string[];
   questions: ExamQuestion[];
   hasWeaknessData: boolean;
+  /** Total questions in bank for this subject (including those not returned) */
+  totalInBank: number;
   /** Ready-to-embed section for the Gemini system prompt */
   formattedContext: string;
 }
@@ -99,7 +101,8 @@ export async function fetchExamContext(
   try {
     const params = new URLSearchParams();
     if (curriculum.country) params.set('country', curriculum.country);
-    if (curriculum.level)   params.set('grade',   curriculum.level);
+    // NOTE: level format ('secondary') does NOT match DB grade format ('grade12').
+    //       Backend handles this by not filtering on grade — subject+country is sufficient.
     if (curriculum.subject) params.set('subject',  curriculum.subject);
 
     const res = await fetch(`/api/exams/chat-context?${params.toString()}`, {
@@ -112,6 +115,7 @@ export async function fetchExamContext(
       weakTopics: string[];
       questions: ExamQuestion[];
       hasWeaknessData: boolean;
+      totalInBank: number;
     };
 
     const formattedContext = buildFormattedContext(data);

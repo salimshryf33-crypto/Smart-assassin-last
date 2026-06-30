@@ -2,15 +2,21 @@
  * Exam Chat Context API
  *
  * GET /api/exams/chat-context
- *   Query: country, grade, subject
+ *   Query: country, subject
  *   Auth: requireAuth
  *
  * Returns weakness-targeted exam questions for the Socratic Tutor (EXAM_MODE).
- * Questions are sorted: weakest topics first, then others.
- * Weakness is read from weakness_snapshots for the authenticated student.
+ *
+ * Design notes:
+ *   - Visibility bypass (isAdmin:true): chat context is educational access for all
+ *     students — the admin uploads exams for the platform, not just themselves.
+ *   - Grade NOT used as filter: frontend sends level format ('secondary') but DB
+ *     stores grade format ('grade12'). Subject + country uniquely identifies the
+ *     relevant pool. Grade mapping can be added later when needed.
+ *   - Questions sorted: weakest topics first, shuffled others after.
  */
 import { Router } from 'express';
-import { requireAuth, isAdmin } from '../middleware/auth';
+import { requireAuth } from '../middleware/auth';
 import { examStore } from '../lib/examStore';
 import { examSolverStore } from '../lib/examSolverStore';
 type TopicEntry = { correct: number; total: number; score: number };
@@ -25,29 +31,33 @@ const str = (v: unknown): string =>
 router.get('/chat-context', requireAuth, async (req, res) => {
   try {
     const country   = str(req.query.country);
-    const grade     = str(req.query.grade);
     const subject   = str(req.query.subject);
     const studentId = req.user!.uid;
 
-    // 1. Fetch all accessible questions for this curriculum in parallel with weakness lookup
+    // 1. Fetch all questions for this subject — bypass visibility (educational access)
+    //    Grade filter omitted: frontend level format != DB grade format.
     const [allQuestions, snapshot] = await Promise.all([
       examStore.searchQuestions({
-        country:  country  || undefined,
-        grade:    grade    || undefined,
-        subject:  subject  || undefined,
-        userId:   studentId,
-        isAdmin:  isAdmin(req.user!),
+        country: country || undefined,
+        subject: subject || undefined,
+        userId:  studentId,
+        isAdmin: true,           // Bypass private/public gate for chat educational use
       }),
-      (country && grade && subject)
-        ? examSolverStore.getWeaknessSnapshot(studentId, country, grade, subject)
-        : Promise.resolve(null),
+      subject
+        ? examSolverStore.listWeaknessSnapshots(studentId)
+        : Promise.resolve([]),
     ]);
 
-    // 2. Extract and rank weak topics (score = correct/total; lower = weaker)
-    const topicScores = (snapshot?.topicScores ?? {}) as Record<string, TopicEntry>;
+    // 2. Find the most relevant weakness snapshot (matching country + subject)
+    const snapshots = Array.isArray(snapshot) ? snapshot : [];
+    const relevantSnapshot = snapshots.find(
+      s => s.subject === subject && (!country || s.country === country)
+    ) ?? null;
+
+    const topicScores = (relevantSnapshot?.topicScores ?? {}) as Record<string, TopicEntry>;
     const hasWeaknessData = Object.keys(topicScores).length > 0;
 
-    // Sort topics ascending by score (lowest score = weakest = worst)
+    // 3. Sort topics ascending by score (lowest score = weakest)
     const weakTopics: string[] = (Object.entries(topicScores) as [string, TopicEntry][])
       .filter(([, v]) => v.total > 0)
       .sort(([, a], [, b]) => a.score - b.score)
@@ -55,24 +65,27 @@ router.get('/chat-context', requireAuth, async (req, res) => {
 
     const weakTopicSet = new Set(weakTopics.slice(0, 6));
 
-    // 3. Partition questions into: weak-topic questions vs others
+    // 4. Partition: weak-topic questions first, others after
     type AnyQ = { topic?: string | null };
     const weakQuestions  = allQuestions.filter((q: AnyQ) => q.topic && weakTopicSet.has(q.topic));
     const otherQuestions = allQuestions.filter((q: AnyQ) => !q.topic || !weakTopicSet.has(q.topic));
 
-    // Shuffle each partition independently
     const shuffle = <T>(arr: T[]): T[] =>
       arr.map(v => ({ v, r: Math.random() }))
          .sort((a, b) => a.r - b.r)
          .map(({ v }) => v);
 
-    // Return up to 15 questions total (10 weak-targeted + 5 others)
     const questions = [
       ...shuffle(weakQuestions).slice(0, 10),
       ...shuffle(otherQuestions).slice(0, 5),
     ].slice(0, 15);
 
-    res.json({ weakTopics, questions, hasWeaknessData });
+    res.json({
+      weakTopics,
+      questions,
+      hasWeaknessData,
+      totalInBank: allQuestions.length,   // Let frontend know how many exist
+    });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }

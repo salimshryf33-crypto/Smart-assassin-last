@@ -351,11 +351,37 @@ ${ragSection}
  * can still be used for tutoring even without curriculum context.
  */
 async function answerWithExamMode(req: AnswerRequest): Promise<AnswerResult> {
+  // Guard — no subject selected
+  if (!req.curriculum.subject) {
+    return {
+      text: 'يرجى اختيار المادة أولاً لكي أتمكن من تدريبك بأسئلة بنك الامتحانات.',
+      ragChunksFound: 0,
+      retrievedContext: null,
+      modelUsed: '',
+      noSubject: true,
+      noContext: false,
+    };
+  }
+
   const [modelId, examCtx, ragResult] = await Promise.all([
     resolveModel(),
     fetchExamContext(req.curriculum),
     retrieveContext(req.curriculum, req.message),
   ]);
+
+  // Guard — exam bank is completely empty for this subject
+  // Do NOT silently fall back to QUIZ_MODE behavior (that hides the distinction).
+  if (examCtx !== null && examCtx.totalInBank === 0) {
+    const subjectLabel = req.curriculum.subject ?? 'هذه المادة';
+    return {
+      text: `لا توجد امتحانات مرفوعة لمادة **${subjectLabel}** في بنك الامتحانات حتى الآن.\n\nيمكنك:\n- اختيار مادة **الأحياء** أو **الكيمياء** التي يوجد فيها امتحانات مرفوعة.\n- أو استخدام **الاختبار التفاعلي** الذي يولّد أسئلة من الكتاب المدرسي مباشرةً.`,
+      ragChunksFound: 0,
+      retrievedContext: null,
+      modelUsed: '',
+      noSubject: false,
+      noContext: true,
+    };
+  }
 
   const systemPrompt = buildExamTutorPrompt(
     req.curriculum,
