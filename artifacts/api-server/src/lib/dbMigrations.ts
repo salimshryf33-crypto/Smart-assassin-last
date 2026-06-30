@@ -257,6 +257,44 @@ const CREATE_WEAKNESS_SNAPSHOTS = `
   CREATE INDEX IF NOT EXISTS weakness_snapshots_student_idx ON public.weakness_snapshots (student_id);
 `;
 
+// ─── Curriculum Links ─────────────────────────────────────────────────────────
+// Phase 2: permanent exam → curriculum document association.
+// One row per exam (UNIQUE on exam_id).  curriculum_links is the audit trail;
+// exam_records.linked_curriculum_doc_id is the hot-path denormalised cache.
+const CREATE_CURRICULUM_LINKS = `
+  CREATE TABLE IF NOT EXISTS public.curriculum_links (
+    id                  TEXT        PRIMARY KEY,
+    exam_id             TEXT        NOT NULL UNIQUE
+                                    REFERENCES public.exam_records(exam_id) ON DELETE CASCADE,
+    curriculum_doc_id   TEXT,
+    link_type           TEXT        NOT NULL DEFAULT 'auto'
+                                    CHECK (link_type IN ('auto','manual')),
+    status              TEXT        NOT NULL DEFAULT 'pending_review'
+                                    CHECK (status IN ('pending_review','approved','rejected','no_match')),
+    confidence_score    NUMERIC(6,2),
+    match_metadata      JSONB,
+    approved_by         TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS idx_cl_exam_id    ON public.curriculum_links (exam_id);
+  CREATE INDEX IF NOT EXISTS idx_cl_status     ON public.curriculum_links (status);
+  CREATE INDEX IF NOT EXISTS idx_cl_doc_id     ON public.curriculum_links (curriculum_doc_id);
+`;
+
+// ─── Matcher Weights ──────────────────────────────────────────────────────────
+// Stores the adaptive weights used by curriculumMatcher.ts.
+// Single row with id = 'global'; updated on every approval/rejection.
+const CREATE_MATCHER_WEIGHTS = `
+  CREATE TABLE IF NOT EXISTS public.matcher_weights (
+    id          TEXT        PRIMARY KEY DEFAULT 'global',
+    weights     JSONB       NOT NULL DEFAULT '[1.0,1.0,1.0,1.0]'::jsonb,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  INSERT INTO public.matcher_weights (id, weights) VALUES ('global', '[1.0,1.0,1.0,1.0]')
+  ON CONFLICT (id) DO NOTHING;
+`;
+
 // ─── Flashcards ───────────────────────────────────────────────────────────────
 const CREATE_FLASHCARDS = `
   CREATE TABLE IF NOT EXISTS public.flashcards (
@@ -298,9 +336,14 @@ export async function runStartupMigrations(): Promise<void> {
     await db.query(CREATE_CURRICULUM_DOCUMENTS);
     await db.query(CREATE_CURRICULUM_CHUNKS);
     await db.query(CREATE_FLASHCARDS);
+    await db.query(CREATE_CURRICULUM_LINKS);
+    await db.query(CREATE_MATCHER_WEIGHTS);
     // Backward-compatible additive column migrations
     await db.query(`ALTER TABLE public.db_backup_log ADD COLUMN IF NOT EXISTS backup_data BYTEA`);
     await db.query(`ALTER TABLE public.weakness_snapshots ADD COLUMN IF NOT EXISTS weak_topics_json TEXT`);
+    // Phase 2: Curriculum Linking — add linked_curriculum_doc_id to exam_records
+    await db.query(`ALTER TABLE public.exam_records ADD COLUMN IF NOT EXISTS linked_curriculum_doc_id TEXT`);
+    await db.query(`CREATE INDEX IF NOT EXISTS exam_records_linked_idx ON public.exam_records (linked_curriculum_doc_id) WHERE linked_curriculum_doc_id IS NOT NULL`);
     // Orphan cleanup: remove ghost exam_records with no matching curriculum_documents
     await db.query(`
       DELETE FROM public.exam_records

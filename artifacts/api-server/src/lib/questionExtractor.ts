@@ -32,6 +32,18 @@ import { getCachedExtraction, setCachedExtraction, getExtractionCacheStats } fro
 import { saveQuestionsToFile } from './questionStorage';
 import type { InsertExamQuestion } from '@workspace/db';
 
+// Lazy import to avoid circular dependency (curriculumLinker → examStore ← questionExtractor)
+async function fireCurriculumMatch(examId: string): Promise<void> {
+  try {
+    const { matchAndLink } = await import('./curriculumLinker');
+    await matchAndLink(examId);
+  } catch (err) {
+    // Never block extraction — log and move on
+    const { logger: L } = await import('./logger');
+    L.warn({ err, examId }, 'questionExtractor: curriculum match trigger failed (non-fatal)');
+  }
+}
+
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
 
 // ─── Gemini call ──────────────────────────────────────────────────────────────
@@ -663,6 +675,9 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
       { docId, examId, totalQuestions: toInsert.length, score: extractionScoreResult.total },
       'triggerQuestionExtraction: done'
     );
+
+    // Phase 2: trigger curriculum matching asynchronously — never blocks extraction
+    fireCurriculumMatch(examId).catch(() => {});
 
   } catch (err) {
     // Daily quota: re-throw so batch callers can stop

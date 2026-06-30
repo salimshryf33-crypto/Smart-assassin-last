@@ -1,0 +1,335 @@
+/**
+ * curriculumMatcher.ts
+ *
+ * Intelligent Curriculum Matching Engine — Phase 2
+ *
+ * Computes a confidence score (0–100) for every candidate curriculum document
+ * against an uploaded exam, using four data-driven components:
+ *
+ *   Component 1 — Metadata alignment     (max 40 pts)
+ *     Hard filter: country + grade + subject must all match.
+ *     A document that fails any of the three is immediately excluded.
+ *
+ *   Component 2 — Keyword Jaccard        (max 35 pts)
+ *     Jaccard similarity between the unique token sets from all exam questions
+ *     and the combined keyword corpus of all curriculum chunks.
+ *
+ *   Component 3 — Chapter name overlap   (max 20 pts)
+ *     Fraction of exam chapter labels that appear in the curriculum chapters.
+ *
+ *   Component 4 — Temporal alignment     (max 5 pts)
+ *     Exam year vs. document upload year (best-effort; most exams lack this).
+ *
+ * Scores are weighted by [w1, w2, w3, w4].  Weights start at [1.0, 1.0, 1.0, 1.0]
+ * and are updated automatically every time an admin approves or rejects a match
+ * (Continuous Improvement — see reinforceMatch()).
+ *
+ * Rules:
+ *   ≥ 90  → auto-approved (no admin action needed)
+ *   50–89 → pending_review (admin chooses)
+ *   < 50  → no_match (admin links manually)
+ *
+ * Architecture:
+ *   - Fully data-driven — no hardcoded subject / grade / country rules.
+ *   - Zero Gemini calls in this module — pure in-memory computation.
+ *   - Safe to run concurrently for multiple exams.
+ *   - Weights persisted in Neon PostgreSQL (public.matcher_weights).
+ */
+
+import { readIndex, loadChunks, normalizeArabic, tokenize } from './curriculumStorage';
+import { examStore }        from './examStore';
+import { logger }           from './logger';
+import { getSharedPool }    from './dbPool';
+
+// ─── Public types ─────────────────────────────────────────────────────────────
+
+export interface ComponentScores {
+  metadata:  number;   // 0–40
+  keywords:  number;   // 0–35
+  chapters:  number;   // 0–20
+  temporal:  number;   // 0–5
+}
+
+export interface MatchCandidate {
+  docId:      string;
+  docTitle:   string;
+  subject:    string;
+  grade:      string;
+  country:    string;
+  confidence: number;           // 0–100 (weighted, normalised)
+  components: ComponentScores;
+  weights:    [number, number, number, number];
+}
+
+export interface MatchResult {
+  examId:        string;
+  candidates:    MatchCandidate[];
+  bestCandidate: MatchCandidate | null;
+  autoApproved:  boolean;
+  computedAt:    Date;
+}
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+export const AUTO_APPROVE_THRESHOLD = 90;
+export const PENDING_THRESHOLD      = 50;
+
+const DEFAULT_WEIGHTS: [number, number, number, number] = [1.0, 1.0, 1.0, 1.0];
+const MAX_COMPONENTS:  [number, number, number, number] = [40, 35, 20, 5];
+const LEARNING_RATE = 0.05;
+
+// ─── Weight persistence (Neon) ────────────────────────────────────────────────
+
+export async function loadWeights(): Promise<[number, number, number, number]> {
+  try {
+    const pool = getSharedPool();
+    const res  = await pool.query<{ weights: unknown }>(
+      `SELECT weights FROM public.matcher_weights WHERE id = 'global' LIMIT 1`
+    );
+    if (res.rows.length > 0) {
+      const w = res.rows[0]!.weights;
+      if (Array.isArray(w) && w.length === 4) {
+        return w.map(Number) as [number, number, number, number];
+      }
+    }
+  } catch (err) {
+    logger.debug({ err }, 'curriculumMatcher: using default weights (DB unavailable)');
+  }
+  return [...DEFAULT_WEIGHTS] as [number, number, number, number];
+}
+
+export async function saveWeights(w: [number, number, number, number]): Promise<void> {
+  try {
+    const pool = getSharedPool();
+    await pool.query(
+      `INSERT INTO public.matcher_weights (id, weights, updated_at)
+       VALUES ('global', $1::jsonb, now())
+       ON CONFLICT (id) DO UPDATE SET weights = $1::jsonb, updated_at = now()`,
+      [JSON.stringify(w)]
+    );
+  } catch (err) {
+    logger.warn({ err }, 'curriculumMatcher: failed to persist weights');
+  }
+}
+
+// ─── Token extraction ─────────────────────────────────────────────────────────
+
+function examKeywordSet(questions: Array<{ question: string; topic?: string | null; chapter?: string | null }>): Set<string> {
+  const s = new Set<string>();
+  for (const q of questions) {
+    const text = [q.question, q.topic, q.chapter].filter(Boolean).join(' ');
+    for (const tok of tokenize(text)) {
+      if (tok.length >= 3) s.add(normalizeArabic(tok));
+    }
+  }
+  return s;
+}
+
+function examChapterSet(questions: Array<{ chapter?: string | null }>): Set<string> {
+  const s = new Set<string>();
+  for (const q of questions) {
+    if (q.chapter?.trim()) s.add(normalizeArabic(q.chapter.trim()));
+  }
+  return s;
+}
+
+// ─── Jaccard similarity ───────────────────────────────────────────────────────
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersection = 0;
+  for (const v of a) { if (b.has(v)) intersection++; }
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+// ─── Main matcher ─────────────────────────────────────────────────────────────
+
+/**
+ * Compute matching candidates for an exam.
+ * Pure computation — no writes to DB.
+ */
+export async function matchExamToCurriculum(examId: string): Promise<MatchResult> {
+  const computedAt = new Date();
+  const weights    = await loadWeights();
+
+  const [questions, examRecord] = await Promise.all([
+    examStore.getQuestionsByExam(examId),
+    examStore.getExamRecord(examId),
+  ]);
+
+  if (!examRecord) {
+    logger.warn({ examId }, 'curriculumMatcher: exam record not found');
+    return { examId, candidates: [], bestCandidate: null, autoApproved: false, computedAt };
+  }
+
+  if (questions.length === 0) {
+    logger.warn({ examId }, 'curriculumMatcher: no questions — cannot match');
+    return { examId, candidates: [], bestCandidate: null, autoApproved: false, computedAt };
+  }
+
+  const { country, grade, subject, year } = examRecord;
+
+  // Build exam feature vectors
+  const eKeywords = examKeywordSet(questions);
+  const eChapters = examChapterSet(questions);
+
+  // Filter curriculum docs: must be book/note type and match country+grade+subject
+  const docs = readIndex().filter(
+    (d) =>
+      d.docType !== 'exam' &&
+      (d.status === 'done' || d.status === 'partial') &&
+      d.country  === country &&
+      d.grade    === grade &&
+      d.subject  === subject
+  );
+
+  if (docs.length === 0) {
+    logger.info({ examId, country, grade, subject }, 'curriculumMatcher: no curriculum docs match metadata');
+    return { examId, candidates: [], bestCandidate: null, autoApproved: false, computedAt };
+  }
+
+  const candidates: MatchCandidate[] = [];
+
+  for (const doc of docs) {
+    const chunks = loadChunks(doc.id);
+
+    // ── Component 1: Metadata (hard filter already applied above) ─────────────
+    const metadata = 40;
+
+    // ── Component 2: Keyword Jaccard ──────────────────────────────────────────
+    const docKeywords = new Set<string>();
+    for (const chunk of chunks) {
+      for (const kw of chunk.keywords) {
+        const n = normalizeArabic(kw);
+        if (n.length >= 3) docKeywords.add(n);
+      }
+      // Also tokenize raw content (picks up vocabulary not in keyword list)
+      for (const tok of tokenize(chunk.content)) {
+        if (tok.length >= 3) docKeywords.add(normalizeArabic(tok));
+      }
+    }
+    const keywords = jaccard(eKeywords, docKeywords) * 35;
+
+    // ── Component 3: Chapter overlap ──────────────────────────────────────────
+    const docChapters = new Set<string>();
+    for (const chunk of chunks) {
+      if (chunk.chapter?.trim()) docChapters.add(normalizeArabic(chunk.chapter.trim()));
+    }
+    const chapterOverlap = eChapters.size > 0
+      ? [...eChapters].filter((c) => docChapters.has(c)).length / eChapters.size
+      : 0;
+    const chapters = chapterOverlap * 20;
+
+    // ── Component 4: Temporal alignment ───────────────────────────────────────
+    let temporal = 0;
+    if (year && doc.uploadedAt) {
+      const docYear = new Date(doc.uploadedAt).getFullYear().toString();
+      if (docYear === year.slice(0, 4)) temporal = 5;
+    }
+
+    const components: ComponentScores = { metadata, keywords, chapters, temporal };
+
+    // ── Weighted confidence (0–100) ───────────────────────────────────────────
+    const rawScore =
+      weights[0]! * metadata +
+      weights[1]! * keywords +
+      weights[2]! * chapters +
+      weights[3]! * temporal;
+
+    const maxPossible =
+      weights[0]! * 40 +
+      weights[1]! * 35 +
+      weights[2]! * 20 +
+      weights[3]! * 5;
+
+    const confidence =
+      maxPossible > 0
+        ? Math.min(100, Math.round((rawScore / maxPossible) * 10_000) / 100)
+        : 0;
+
+    candidates.push({
+      docId:     doc.id,
+      docTitle:  doc.bookTitle ?? doc.filename ?? doc.id,
+      subject:   doc.subject,
+      grade:     doc.grade,
+      country:   doc.country,
+      confidence,
+      components,
+      weights: [...weights] as [number, number, number, number],
+    });
+  }
+
+  // Sort descending by confidence
+  candidates.sort((a, b) => b.confidence - a.confidence);
+
+  const best         = candidates[0] ?? null;
+  const autoApproved = best !== null && best.confidence >= AUTO_APPROVE_THRESHOLD;
+
+  logger.info(
+    {
+      examId,
+      country, grade, subject,
+      docsEvaluated:  candidates.length,
+      bestDocId:      best?.docId,
+      bestConfidence: best?.confidence,
+      autoApproved,
+    },
+    'curriculumMatcher: matching complete'
+  );
+
+  return { examId, candidates, bestCandidate: best, autoApproved, computedAt };
+}
+
+// ─── Continuous improvement ───────────────────────────────────────────────────
+
+/**
+ * Update weights based on admin feedback.
+ *
+ * On APPROVAL:  reinforce components that scored high (they were useful).
+ * On REJECTION: penalise components that dominated the wrong recommendation.
+ *
+ * Weights are bounded [0.1, 2.0] and normalised so their sum stays at 4.0
+ * (preserving the original scale).
+ *
+ * Stored persistently in Neon → public.matcher_weights.
+ */
+export async function reinforceMatch(
+  components: ComponentScores,
+  approved: boolean
+): Promise<void> {
+  const weights = await loadWeights();
+
+  const scores: [number, number, number, number] = [
+    components.metadata,
+    components.keywords,
+    components.chapters,
+    components.temporal,
+  ];
+
+  for (let i = 0; i < 4; i++) {
+    const contribution = MAX_COMPONENTS[i]! > 0
+      ? scores[i]! / MAX_COMPONENTS[i]!
+      : 0;
+
+    if (approved) {
+      weights[i] = Math.min(2.0, weights[i]! + LEARNING_RATE * contribution);
+    } else {
+      weights[i] = Math.max(0.1, weights[i]! - LEARNING_RATE * contribution);
+    }
+  }
+
+  // Normalise: sum of weights must remain 4.0
+  const sum    = weights.reduce((s, w) => s + w, 0);
+  const factor = 4 / sum;
+  for (let i = 0; i < 4; i++) {
+    weights[i] = Math.round(weights[i]! * factor * 10_000) / 10_000;
+  }
+
+  await saveWeights(weights);
+
+  logger.info(
+    { approved, weights },
+    'curriculumMatcher: weights updated (continuous improvement)'
+  );
+}

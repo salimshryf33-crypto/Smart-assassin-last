@@ -40,6 +40,14 @@ export const examRecordsTable = pgTable(
     /** Full structured diagnostic JSON — pattern counts, scores per chunk, etc. */
     ocrDiagnostics:     jsonb('ocr_diagnostics'),
 
+    /**
+     * Phase 2 — Curriculum Linking.
+     * Set to the approved curriculum document ID once the Linking System
+     * approves a match.  Null = not yet linked (fallback to subject-wide search).
+     * Written by curriculumLinker.ts; read by LinkedCurriculumResolver.
+     */
+    linkedCurriculumDocId: text('linked_curriculum_doc_id'),
+
     createdAt:         timestamp('created_at', { withTimezone: true }).default(sql`NOW()`).notNull(),
     updatedAt:         timestamp('updated_at', { withTimezone: true }).default(sql`NOW()`).notNull(),
   },
@@ -47,6 +55,7 @@ export const examRecordsTable = pgTable(
     index('exam_records_curriculum_idx').on(t.curriculumDocId),
     index('exam_records_owner_idx').on(t.ownerId),
     index('exam_records_status_idx').on(t.extractionStatus),
+    index('exam_records_linked_idx').on(t.linkedCurriculumDocId),
   ]
 );
 

@@ -7,6 +7,7 @@ import { examStore } from "./lib/examStore";
 import { runStartupMigrations } from "./lib/dbMigrations";
 import { startBackupScheduler } from "./lib/backupScheduler";
 import { restoreCurriculumFromDB } from "./lib/curriculumPersistence";
+import { scanUnlinkedExams } from "./lib/curriculumLinker";
 import { hasQuestionsSnapshot, loadQuestionsFromFile } from "./lib/questionStorage";
 
 const rawPort = process.env["PORT"];
@@ -41,6 +42,15 @@ app.listen(port, (err) => {
     .then(() => {
       migrateIndex();
       relabelChapters();
+    })
+    .then(() => {
+      // Phase 2: Curriculum Linking — scan for done exams with no approved link.
+      // Fire-and-forget; never blocks server startup.
+      setTimeout(() => {
+        scanUnlinkedExams().catch((err) =>
+          logger.error({ err }, 'startup: curriculum linking scan failed')
+        );
+      }, 12_000); // wait for curriculum restore + extraction recovery to settle
     })
     .catch((err) =>
       logger.error({ err }, 'startup: curriculum restore/migration failed')

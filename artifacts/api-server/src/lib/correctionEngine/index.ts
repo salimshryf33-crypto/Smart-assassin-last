@@ -77,10 +77,13 @@ export async function gradeAttemptWithCurriculum(
   const resolver   = createCurriculumResolver();
   const curriculum = examRecord
     ? await resolver.resolve({
-        country:         examRecord.country,
-        grade:           examRecord.grade,
-        subject:         examRecord.subject,
-        curriculumDocId: examRecord.curriculumDocId,
+        country:               examRecord.country,
+        grade:                 examRecord.grade,
+        subject:               examRecord.subject,
+        curriculumDocId:       examRecord.curriculumDocId,
+        // Phase 2: pass approved linked doc ID so LinkedCurriculumResolver
+        // can restrict RAG evidence to the authoritative curriculum.
+        linkedCurriculumDocId: (examRecord as Record<string, unknown>)['linkedCurriculumDocId'] as string | null ?? null,
       })
     : {
         strategy: 'temporary_by_subject' as const,
