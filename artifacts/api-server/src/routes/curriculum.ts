@@ -18,6 +18,7 @@ import {
 } from '../lib/curriculumStorage';
 import { requireAuth, requireAdmin, isAdmin } from '../middleware/auth';
 import { rateLimit } from '../middleware/rateLimiter';
+import { computeUploadVisibility } from '../lib/visibilityRules';
 import { audit } from '../lib/auditLog';
 import { validatePdf, recordPdfHash } from '../lib/pdfValidator';
 
@@ -100,7 +101,7 @@ router.post('/upload', requireAuth, rateLimit('pdf_upload'), upload.single('pdf'
       ? (docType as 'book' | 'note' | 'exam')
       : 'book';
 
-  const caller     = req.user!;
+  const caller      = req.user!;
   const adminCaller = isAdmin(caller);
 
   // Only admins can upload curriculum books
@@ -110,12 +111,9 @@ router.post('/upload', requireAuth, rateLimit('pdf_upload'), upload.single('pdf'
     return;
   }
 
-  // Books   → always public (admin only upload enforced above)
-  // Exams   → public if uploaded by admin, private if uploaded by student
-  // Notes   → always private (personal to uploader)
-  const isPublic   = validDocType === 'book' || (validDocType === 'exam' && adminCaller);
-  const visibility = isPublic ? 'public' : 'private';
-  const ownerId    = isPublic ? null : caller.uid;
+  // Visibility is computed by the canonical rule in visibilityRules.ts
+  // (tested independently — single source of truth for the whole server).
+  const { visibility, ownerId } = computeUploadVisibility(validDocType, adminCaller, caller.uid);
 
   // ── Feature 2: PDF Security Validation ──────────────────────────────────────
   const pdfCheck = await validatePdf(req.file.path, { ownerId });

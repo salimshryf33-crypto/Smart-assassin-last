@@ -7,16 +7,17 @@
  *
  * Returns weakness-targeted exam questions for the Socratic Tutor (EXAM_MODE).
  *
- * Design notes:
- *   - Visibility bypass (isAdmin:true): chat context is educational access for all
- *     students — the admin uploads exams for the platform, not just themselves.
- *   - Grade NOT used as filter: frontend sends level format ('secondary') but DB
- *     stores grade format ('grade12'). Subject + country uniquely identifies the
- *     relevant pool. Grade mapping can be added later when needed.
- *   - Questions sorted: weakest topics first, shuffled others after.
+ * Visibility model (enforced by searchQuestions):
+ *   - public  exams (admin-uploaded) → visible to every authenticated student
+ *   - private exams (student-uploaded) → visible to that student only
+ *   This is the correct multi-tenant behaviour — no bypass needed here.
+ *
+ * Grade NOT used as filter: frontend sends level format ('secondary') but DB
+ * stores grade format ('grade12'). Subject + country uniquely identifies the
+ * relevant pool. Grade mapping can be added when multiple grades are needed.
  */
 import { Router } from 'express';
-import { requireAuth } from '../middleware/auth';
+import { requireAuth, isAdmin } from '../middleware/auth';
 import { examStore } from '../lib/examStore';
 import { examSolverStore } from '../lib/examSolverStore';
 type TopicEntry = { correct: number; total: number; score: number };
@@ -34,30 +35,31 @@ router.get('/chat-context', requireAuth, async (req, res) => {
     const subject   = str(req.query.subject);
     const studentId = req.user!.uid;
 
-    // 1. Fetch all questions for this subject — bypass visibility (educational access)
-    //    Grade filter omitted: frontend level format != DB grade format.
-    const [allQuestions, snapshot] = await Promise.all([
+    // 1. Fetch accessible questions using the standard visibility gate:
+    //    - public exams  → all students see them (admin-uploaded platform content)
+    //    - private exams → owner sees their own only
+    //    Grade filter omitted: level ('secondary') ≠ DB format ('grade12').
+    const [allQuestions, snapshots] = await Promise.all([
       examStore.searchQuestions({
-        country: country || undefined,
-        subject: subject || undefined,
+        country: country  || undefined,
+        subject: subject  || undefined,
         userId:  studentId,
-        isAdmin: true,           // Bypass private/public gate for chat educational use
+        isAdmin: isAdmin(req.user!),
       }),
       subject
         ? examSolverStore.listWeaknessSnapshots(studentId)
-        : Promise.resolve([]),
+        : Promise.resolve([] as Awaited<ReturnType<typeof examSolverStore.listWeaknessSnapshots>>),
     ]);
 
-    // 2. Find the most relevant weakness snapshot (matching country + subject)
-    const snapshots = Array.isArray(snapshot) ? snapshot : [];
-    const relevantSnapshot = snapshots.find(
+    // 2. Find weakness snapshot for this subject+country
+    const relevantSnapshot = (Array.isArray(snapshots) ? snapshots : []).find(
       s => s.subject === subject && (!country || s.country === country)
     ) ?? null;
 
-    const topicScores = (relevantSnapshot?.topicScores ?? {}) as Record<string, TopicEntry>;
+    const topicScores    = (relevantSnapshot?.topicScores ?? {}) as Record<string, TopicEntry>;
     const hasWeaknessData = Object.keys(topicScores).length > 0;
 
-    // 3. Sort topics ascending by score (lowest score = weakest)
+    // 3. Sort topics ascending by score (lowest = weakest)
     const weakTopics: string[] = (Object.entries(topicScores) as [string, TopicEntry][])
       .filter(([, v]) => v.total > 0)
       .sort(([, a], [, b]) => a.score - b.score)
@@ -65,9 +67,9 @@ router.get('/chat-context', requireAuth, async (req, res) => {
 
     const weakTopicSet = new Set(weakTopics.slice(0, 6));
 
-    // 4. Partition: weak-topic questions first, others after
+    // 4. Partition: weak-topic questions first, random others after
     type AnyQ = { topic?: string | null };
-    const weakQuestions  = allQuestions.filter((q: AnyQ) => q.topic && weakTopicSet.has(q.topic));
+    const weakQuestions  = allQuestions.filter((q: AnyQ) =>  q.topic && weakTopicSet.has(q.topic));
     const otherQuestions = allQuestions.filter((q: AnyQ) => !q.topic || !weakTopicSet.has(q.topic));
 
     const shuffle = <T>(arr: T[]): T[] =>
@@ -84,7 +86,7 @@ router.get('/chat-context', requireAuth, async (req, res) => {
       weakTopics,
       questions,
       hasWeaknessData,
-      totalInBank: allQuestions.length,   // Let frontend know how many exist
+      totalInBank: allQuestions.length,
     });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
