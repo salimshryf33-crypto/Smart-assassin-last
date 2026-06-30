@@ -16,3 +16,4 @@
 - [Redis Cache Layer](redis-cache-layer.md) — ioredis + in-memory TTL fallback; cacheService.ts + redisService.ts + cacheMiddleware.ts; chat/search/weakness cached; exam/OCR/extraction never cached; X-Cache headers on all cached routes.
 - [Neon Migration](neon-migration.md) — production DB is now Neon PostgreSQL (DATABASE_URL secret); old Replit Helium (PGHOST=helium) decommissioned; backup at artifacts/api-server/data/backups/; migration script at scripts/migrate-to-neon.mjs.
 - [Neon search_path & shared pool](neon-pool-searchpath.md) — Neon role has empty search_path; ALL SQL must use public.table; shared pool (dbPool.ts) + 23-test suite; never modify CONNECTION URL to inject search_path.
+- [Curriculum Authority Correction Engine](correction-engine.md) — Phase 1 complete; correctionEngine/ replaces autoGrader internals; ICurriculumResolver abstraction ready for Phase 2 (Curriculum Linking).
