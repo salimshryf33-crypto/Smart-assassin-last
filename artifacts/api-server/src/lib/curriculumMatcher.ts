@@ -6,18 +6,24 @@
  * Computes a confidence score (0–100) for every candidate curriculum document
  * against an uploaded exam, using four data-driven components:
  *
- *   Component 1 — Metadata alignment     (max 40 pts)
+ *   Component 1 — Metadata alignment     (max 70 pts)
  *     Hard filter: country + grade + subject must all match.
  *     A document that fails any of the three is immediately excluded.
+ *     Carries the highest weight because for small curriculum systems (1 book
+ *     per subject/grade/country), metadata alone is near-sufficient for linking.
+ *     Unique-match bonus: if there is only ONE candidate for the metadata triple,
+ *     the score is 85 (nearly certain), otherwise 70.
  *
- *   Component 2 — Keyword Jaccard        (max 35 pts)
+ *   Component 2 — Keyword Jaccard        (max 20 pts)
  *     Jaccard similarity between the unique token sets from all exam questions
  *     and the combined keyword corpus of all curriculum chunks.
+ *     Note: exam vocabulary ≠ textbook vocabulary, so raw Jaccard is naturally
+ *     low (~0–5%). This component acts as a tiebreaker between multiple books.
  *
- *   Component 3 — Chapter name overlap   (max 20 pts)
+ *   Component 3 — Chapter name overlap   (max 8 pts)
  *     Fraction of exam chapter labels that appear in the curriculum chapters.
  *
- *   Component 4 — Temporal alignment     (max 5 pts)
+ *   Component 4 — Temporal alignment     (max 2 pts)
  *     Exam year vs. document upload year (best-effort; most exams lack this).
  *
  * Scores are weighted by [w1, w2, w3, w4].  Weights start at [1.0, 1.0, 1.0, 1.0]
@@ -26,8 +32,8 @@
  *
  * Rules:
  *   ≥ 90  → auto-approved (no admin action needed)
- *   50–89 → pending_review (admin chooses)
- *   < 50  → no_match (admin links manually)
+ *   ≥ 35  → pending_review (admin chooses)
+ *   < 35  → no_match (admin links manually)
  *
  * Architecture:
  *   - Fully data-driven — no hardcoded subject / grade / country rules.
@@ -85,7 +91,13 @@ export const AUTO_APPROVE_THRESHOLD = 90;
 export const PENDING_THRESHOLD      = 35;
 
 const DEFAULT_WEIGHTS: [number, number, number, number] = [1.0, 1.0, 1.0, 1.0];
-const MAX_COMPONENTS:  [number, number, number, number] = [40, 35, 20, 5];
+// Max pts per component (must sum to 100 when all weights = 1.0):
+//   metadata: 70 — dominant; country+grade+subject is near-sufficient in small systems.
+//             Unique-match bonus: 85 when only 1 candidate exists (see scoring loop).
+//   keywords: 20 — tiebreaker between multiple books for same subject (Jaccard naturally low)
+//   chapters:  8 — tiebreaker via chapter label overlap
+//   temporal:  2 — upload year vs. exam year (most exams lack this data)
+const MAX_COMPONENTS:  [number, number, number, number] = [70, 20, 8, 2];
 const LEARNING_RATE = 0.05;
 
 // ─── Weight persistence (Neon) ────────────────────────────────────────────────
@@ -225,16 +237,24 @@ export async function matchExamToCurriculum(examId: string): Promise<MatchResult
 
   const candidates: MatchCandidate[] = [];
 
+  // Unique-match bonus: when there is exactly ONE candidate for this
+  // country+grade+subject triple, the metadata signal alone is near-conclusive.
+  // Boost metadata score from 70 → 85 so the confidence clearly lands in
+  // pending_review territory and signals high certainty to the admin.
+  const isUniqueCandidate = docs.length === 1;
+
   for (const doc of docs) {
     const chunks = loadChunks(doc.id);
 
     // ── Component 1: Metadata ─────────────────────────────────────────────────
-    // Own doc (examRecord.curriculumDocId) gets full 40 pts — it passed the
-    // explicit-link filter.  Other docs also get 40 pts for passing the
-    // normalised country/grade/subject filter.
-    const metadata = 40;
+    // Every candidate here already passed the country+grade+subject hard filter.
+    // Unique-match bonus: 85 pts when this is the only candidate (unambiguous),
+    // 70 pts when competing against other books for the same metadata triple.
+    const metadata = isUniqueCandidate ? 85 : 70;
 
-    // ── Component 2: Keyword Jaccard ──────────────────────────────────────────
+    // ── Component 2: Keyword Jaccard (max 20 pts) ─────────────────────────────
+    // Exam question vocabulary ≠ textbook explanation vocabulary, so raw Jaccard
+    // is naturally low (~0–5%). Acts as a tiebreaker between multiple books.
     const docKeywords = new Set<string>();
     for (const chunk of chunks) {
       for (const kw of chunk.keywords) {
@@ -246,9 +266,9 @@ export async function matchExamToCurriculum(examId: string): Promise<MatchResult
         if (tok.length >= 3) docKeywords.add(normalizeArabic(tok));
       }
     }
-    const keywords = jaccard(eKeywords, docKeywords) * 35;
+    const keywords = jaccard(eKeywords, docKeywords) * 20;
 
-    // ── Component 3: Chapter overlap ──────────────────────────────────────────
+    // ── Component 3: Chapter overlap (max 8 pts) ──────────────────────────────
     const docChapters = new Set<string>();
     for (const chunk of chunks) {
       if (chunk.chapter?.trim()) docChapters.add(normalizeArabic(chunk.chapter.trim()));
@@ -256,13 +276,13 @@ export async function matchExamToCurriculum(examId: string): Promise<MatchResult
     const chapterOverlap = eChapters.size > 0
       ? [...eChapters].filter((c) => docChapters.has(c)).length / eChapters.size
       : 0;
-    const chapters = chapterOverlap * 20;
+    const chapters = chapterOverlap * 8;
 
-    // ── Component 4: Temporal alignment ───────────────────────────────────────
+    // ── Component 4: Temporal alignment (max 2 pts) ───────────────────────────
     let temporal = 0;
     if (year && doc.uploadedAt) {
       const docYear = new Date(doc.uploadedAt).getFullYear().toString();
-      if (docYear === year.slice(0, 4)) temporal = 5;
+      if (docYear === year.slice(0, 4)) temporal = 2;
     }
 
     const components: ComponentScores = { metadata, keywords, chapters, temporal };
@@ -274,11 +294,14 @@ export async function matchExamToCurriculum(examId: string): Promise<MatchResult
       weights[2]! * chapters +
       weights[3]! * temporal;
 
+    // maxPossible uses MAX_COMPONENTS (not the actual metadata score) so that
+    // the unique-match bonus (85 instead of 70) naturally pushes confidence above
+    // the 70% "normal" ceiling — capped at 100 via Math.min below.
     const maxPossible =
-      weights[0]! * 40 +
-      weights[1]! * 35 +
-      weights[2]! * 20 +
-      weights[3]! * 5;
+      weights[0]! * MAX_COMPONENTS[0]! +   // 70
+      weights[1]! * MAX_COMPONENTS[1]! +   // 20
+      weights[2]! * MAX_COMPONENTS[2]! +   // 8
+      weights[3]! * MAX_COMPONENTS[3]!;    // 2
 
     const confidence =
       maxPossible > 0
