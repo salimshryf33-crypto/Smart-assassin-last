@@ -5,6 +5,7 @@ import {
   RefreshCw, ChevronLeft, CheckCircle, XCircle, AlertCircle,
   Server, Cpu, MemoryStick, FileArchive, Eye, EyeOff,
   Search, FileText, BarChart2, Zap,
+  Link2, ThumbsUp, ThumbsDown, RotateCcw, BookOpen,
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import PageWrapper from '../components/layout/PageWrapper';
@@ -14,6 +15,11 @@ import {
   type SystemHealth, type AuditEntry,
   type MetricsSnapshot, type UsageSummary, type CacheMetrics,
 } from '../utils/adminApi';
+import {
+  fetchPendingLinks, fetchLinkStats, fetchAllLinks,
+  approveCurriculumLink, rejectCurriculumLink, rematchCurriculumLink,
+  type CurriculumLink, type LinkStats,
+} from '../utils/curriculumLinksApi';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -496,15 +502,332 @@ function QuickStats({ health, metrics }: { health: SystemHealth; metrics: Metric
   );
 }
 
+// ─── Curriculum Links Section ─────────────────────────────────────────────────
+
+const STATUS_LABELS: Record<string, string> = {
+  pending_review: 'بانتظار المراجعة',
+  approved:       'مُعتمد',
+  rejected:       'مرفوض',
+  no_match:       'لا تطابق',
+};
+
+const STATUS_COLORS: Record<string, string> = {
+  pending_review: '#f59e0b',
+  approved:       '#34d399',
+  rejected:       '#f87171',
+  no_match:       '#64748b',
+};
+
+function ConfidenceRing({ value }: { value: number }) {
+  const r   = 22;
+  const circ = 2 * Math.PI * r;
+  const dash = (value / 100) * circ;
+  const color = value >= 90 ? '#34d399' : value >= 50 ? '#f59e0b' : '#f87171';
+  return (
+    <svg width={56} height={56} className="flex-shrink-0" style={{ transform: 'rotate(-90deg)' }}>
+      <circle cx={28} cy={28} r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={5} />
+      <circle cx={28} cy={28} r={r} fill="none" stroke={color} strokeWidth={5}
+        strokeDasharray={`${dash} ${circ - dash}`} strokeLinecap="round"
+        style={{ transition: 'stroke-dasharray 0.6s ease' }}
+      />
+      <text x={28} y={28} textAnchor="middle" dominantBaseline="central"
+        style={{ fill: color, fontSize: 11, fontWeight: 700, transform: 'rotate(90deg)', transformOrigin: '28px 28px' }}
+      >
+        {Math.round(value)}%
+      </text>
+    </svg>
+  );
+}
+
+function ComponentBar({ label, value, color }: { label: string; value: number; color: string }) {
+  return (
+    <div className="flex items-center gap-1.5" dir="rtl">
+      <span className="w-16 text-[9px] text-slate-500 text-right">{label}</span>
+      <div className="flex-1 h-1.5 rounded-full" style={{ background: 'rgba(255,255,255,0.06)' }}>
+        <div className="h-1.5 rounded-full transition-all duration-500"
+          style={{ width: `${Math.min(value, 100)}%`, background: color }} />
+      </div>
+      <span className="w-6 text-right text-[9px]" style={{ color }}>{Math.round(value)}</span>
+    </div>
+  );
+}
+
+function LinkCard({
+  link,
+  onApprove,
+  onReject,
+  onRematch,
+  busy,
+}: {
+  link:      CurriculumLink;
+  onApprove: (l: CurriculumLink) => void;
+  onReject:  (l: CurriculumLink) => void;
+  onRematch: (l: CurriculumLink) => void;
+  busy:      string | null;
+}) {
+  const isBusy  = busy === link.examId;
+  const conf    = link.confidenceScore ?? 0;
+  const comps   = link.matchMetadata?.components;
+  const title   = link.matchMetadata?.candidateTitle ?? link.curriculumDocId ?? '—';
+  const color   = STATUS_COLORS[link.status] ?? '#64748b';
+
+  return (
+    <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
+      className="rounded-2xl p-3 space-y-2.5"
+      style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)' }}
+    >
+      {/* Header */}
+      <div className="flex items-start gap-2.5" dir="rtl">
+        <ConfidenceRing value={conf} />
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-semibold text-white truncate">{link.examTitle || link.examId}</p>
+          <div className="flex items-center gap-1 mt-0.5">
+            <BookOpen size={9} style={{ color: '#00c6ff' }} />
+            <p className="text-[10px] text-slate-400 truncate">{title}</p>
+          </div>
+          <div className="flex items-center gap-1.5 mt-1">
+            <span className="text-[9px] font-medium rounded-full px-1.5 py-px"
+              style={{ background: `${color}18`, border: `1px solid ${color}30`, color }}
+            >
+              {STATUS_LABELS[link.status] ?? link.status}
+            </span>
+            <span className="text-[9px] text-slate-600">
+              {link.linkType === 'auto' ? 'آلي' : 'يدوي'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Component breakdown */}
+      {comps && (
+        <div className="space-y-1 px-0.5">
+          <ComponentBar label="البيانات الوصفية" value={comps.metadata}  color="#00c6ff" />
+          <ComponentBar label="الكلمات المفتاحية"  value={comps.keywords}  color="#a78bfa" />
+          <ComponentBar label="الفصول"           value={comps.chapters}  color="#34d399" />
+          <ComponentBar label="التسلسل الزمني"    value={comps.temporal}  color="#f59e0b" />
+        </div>
+      )}
+
+      {/* Action buttons */}
+      {(link.status === 'pending_review') && (
+        <div className="flex gap-1.5">
+          <motion.button whileTap={{ scale: 0.93 }} disabled={isBusy}
+            onClick={() => onApprove(link)}
+            className="flex flex-1 items-center justify-center gap-1 rounded-xl py-1.5 text-[10px] font-semibold transition-opacity"
+            style={{ background: 'rgba(52,211,153,0.12)', border: '1px solid rgba(52,211,153,0.25)', color: '#34d399', opacity: isBusy ? 0.5 : 1 }}
+          >
+            <ThumbsUp size={10} />
+            <span dir="rtl">اعتماد</span>
+          </motion.button>
+          <motion.button whileTap={{ scale: 0.93 }} disabled={isBusy}
+            onClick={() => onReject(link)}
+            className="flex flex-1 items-center justify-center gap-1 rounded-xl py-1.5 text-[10px] font-semibold transition-opacity"
+            style={{ background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.22)', color: '#f87171', opacity: isBusy ? 0.5 : 1 }}
+          >
+            <ThumbsDown size={10} />
+            <span dir="rtl">رفض</span>
+          </motion.button>
+          <motion.button whileTap={{ scale: 0.93 }} disabled={isBusy}
+            onClick={() => onRematch(link)}
+            className="flex items-center justify-center gap-1 rounded-xl px-2.5 py-1.5 text-[10px] font-semibold transition-opacity"
+            style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#94a3b8', opacity: isBusy ? 0.5 : 1 }}
+          >
+            <RotateCcw size={10} className={isBusy ? 'animate-spin' : ''} />
+          </motion.button>
+        </div>
+      )}
+      {link.status !== 'pending_review' && (
+        <motion.button whileTap={{ scale: 0.93 }} disabled={isBusy}
+          onClick={() => onRematch(link)}
+          className="flex w-full items-center justify-center gap-1 rounded-xl py-1.5 text-[10px] font-semibold transition-opacity"
+          style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', color: '#64748b', opacity: isBusy ? 0.5 : 1 }}
+        >
+          <RotateCcw size={10} className={isBusy ? 'animate-spin' : ''} />
+          <span dir="rtl">إعادة المطابقة</span>
+        </motion.button>
+      )}
+    </motion.div>
+  );
+}
+
+function CurriculumLinksSection() {
+  const [stats,   setStats]   = useState<LinkStats | null>(null);
+  const [links,   setLinks]   = useState<CurriculumLink[]>([]);
+  const [filter,  setFilter]  = useState<'pending_review' | 'approved' | 'all'>('pending_review');
+  const [loading, setLoading] = useState(true);
+  const [busy,    setBusy]    = useState<string | null>(null);
+  const [msg,     setMsg]     = useState<{ text: string; ok: boolean } | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [s, l] = await Promise.all([
+        fetchLinkStats(),
+        filter === 'all' ? fetchAllLinks(undefined, 100) : fetchAllLinks(filter, 100),
+      ]);
+      setStats(s);
+      setLinks(l);
+    } catch (e) {
+      setMsg({ text: String(e), ok: false });
+    } finally {
+      setLoading(false);
+    }
+  }, [filter]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const flash = (text: string, ok: boolean) => {
+    setMsg({ text, ok });
+    setTimeout(() => setMsg(null), 3500);
+  };
+
+  const handleApprove = async (link: CurriculumLink) => {
+    setBusy(link.examId);
+    try {
+      await approveCurriculumLink(link.examId);
+      flash('تم الاعتماد بنجاح ✓', true);
+      await load();
+    } catch (e) {
+      flash(String(e), false);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleReject = async (link: CurriculumLink) => {
+    setBusy(link.examId);
+    try {
+      await rejectCurriculumLink(link.examId);
+      flash('تم الرفض — تجري إعادة المطابقة', true);
+      await load();
+    } catch (e) {
+      flash(String(e), false);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleRematch = async (link: CurriculumLink) => {
+    setBusy(link.examId);
+    try {
+      await rematchCurriculumLink(link.examId);
+      flash('جارٍ إعادة المطابقة في الخلفية…', true);
+      setTimeout(load, 3000);
+    } catch (e) {
+      flash(String(e), false);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <SectionTitle icon={Link2} title="ربط الامتحانات بالمناهج" color="#a78bfa" />
+
+      {/* Stats row */}
+      {stats && (
+        <div className="grid grid-cols-4 gap-2" dir="rtl">
+          {[
+            { label: 'انتظار',  value: stats.pending,  color: '#f59e0b' },
+            { label: 'معتمد',   value: stats.approved, color: '#34d399' },
+            { label: 'مرفوض',   value: stats.rejected, color: '#f87171' },
+            { label: 'لا تطابق', value: stats.no_match, color: '#64748b' },
+          ].map(({ label, value, color }) => (
+            <div key={label} className="flex flex-col items-center justify-center rounded-xl py-2.5"
+              style={{ background: `${color}0d`, border: `1px solid ${color}25` }}
+            >
+              <span className="text-base font-bold" style={{ color }}>{value}</span>
+              <span className="text-[9px] text-slate-500">{label}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Filter pills */}
+      <div className="flex gap-1.5" dir="rtl">
+        {([
+          { id: 'pending_review' as const, label: 'بانتظار المراجعة' },
+          { id: 'approved'       as const, label: 'المعتمدة'         },
+          { id: 'all'            as const, label: 'الكل'             },
+        ] as const).map(({ id, label }) => (
+          <button key={id} onClick={() => setFilter(id)}
+            className="rounded-xl px-2.5 py-1 text-[10px] font-semibold transition-all"
+            style={{
+              background: filter === id ? 'rgba(167,139,250,0.15)' : 'rgba(255,255,255,0.04)',
+              border:     filter === id ? '1px solid rgba(167,139,250,0.3)' : '1px solid rgba(255,255,255,0.07)',
+              color:      filter === id ? '#a78bfa' : '#64748b',
+            }}
+          >
+            {label}
+          </button>
+        ))}
+        <motion.button whileTap={{ scale: 0.93 }} onClick={load}
+          className="mr-auto rounded-xl px-2.5 py-1 text-[10px] font-semibold"
+          style={{ background: 'rgba(0,198,255,0.08)', border: '1px solid rgba(0,198,255,0.18)', color: '#00c6ff' }}
+        >
+          <RefreshCw size={10} />
+        </motion.button>
+      </div>
+
+      {/* Feedback toast */}
+      <AnimatePresence>
+        {msg && (
+          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }}
+            className="rounded-xl px-3 py-2 text-xs text-center"
+            style={{
+              background: msg.ok ? 'rgba(52,211,153,0.1)' : 'rgba(248,113,113,0.1)',
+              border: `1px solid ${msg.ok ? 'rgba(52,211,153,0.25)' : 'rgba(248,113,113,0.25)'}`,
+              color: msg.ok ? '#34d399' : '#f87171',
+            }}
+            dir="rtl"
+          >
+            {msg.text}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Link cards */}
+      {loading ? (
+        <div className="flex justify-center py-10">
+          <div className="flex gap-1.5">
+            {[0,1,2].map(i => (
+              <div key={i} className="h-1.5 w-1.5 rounded-full bg-[#a78bfa] animate-pulse"
+                style={{ animationDelay: `${i * 0.2}s` }} />
+            ))}
+          </div>
+        </div>
+      ) : links.length === 0 ? (
+        <div className="flex flex-col items-center gap-2 py-12" dir="rtl">
+          <CheckCircle size={28} className="text-emerald-400" />
+          <p className="text-sm font-semibold text-emerald-400">لا توجد عناصر بانتظار المراجعة</p>
+          <p className="text-[10px] text-slate-500">جميع الامتحانات مربوطة بمناهجها</p>
+        </div>
+      ) : (
+        <div className="space-y-2.5">
+          {links.map(link => (
+            <LinkCard key={link.id} link={link}
+              onApprove={handleApprove}
+              onReject={handleReject}
+              onRematch={handleRematch}
+              busy={busy}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Tabs ─────────────────────────────────────────────────────────────────────
 
-type Tab = 'health' | 'metrics' | 'backup' | 'audit';
+type Tab = 'health' | 'metrics' | 'backup' | 'audit' | 'links';
 
 const TABS: { id: Tab; label: string; icon: typeof Shield }[] = [
   { id: 'health',  label: 'الصحة',    icon: Activity  },
   { id: 'metrics', label: 'المقاييس', icon: BarChart2  },
   { id: 'backup',  label: 'النسخ',    icon: HardDrive  },
   { id: 'audit',   label: 'التدقيق',  icon: Eye        },
+  { id: 'links',   label: 'الربط',    icon: Link2      },
 ];
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
@@ -687,6 +1010,11 @@ export default function AdminDashboard() {
                 {activeTab === 'audit' && (
                   <motion.div key="audit" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
                     <AuditLogSection entries={auditEntries} />
+                  </motion.div>
+                )}
+                {activeTab === 'links' && (
+                  <motion.div key="links" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
+                    <CurriculumLinksSection />
                   </motion.div>
                 )}
               </AnimatePresence>
