@@ -62,17 +62,27 @@ export interface MatchCandidate {
 }
 
 export interface MatchResult {
-  examId:        string;
-  candidates:    MatchCandidate[];
-  bestCandidate: MatchCandidate | null;
-  autoApproved:  boolean;
-  computedAt:    Date;
+  examId:          string;
+  candidates:      MatchCandidate[];
+  bestCandidate:   MatchCandidate | null;
+  autoApproved:    boolean;
+  /**
+   * True when the best candidate is the exam's own curriculumDocId —
+   * i.e. the admin explicitly chose this curriculum at upload time.
+   * Used by matchAndLink to force auto-approve regardless of confidence score.
+   */
+  isExplicitLink:  boolean;
+  computedAt:      Date;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 export const AUTO_APPROVE_THRESHOLD = 90;
-export const PENDING_THRESHOLD      = 50;
+// Minimum confidence to show as pending_review rather than no_match.
+// A pure metadata match (country+grade+subject) scores ~40 pts (40/100 = 40%).
+// Setting threshold at 35 ensures any metadata-matched doc reaches pending_review,
+// while reserving no_match ONLY for exams with genuinely zero curriculum candidates.
+export const PENDING_THRESHOLD      = 35;
 
 const DEFAULT_WEIGHTS: [number, number, number, number] = [1.0, 1.0, 1.0, 1.0];
 const MAX_COMPONENTS:  [number, number, number, number] = [40, 35, 20, 5];
@@ -160,12 +170,12 @@ export async function matchExamToCurriculum(examId: string): Promise<MatchResult
 
   if (!examRecord) {
     logger.warn({ examId }, 'curriculumMatcher: exam record not found');
-    return { examId, candidates: [], bestCandidate: null, autoApproved: false, computedAt };
+    return { examId, candidates: [], bestCandidate: null, autoApproved: false, isExplicitLink: false, computedAt };
   }
 
   if (questions.length === 0) {
     logger.warn({ examId }, 'curriculumMatcher: no questions — cannot match');
-    return { examId, candidates: [], bestCandidate: null, autoApproved: false, computedAt };
+    return { examId, candidates: [], bestCandidate: null, autoApproved: false, isExplicitLink: false, computedAt };
   }
 
   const { country, grade, subject, year } = examRecord;
@@ -174,19 +184,43 @@ export async function matchExamToCurriculum(examId: string): Promise<MatchResult
   const eKeywords = examKeywordSet(questions);
   const eChapters = examChapterSet(questions);
 
-  // Filter curriculum docs: must be book/note type and match country+grade+subject
-  const docs = readIndex().filter(
-    (d) =>
-      d.docType !== 'exam' &&
-      (d.status === 'done' || d.status === 'partial') &&
-      d.country  === country &&
-      d.grade    === grade &&
-      d.subject  === subject
+  // ─── Candidate pool ─────────────────────────────────────────────────────────
+  // Strategy 1: exam.curriculumDocId is the explicit curriculum link set at
+  //             upload time — always include it as the primary candidate.
+  // Strategy 2: Normalised metadata search (country+grade+subject).
+  //             Uses normaliseArabic + lowercase trim to survive spacing/diacritic
+  //             differences that break exact === comparison.
+
+  const allIndexed = readIndex().filter(
+    (d) => d.docType !== 'exam' && (d.status === 'done' || d.status === 'partial')
   );
 
+  // Helper: normalise for fuzzy comparison (strip diacritics, collapse spaces)
+  const normStr = (s: string) => normalizeArabic(s).trim().replace(/\s+/g, ' ');
+
+  // Strategy 1: explicit link set at upload time
+  const ownDoc = examRecord.curriculumDocId
+    ? allIndexed.find((d) => d.id === examRecord.curriculumDocId) ?? null
+    : null;
+
+  // Strategy 2: normalised metadata fallback (excluding ownDoc to avoid duplicates)
+  const metaDocs = allIndexed.filter(
+    (d) =>
+      d.id !== examRecord.curriculumDocId &&
+      normStr(d.country) === normStr(country) &&
+      normStr(d.grade)   === normStr(grade)   &&
+      normStr(d.subject) === normStr(subject)
+  );
+
+  // Combine — own doc is always first candidate (highest priority)
+  const docs = ownDoc ? [ownDoc, ...metaDocs] : metaDocs;
+
   if (docs.length === 0) {
-    logger.info({ examId, country, grade, subject }, 'curriculumMatcher: no curriculum docs match metadata');
-    return { examId, candidates: [], bestCandidate: null, autoApproved: false, computedAt };
+    logger.info(
+      { examId, country, grade, subject, curriculumDocId: examRecord.curriculumDocId },
+      'curriculumMatcher: no curriculum docs match metadata'
+    );
+    return { examId, candidates: [], bestCandidate: null, autoApproved: false, isExplicitLink: false, computedAt };
   }
 
   const candidates: MatchCandidate[] = [];
@@ -194,7 +228,10 @@ export async function matchExamToCurriculum(examId: string): Promise<MatchResult
   for (const doc of docs) {
     const chunks = loadChunks(doc.id);
 
-    // ── Component 1: Metadata (hard filter already applied above) ─────────────
+    // ── Component 1: Metadata ─────────────────────────────────────────────────
+    // Own doc (examRecord.curriculumDocId) gets full 40 pts — it passed the
+    // explicit-link filter.  Other docs also get 40 pts for passing the
+    // normalised country/grade/subject filter.
     const metadata = 40;
 
     // ── Component 2: Keyword Jaccard ──────────────────────────────────────────
@@ -263,22 +300,27 @@ export async function matchExamToCurriculum(examId: string): Promise<MatchResult
   // Sort descending by confidence
   candidates.sort((a, b) => b.confidence - a.confidence);
 
-  const best         = candidates[0] ?? null;
-  const autoApproved = best !== null && best.confidence >= AUTO_APPROVE_THRESHOLD;
+  const best           = candidates[0] ?? null;
+  const autoApproved   = best !== null && best.confidence >= AUTO_APPROVE_THRESHOLD;
+  // isExplicitLink: true when the top candidate is the exam's own curriculumDocId.
+  // matchAndLink uses this to force auto-approve even when confidence < 90.
+  const isExplicitLink = ownDoc !== null && best !== null && best.docId === ownDoc.id;
 
   logger.info(
     {
       examId,
       country, grade, subject,
+      ownDocId:       examRecord.curriculumDocId,
       docsEvaluated:  candidates.length,
       bestDocId:      best?.docId,
       bestConfidence: best?.confidence,
       autoApproved,
+      isExplicitLink,
     },
     'curriculumMatcher: matching complete'
   );
 
-  return { examId, candidates, bestCandidate: best, autoApproved, computedAt };
+  return { examId, candidates, bestCandidate: best, autoApproved, isExplicitLink, computedAt };
 }
 
 // ─── Continuous improvement ───────────────────────────────────────────────────

@@ -138,6 +138,16 @@ export async function rematchCurriculumLink(examId: string): Promise<void> {
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
 }
 
+/** Re-run matching on ALL no_match / unlinked exams (admin recovery action). */
+export async function rematchAllNoMatch(): Promise<void> {
+  const res = await fetch('/api/curriculum-links/rematch-all', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+    body:    '{}',
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+}
+
 export async function manualCurriculumLink(examId: string, docId: string): Promise<CurriculumLink> {
   const res = await fetch(`/api/curriculum-links/${examId}/manual`, {
     method:  'POST',

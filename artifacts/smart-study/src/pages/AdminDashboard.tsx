@@ -18,6 +18,7 @@ import {
 import {
   fetchPendingLinks, fetchLinkStats, fetchAllLinks,
   approveCurriculumLink, rejectCurriculumLink, rematchCurriculumLink,
+  rematchAllNoMatch,
   type CurriculumLink, type LinkStats,
 } from '../utils/curriculumLinksApi';
 
@@ -651,12 +652,13 @@ function LinkCard({
 }
 
 function CurriculumLinksSection() {
-  const [stats,   setStats]   = useState<LinkStats | null>(null);
-  const [links,   setLinks]   = useState<CurriculumLink[]>([]);
-  const [filter,  setFilter]  = useState<'pending_review' | 'approved' | 'all'>('pending_review');
-  const [loading, setLoading] = useState(true);
-  const [busy,    setBusy]    = useState<string | null>(null);
-  const [msg,     setMsg]     = useState<{ text: string; ok: boolean } | null>(null);
+  const [stats,        setStats]        = useState<LinkStats | null>(null);
+  const [links,        setLinks]        = useState<CurriculumLink[]>([]);
+  const [filter,       setFilter]       = useState<'pending_review' | 'approved' | 'all'>('pending_review');
+  const [loading,      setLoading]      = useState(true);
+  const [busy,         setBusy]         = useState<string | null>(null);
+  const [rematchingAll, setRematchingAll] = useState(false);
+  const [msg,          setMsg]          = useState<{ text: string; ok: boolean } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -720,6 +722,19 @@ function CurriculumLinksSection() {
     }
   };
 
+  const handleRematchAll = async () => {
+    setRematchingAll(true);
+    try {
+      await rematchAllNoMatch();
+      flash('تمت إعادة مطابقة الكل — تحقق بعد لحظات', true);
+      setTimeout(load, 5000);
+    } catch (e) {
+      flash(String(e), false);
+    } finally {
+      setRematchingAll(false);
+    }
+  };
+
   return (
     <div className="space-y-3">
       <SectionTitle icon={Link2} title="ربط الامتحانات بالمناهج" color="#a78bfa" />
@@ -762,10 +777,19 @@ function CurriculumLinksSection() {
           </button>
         ))}
         <motion.button whileTap={{ scale: 0.93 }} onClick={load}
-          className="mr-auto rounded-xl px-2.5 py-1 text-[10px] font-semibold"
+          className="rounded-xl px-2.5 py-1 text-[10px] font-semibold"
           style={{ background: 'rgba(0,198,255,0.08)', border: '1px solid rgba(0,198,255,0.18)', color: '#00c6ff' }}
         >
           <RefreshCw size={10} />
+        </motion.button>
+        <motion.button whileTap={{ scale: 0.93 }} onClick={handleRematchAll}
+          disabled={rematchingAll}
+          className="flex items-center gap-1 rounded-xl px-2.5 py-1 text-[10px] font-semibold transition-opacity"
+          style={{ background: 'rgba(167,139,250,0.1)', border: '1px solid rgba(167,139,250,0.22)', color: '#a78bfa', opacity: rematchingAll ? 0.5 : 1 }}
+          dir="rtl"
+        >
+          <RotateCcw size={10} className={rematchingAll ? 'animate-spin' : ''} />
+          إعادة مطابقة الكل
         </motion.button>
       </div>
 

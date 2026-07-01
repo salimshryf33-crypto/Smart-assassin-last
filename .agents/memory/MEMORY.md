@@ -17,3 +17,4 @@
 - [Neon Migration](neon-migration.md) — production DB is now Neon PostgreSQL (DATABASE_URL secret); old Replit Helium (PGHOST=helium) decommissioned; backup at artifacts/api-server/data/backups/; migration script at scripts/migrate-to-neon.mjs.
 - [Neon search_path & shared pool](neon-pool-searchpath.md) — Neon role has empty search_path; ALL SQL must use public.table; shared pool (dbPool.ts) + 23-test suite; never modify CONNECTION URL to inject search_path.
 - [Curriculum Authority Correction Engine](correction-engine.md) — Phase 1 complete; correctionEngine/ replaces autoGrader internals; ICurriculumResolver abstraction ready for Phase 2 (Curriculum Linking).
+- [Curriculum Linking Matcher](curriculum-linking-matcher.md) — PENDING_THRESHOLD=35 (not 50); exam.curriculumDocId = exam's own doc (docType:'exam') → filtered out → isExplicitLink always false; metadata-only score=40% → needs threshold ≤35 for pending_review.

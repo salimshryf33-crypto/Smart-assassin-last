@@ -185,7 +185,15 @@ export async function matchAndLink(examId: string): Promise<void> {
     return;
   }
 
-  const status: LinkStatus = result.autoApproved
+  // ── Effective auto-approve decision ────────────────────────────────────────
+  // Two paths to auto-approve:
+  //   (a) confidence ≥ AUTO_APPROVE_THRESHOLD (90)
+  //   (b) isExplicitLink: the best candidate IS examRecord.curriculumDocId —
+  //       i.e. the admin explicitly chose this curriculum at upload time.
+  //       We honour that selection without requiring high keyword overlap.
+  const effectiveAutoApprove = result.autoApproved || result.isExplicitLink;
+
+  const status: LinkStatus = effectiveAutoApprove
     ? 'approved'
     : best.confidence >= PENDING_THRESHOLD
     ? 'pending_review'
@@ -198,10 +206,13 @@ export async function matchAndLink(examId: string): Promise<void> {
     status,
     confidence:      best.confidence,
     metadata:        {
-      computedAt:  result.computedAt,
-      components:  best.components,
-      weights:     best.weights,
-      allCandidates: result.candidates.slice(0, 5).map((c) => ({
+      computedAt:     result.computedAt,
+      components:     best.components,
+      weights:        best.weights,
+      isExplicitLink: result.isExplicitLink,
+      candidateTitle: best.docTitle,
+      candidateDocId: best.docId,
+      allCandidates:  result.candidates.slice(0, 5).map((c) => ({
         docId:      c.docId,
         docTitle:   c.docTitle,
         confidence: c.confidence,
@@ -209,13 +220,13 @@ export async function matchAndLink(examId: string): Promise<void> {
     },
   });
 
-  if (result.autoApproved) {
+  if (effectiveAutoApprove) {
     // Persist the approved link into exam_records (hot path for Correction Engine)
     await setLinkedDocId(examId, best.docId);
     // Reinforce weights (continuous improvement)
     await reinforceMatch(best.components, true).catch(() => {});
     logger.info(
-      { examId, docId: best.docId, confidence: best.confidence },
+      { examId, docId: best.docId, confidence: best.confidence, isExplicitLink: result.isExplicitLink },
       'curriculumLinker: auto-approved ✓'
     );
   } else {
@@ -402,11 +413,14 @@ async function setLinkedDocId(examId: string, docId: string): Promise<void> {
 // ─── Startup scan ─────────────────────────────────────────────────────────────
 
 /**
- * Scan all 'done' exam records that have no link yet and run matching.
+ * Scan all 'done' exam records that need (re-)matching:
+ *   - no link row at all (brand new exam)
+ *   - link exists but status = 'no_match' (previous match failed; retry with new logic)
+ *   - link is approved but linked_curriculum_doc_id is still NULL (write race)
  * Called once at server startup and fire-and-forgotten.
  */
 export async function scanUnlinkedExams(): Promise<void> {
-  logger.info('curriculumLinker: scanning for unlinked exams…');
+  logger.info('curriculumLinker: scanning for unlinked / no_match exams…');
 
   const res = await pool().query<{ exam_id: string }>(
     `SELECT er.exam_id
@@ -414,7 +428,7 @@ export async function scanUnlinkedExams(): Promise<void> {
      LEFT JOIN public.curriculum_links cl ON cl.exam_id = er.exam_id
      WHERE er.extraction_status = 'done'
        AND er.linked_curriculum_doc_id IS NULL
-       AND cl.exam_id IS NULL
+       AND (cl.exam_id IS NULL OR cl.status = 'no_match')
      ORDER BY er.created_at`
   );
 
@@ -423,7 +437,7 @@ export async function scanUnlinkedExams(): Promise<void> {
     return;
   }
 
-  logger.info({ count: res.rows.length }, 'curriculumLinker: found unlinked exams, starting batch');
+  logger.info({ count: res.rows.length }, 'curriculumLinker: found exams to (re-)match, starting batch');
 
   for (const row of res.rows) {
     try {

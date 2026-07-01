@@ -27,6 +27,7 @@ import {
   rejectAndRematch,
   manualLink,
   matchAndLink,
+  scanUnlinkedExams,
 }                                    from '../lib/curriculumLinker';
 import { matchExamToCurriculum }     from '../lib/curriculumMatcher';
 import { loadWeights }               from '../lib/curriculumMatcher';
@@ -188,6 +189,23 @@ router.post('/:examId/rematch', requireAuth, requireAdmin, async (req, res) => {
     res.json({ success: true, message: 'Rematch triggered — check back shortly.' });
   } catch (err) {
     logger.error({ err }, 'POST /curriculum-links/rematch: error');
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ─── POST /api/curriculum-links/rematch-all ───────────────────────────────────
+// Re-runs matching for every exam with no_match status or no link at all.
+// Useful after fixing the matching algorithm to recover previously failed links.
+router.post('/rematch-all', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    // Fire-and-forget
+    scanUnlinkedExams().catch((err) =>
+      logger.error({ err }, 'curriculum-links: rematch-all failed')
+    );
+    logger.info('curriculum-links: rematch-all triggered by admin');
+    res.json({ success: true, message: 'Rematch-all triggered — all no_match exams will be reprocessed.' });
+  } catch (err) {
+    logger.error({ err }, 'POST /curriculum-links/rematch-all: error');
     res.status(500).json({ error: String(err) });
   }
 });
