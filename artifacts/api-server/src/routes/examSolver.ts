@@ -161,8 +161,12 @@ router.post('/:attemptId/answer', requireAuth, async (req, res) => {
   if (attempt.status !== 'in_progress') { res.status(409).json({ error: 'Attempt already completed' }); return; }
 
   try {
+    // Use a deterministic ID from (attemptId, questionId) so that changing
+    // an answer updates the existing row instead of inserting a duplicate.
+    // A new UUID each time would create multiple rows per question and cause
+    // duplicate grading + incorrect score calculation.
     await examSolverStore.upsertAnswer({
-      id:             uuidv4(),
+      id:             `${attemptId}::${questionId}`,
       attemptId,
       questionId,
       studentAnswer:  answer ?? null,

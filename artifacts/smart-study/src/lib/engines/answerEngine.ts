@@ -21,6 +21,10 @@ import { getAppCheckToken } from '../appCheckToken';
 import { type ContextMode, type ContextObject, buildContextObject, DEFAULT_MODE } from './contextMode';
 import { fetchExamContext, type ExamChatContext } from './examContextBuilder';
 import { buildQuizPrompt, NO_QUIZ_CONTENT_RESPONSE } from './quizEngine';
+import {
+  type StudentLearningContext,
+  formatStudentContextSection,
+} from './studentContextBuilder';
 
 async function geminiHeaders(): Promise<HeadersInit> {
   const acToken = await getAppCheckToken();
@@ -55,6 +59,16 @@ export interface AnswerRequest {
    * Defaults to BOOK_MODE when not provided (backward compatible).
    */
   mode?: ContextMode;
+  /**
+   * Phase 3 — Temporary student learning context.
+   *
+   * Built from existing Sage data (flashcard weakness profile) by the
+   * orchestrator BEFORE calling the answer engine. Lives only for the
+   * duration of this request — never stored permanently.
+   *
+   * Optional / backward-compatible: if absent the prompt is unchanged.
+   */
+  studentContext?: StudentLearningContext;
 }
 
 export type { ContextMode, ContextObject };
@@ -122,10 +136,15 @@ async function retrieveContext(
  * Build a system prompt that enforces strict retrieval-grounded answering.
  * Contains NO academic fallback, NO general knowledge allowance.
  * Only called when ragContext is non-null.
+ *
+ * Phase 3: optional studentContext appended when available.
+ * The context section adds personalisation hints (depth, weak topics, optional
+ * recommendation guidance) without relaxing any RAG-grounding rules.
  */
 function buildStrictRAGPrompt(
   curriculum: CurriculumContext,
-  ragContext: string
+  ragContext: string,
+  studentContext?: StudentLearningContext
 ): string {
   const countryLabel =
     curriculum.country === 'egypt' ? 'مصر' :
@@ -172,7 +191,7 @@ ${ragContext}
 - أجب بالعربية الفصحى الواضحة المناسبة للطالب.
 - استخدم markdown للتنسيق واللاتكس للمعادلات.
 - اجعل الإجابة مختصرة ومركزة.
-- اقتبس من النص الأصلي عند الضرورة.`;
+- اقتبس من النص الأصلي عند الضرورة.${studentContext ? (formatStudentContextSection(studentContext) ?? '') : ''}`;
 }
 
 // ─── Gemini Call (via backend proxy) ──────────────────────────────────────────
@@ -383,11 +402,16 @@ async function answerWithExamMode(req: AnswerRequest): Promise<AnswerResult> {
     };
   }
 
-  const systemPrompt = buildExamTutorPrompt(
+  // Phase 3: append student learning context (depth hint only — EXAM_MODE already
+  // carries its own weakness data from the backend, so we avoid duplication).
+  const baseExamPrompt = buildExamTutorPrompt(
     req.curriculum,
     examCtx,
     ragResult?.formatted ?? null
   );
+  const systemPrompt = req.studentContext
+    ? baseExamPrompt + (formatStudentContextSection(req.studentContext) ?? '')
+    : baseExamPrompt;
 
   const text = await callGemini(
     modelId,
@@ -440,13 +464,18 @@ async function answerWithQuizMode(req: AnswerRequest): Promise<AnswerResult> {
     };
   }
 
-  const systemPrompt = buildQuizPrompt({
+  // Phase 3: append student context to quiz prompt so the quiz master
+  // can prioritise weak topics when generating questions.
+  const baseQuizPrompt = buildQuizPrompt({
     country:    req.curriculum.country,
     level:      req.curriculum.level,
     subject:    req.curriculum.subject ?? '',
     track:      req.curriculum.track,
     ragContext: ragResult.formatted,
   });
+  const systemPrompt = req.studentContext
+    ? baseQuizPrompt + (formatStudentContextSection(req.studentContext) ?? '')
+    : baseQuizPrompt;
 
   const text = await callGemini(
     modelId,
@@ -523,8 +552,8 @@ export async function answerQuestion(req: AnswerRequest): Promise<AnswerResult> 
   }
   // ──────────────────────────────────────────────────────────────────────────
 
-  // Step 2 — Build strict RAG-only system prompt
-  const systemPrompt = buildStrictRAGPrompt(req.curriculum, ragResult.formatted);
+  // Step 2 — Build strict RAG-only system prompt (Phase 3: with optional student context)
+  const systemPrompt = buildStrictRAGPrompt(req.curriculum, ragResult.formatted, req.studentContext);
 
   // Step 3 — Call Gemini via backend proxy with retrieved context only
   const text = await callGemini(

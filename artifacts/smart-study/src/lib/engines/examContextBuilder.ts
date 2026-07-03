@@ -59,8 +59,14 @@ function formatQuestions(questions: ExamQuestion[]): string {
 
     lines.push(q.question);
 
-    if (q.options && typeof q.options === 'object') {
-      Object.entries(q.options).forEach(([k, v]) => lines.push(`  ${k}) ${v}`));
+    // Options are stored as string[] by questionExtractor (e.g. ["أ) الخلية", "ب) النسيج"])
+    // Guard handles both array and legacy Record<string, string> shapes.
+    if (Array.isArray(q.options)) {
+      (q.options as string[]).forEach((opt) => lines.push(`  ${opt}`));
+    } else if (q.options && typeof q.options === 'object') {
+      Object.entries(q.options as Record<string, string>).forEach(([k, v]) =>
+        lines.push(`  ${k}) ${v}`)
+      );
     }
 
     lines.push(`✓ الإجابة الصحيحة: ${q.correctAnswer ?? '—'}`);

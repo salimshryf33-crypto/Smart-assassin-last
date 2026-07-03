@@ -18,3 +18,5 @@
 - [Neon search_path & shared pool](neon-pool-searchpath.md) — Neon role has empty search_path; ALL SQL must use public.table; shared pool (dbPool.ts) + 23-test suite; never modify CONNECTION URL to inject search_path.
 - [Curriculum Authority Correction Engine](correction-engine.md) — Phase 1 complete; correctionEngine/ replaces autoGrader internals; ICurriculumResolver abstraction ready for Phase 2 (Curriculum Linking).
 - [Curriculum Linking Matcher](curriculum-linking-matcher.md) — PENDING_THRESHOLD=35 (not 50); exam.curriculumDocId = exam's own doc (docType:'exam') → filtered out → isExplicitLink always false; metadata-only score=40% → needs threshold ≤35 for pending_review.
+- [Phase 3 AI Teacher Intelligence](phase3-ai-teacher.md) — ephemeral StudentLearningContext built from WeaknessProfile per-request; injected into all 3 prompt modes; never stored; optional recommendation section.
+- [Exam Correction Bug Fixes](exam-correction-bugs.md) — 4 bugs: duplicate answer rows (deterministic ID fix), JSON truncation in curriculumGrader (MAX_TOKENS 512→2048 + regex fallback), MCQ key mismatch, options array format.

@@ -24,6 +24,8 @@ import type { CardGenRequest, CardGenResult, EvalRequest } from './flashcardGenE
 import { analyzeWeakness, getTopWeakTopics, summarizeWeakness } from './weaknessEngine';
 import type { WeaknessProfile, UnderstandingRecord } from './weaknessEngine';
 
+import { buildStudentLearningContext } from './studentContextBuilder';
+
 import type { Flashcard } from '../../store/useAppStore';
 import type { UnderstandingCheck, EvaluationResult } from '../flashcardEngine';
 
@@ -152,14 +154,21 @@ export async function orchestrate(
   // Step 1 — Weakness snapshot (sync, instant, no await needed)
   const weakness = analyzeWeakness(req.existingCards, req.checkHistory ?? []);
 
+  // Step 1b — Phase 3: Build EPHEMERAL student learning context from the weakness
+  // profile computed above. This object lives only for this request — never stored.
+  // The answer engine uses it to personalise depth, highlight weak areas, and
+  // optionally add a "💡 توصية المعلم" recommendation at the end of the response.
+  const studentContext = buildStudentLearningContext(weakness);
+
   // Step 2 — Answer Engine (strict RAG, must complete first)
   let answer: AnswerResult;
   try {
     answer = await answerQuestion({
-      message: req.message,
-      history: req.history,
-      curriculum: req.curriculum,
-      mode: req.mode ?? DEFAULT_MODE,
+      message:        req.message,
+      history:        req.history,
+      curriculum:     req.curriculum,
+      mode:           req.mode ?? DEFAULT_MODE,
+      studentContext,                          // Phase 3 — ephemeral context
     });
   } catch (err) {
     throw mapAnswerError(err);

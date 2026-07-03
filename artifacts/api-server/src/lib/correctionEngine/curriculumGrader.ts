@@ -26,7 +26,10 @@ import type {
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
 const MODEL       = 'gemini-2.5-flash';
-const MAX_TOKENS  = 512;
+// 512 tokens was too low — Arabic feedback strings were being truncated mid-way,
+// producing "Unterminated string" JSON parse errors and marking all questions wrong.
+// 2048 is generous for a 2-field JSON object with a short Arabic feedback sentence.
+const MAX_TOKENS  = 2048;
 const TEMPERATURE = 0.05; // near-zero: evaluator, not generator
 
 // ─── Gemini helper ────────────────────────────────────────────────────────────
@@ -153,7 +156,32 @@ export async function gradeWithCurriculum(
   try {
     const raw     = await callGemini(prompt);
     const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    const parsed  = JSON.parse(cleaned) as { isCorrect?: boolean; feedback?: string };
+
+    // Primary: full JSON parse
+    let parsed: { isCorrect?: boolean; feedback?: string } | null = null;
+    try {
+      parsed = JSON.parse(cleaned) as { isCorrect?: boolean; feedback?: string };
+    } catch {
+      // Fallback: extract individual fields via regex when JSON is truncated or malformed.
+      // This can happen when Arabic feedback text was long and the model added extra prose.
+      const isCorrectMatch = cleaned.match(/"isCorrect"\s*:\s*(true|false)/i);
+      const feedbackMatch  = cleaned.match(/"feedback"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+
+      if (isCorrectMatch) {
+        parsed = {
+          isCorrect: isCorrectMatch[1]!.toLowerCase() === 'true',
+          feedback:  feedbackMatch?.[1]?.replace(/\\"/g, '"') ?? '',
+        };
+        logger.warn(
+          { questionId: input.questionId },
+          'correctionEngine: JSON truncated — recovered via regex fallback'
+        );
+      }
+    }
+
+    if (!parsed) {
+      throw new Error('Could not parse Gemini grading response');
+    }
 
     return {
       isCorrect:      parsed.isCorrect  ?? false,
