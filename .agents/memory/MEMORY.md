@@ -20,3 +20,4 @@
 - [Curriculum Linking Matcher](curriculum-linking-matcher.md) — PENDING_THRESHOLD=35 (not 50); exam.curriculumDocId = exam's own doc (docType:'exam') → filtered out → isExplicitLink always false; metadata-only score=40% → needs threshold ≤35 for pending_review.
 - [Phase 3 AI Teacher Intelligence](phase3-ai-teacher.md) — ephemeral StudentLearningContext built from WeaknessProfile per-request; injected into all 3 prompt modes; never stored; optional recommendation section.
 - [Exam Correction Bug Fixes](exam-correction-bugs.md) — 4 bugs: duplicate answer rows (deterministic ID fix), JSON truncation in curriculumGrader (MAX_TOKENS 512→2048 + regex fallback), MCQ key mismatch, options array format.
+- [Correction Engine Failure Modes](correction-engine-failures.md) — 6 failure modes diagnosed; Critical #1 (post-topK docId filter) fixed; Critical #2 (un-normalized Arabic in Stage 2) still open.
