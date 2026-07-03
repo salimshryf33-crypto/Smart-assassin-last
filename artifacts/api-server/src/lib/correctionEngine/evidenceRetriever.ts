@@ -97,25 +97,25 @@ export class EvidenceRetriever {
       logger.debug({ err }, 'evidenceRetriever: embedding unavailable — keyword-only search');
     }
 
-    const rawChunks = searchChunks(
+    // When docId is set (Phase 2 — linked curriculum), it is passed directly
+    // into searchChunks opts so the document filter runs BEFORE topK ranking.
+    // searchChunks will load and score ONLY chunks from that document.
+    // Post-retrieval docId filtering is intentionally absent: the linked
+    // document is the exclusive search scope, not a post-hoc narrowing step.
+    const chunks_raw = searchChunks(
       country,
       grade,
       subject,
       query,
       EVIDENCE_TOP_K,
-      { queryEmbedding }
+      { queryEmbedding, ...(docId ? { docId } : {}) }
     );
 
-    // Phase 2: if a specific docId is linked, restrict to that document only
-    const filteredChunks = docId
-      ? rawChunks.filter((c) => c.docId === docId)
-      : rawChunks;
-
-    const confidence = filteredChunks.length > 0
-      ? Math.min(1, filteredChunks.length / EVIDENCE_TOP_K)
+    const confidence = chunks_raw.length > 0
+      ? Math.min(1, chunks_raw.length / EVIDENCE_TOP_K)
       : 0;
 
-    const chunks: EvidenceChunk[] = filteredChunks.map((c) => ({
+    const chunks: EvidenceChunk[] = chunks_raw.map((c) => ({
       id:        c.id,
       docId:     c.docId,
       chapter:   c.chapter,
@@ -127,7 +127,8 @@ export class EvidenceRetriever {
     logger.debug(
       {
         query:              query.slice(0, 60),
-        country, grade, subject, docId,
+        country, grade, subject,
+        docId:              docId ?? '* (subject-wide)',
         chunksFound:        chunks.length,
         confidence:         confidence.toFixed(2),
         strategy:           curriculum.strategy,
@@ -139,7 +140,7 @@ export class EvidenceRetriever {
       chunks,
       confidence,
       strategy:            curriculum.strategy,
-      totalChunksSearched: rawChunks.length,
+      totalChunksSearched: chunks_raw.length,
     };
   }
 

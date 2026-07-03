@@ -410,6 +410,16 @@ export interface SearchOptions {
   userId?: string;
   /** Pre-computed query embedding for hybrid keyword + semantic scoring */
   queryEmbedding?: number[];
+  /**
+   * When set, restricts the search to this specific document ID only.
+   * The topK ranking is performed exclusively within that document's chunks —
+   * no other document's chunks are loaded, scored, or included.
+   *
+   * Used by the Correction Engine (Phase 2 — linked curriculum) to guarantee
+   * that the linked textbook is the ONLY source of evidence.  Post-retrieval
+   * docId filtering is therefore never needed and must not be used.
+   */
+  docId?: string;
 }
 
 export function searchChunks(
@@ -430,13 +440,18 @@ export function searchChunks(
       validGrades.has(d.grade) &&
       (d.visibility !== 'private' ||
         (opts.userId !== undefined && d.ownerId === opts.userId)) &&
-      (!opts.bookTitle || d.bookTitle === opts.bookTitle)
+      (!opts.bookTitle || d.bookTitle === opts.bookTitle) &&
+      // When docId is provided, restrict to that exact document only.
+      // This filter runs BEFORE any chunk is loaded or scored, so the topK
+      // ranking is derived exclusively from the specified document.
+      (!opts.docId || d.id === opts.docId)
   );
 
   if (docs.length === 0) {
     console.log(
       `[search] No docs — country=${country} grade=${gradeOrLevel}` +
-      ` subject=${subject} bookTitle=${opts.bookTitle ?? '*'} userId=${opts.userId ?? 'anon'}`
+      ` subject=${subject} bookTitle=${opts.bookTitle ?? '*'}` +
+      ` docId=${opts.docId ?? '*'} userId=${opts.userId ?? 'anon'}`
     );
     return [];
   }
