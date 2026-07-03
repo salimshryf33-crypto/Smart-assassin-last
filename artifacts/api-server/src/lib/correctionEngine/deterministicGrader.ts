@@ -10,6 +10,11 @@
  *
  * Arabic normalisation removes diacritics and standardises common variant
  * characters so that e.g. "أ" and "ا" are treated as equivalent.
+ *
+ * scoreRatio is always binary for deterministic types:
+ *   Correct   → 1.0
+ *   Incorrect → 0.0
+ *   Skipped   → 0.0
  */
 
 import type { CorrectionResult } from './types';
@@ -113,6 +118,7 @@ export const DETERMINISTIC_TYPES = new Set<string>([
 /**
  * Grade a student answer deterministically.
  * Never calls Gemini. No network I/O.
+ * scoreRatio is always 1.0 (correct) or 0.0 (incorrect/skipped).
  */
 export function gradeDeterministic(
   studentAnswer: string | null,
@@ -123,6 +129,7 @@ export function gradeDeterministic(
   if (!studentAnswer?.trim()) {
     return {
       isCorrect:      false,
+      scoreRatio:     0,
       gradingMethod:  'skipped',
       aiFeedback:     'لم تقدم إجابة.',
       evidenceStatus: 'SKIPPED',
@@ -134,6 +141,7 @@ export function gradeDeterministic(
   if (!correctAnswer?.trim()) {
     return {
       isCorrect:      false,
+      scoreRatio:     0,
       gradingMethod:  'exact',
       aiFeedback:     null,
       evidenceStatus: 'SKIPPED',
@@ -152,6 +160,7 @@ export function gradeDeterministic(
 
   return {
     isCorrect,
+    scoreRatio:     isCorrect ? 1.0 : 0.0,
     gradingMethod:  'exact',
     aiFeedback:     null,
     evidenceStatus: 'SKIPPED',

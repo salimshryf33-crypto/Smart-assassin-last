@@ -1,8 +1,9 @@
 /**
  * correctionEngine/evidenceRetriever.ts
  *
- * Responsible ONLY for retrieving curriculum evidence for a question.
- * Uses the hybrid searchChunks() engine (keyword + trigram + semantic).
+ * Stage 1 — RETRIEVE: Responsible ONLY for retrieving curriculum evidence.
+ * Stage 2 — VALIDATE: Provides validateEvidence() to confirm evidence quality
+ *   before the Correction Package is built.
  *
  * Key behaviours:
  *  - Per-attempt in-memory cache: identical queries are never fetched twice.
@@ -10,16 +11,31 @@
  *    keyword-only — never throws.
  *  - Scope filtering: if ResolvedCurriculum carries a docId (Phase 2), only
  *    chunks from that document are returned.
+ *
+ * Stage 2 validation checks (in order):
+ *  1. Chunk count   — at least 1 chunk must be retrieved
+ *  2. Confidence    — at least 1/topK normalised confidence score
+ *  3. Relevance     — at least one chunk must share significant keywords
+ *                     with the question (prevents irrelevant cross-topic matches)
  */
 
 import { searchChunks }   from '../curriculumStorage';
 import { getEmbedding }   from '../embeddingService';
 import { logger }         from '../logger';
-import type { CurriculumEvidence, EvidenceChunk, QuestionCorrectionInput } from './types';
+import type {
+  CurriculumEvidence,
+  EvidenceChunk,
+  EvidenceValidation,
+  QuestionCorrectionInput,
+} from './types';
 import type { ResolvedCurriculum } from './curriculumResolver';
 
-const EVIDENCE_TOP_K          = 6;
+const EVIDENCE_TOP_K           = 6;
 const MIN_CONFIDENCE_THRESHOLD = 1 / EVIDENCE_TOP_K; // at least 1 chunk
+/** Minimum keyword length to be considered significant for relevance checking. */
+const MIN_KEYWORD_LENGTH       = 3;
+/** Minimum number of shared keywords required for a chunk to be considered relevant. */
+const MIN_SHARED_KEYWORDS      = 1;
 
 // ─── EvidenceRetriever ────────────────────────────────────────────────────────
 
@@ -32,7 +48,7 @@ export class EvidenceRetriever {
   private readonly cache = new Map<string, CurriculumEvidence>();
 
   /**
-   * Retrieve curriculum evidence for one question.
+   * Stage 1 — RETRIEVE curriculum evidence for one question.
    * Called once per question; returns cached result on repeated queries.
    */
   async retrieve(
@@ -116,7 +132,7 @@ export class EvidenceRetriever {
         confidence:         confidence.toFixed(2),
         strategy:           curriculum.strategy,
       },
-      'evidenceRetriever: evidence retrieved'
+      'evidenceRetriever: Stage 1 retrieval complete'
     );
 
     return {
@@ -127,7 +143,81 @@ export class EvidenceRetriever {
     };
   }
 
-  /** Whether the retrieved evidence meets the minimum threshold for AI grading. */
+  // ─── Stage 2: Validate ─────────────────────────────────────────────────────
+
+  /**
+   * Stage 2 — VALIDATE retrieved evidence before building the Correction Package.
+   *
+   * Three-layer validation:
+   *  1. Chunk presence   — at least one chunk must exist
+   *  2. Confidence floor — normalised confidence must meet minimum threshold
+   *  3. Keyword relevance — at least one chunk must share significant words
+   *                         with the question text (prevents topic mismatch)
+   *
+   * Returns EvidenceValidation with isValid flag and machine/human reason.
+   * The grader calls this; the retriever stays focused on retrieval.
+   */
+  static validateEvidence(
+    evidence: CurriculumEvidence,
+    questionText: string
+  ): EvidenceValidation {
+    // Check 1: chunk presence
+    if (evidence.chunks.length === 0) {
+      return {
+        isValid: false,
+        reason:  'no_chunks',
+        message: 'لا توجد أدلة منهجية مسترجعة لهذا السؤال.',
+      };
+    }
+
+    // Check 2: confidence floor
+    if (evidence.confidence < MIN_CONFIDENCE_THRESHOLD) {
+      return {
+        isValid: false,
+        reason:  'low_confidence',
+        message: `ثقة الأدلة المنهجية منخفضة (${(evidence.confidence * 100).toFixed(0)}%).`,
+      };
+    }
+
+    // Check 3: keyword relevance
+    // Extract significant keywords from the question (length > MIN_KEYWORD_LENGTH,
+    // excluding common stopwords)
+    const ARABIC_STOPWORDS = new Set([
+      'من', 'في', 'على', 'إلى', 'عن', 'مع', 'هو', 'هي', 'هم', 'ما', 'لا',
+      'أن', 'إن', 'كان', 'يكون', 'هذا', 'هذه', 'التي', 'الذي', 'وهو',
+      'the', 'is', 'are', 'was', 'what', 'how', 'why', 'which', 'that',
+    ]);
+
+    const questionKeywords = questionText
+      .split(/\s+/)
+      .map((w) => w.replace(/[^\u0600-\u06FF\w]/g, '').toLowerCase())
+      .filter((w) => w.length > MIN_KEYWORD_LENGTH && !ARABIC_STOPWORDS.has(w));
+
+    if (questionKeywords.length > 0) {
+      const hasRelevantChunk = evidence.chunks.some((chunk) => {
+        const chunkLower = chunk.content.toLowerCase();
+        const sharedCount = questionKeywords.filter((kw) =>
+          chunkLower.includes(kw)
+        ).length;
+        return sharedCount >= MIN_SHARED_KEYWORDS;
+      });
+
+      if (!hasRelevantChunk) {
+        return {
+          isValid: false,
+          reason:  'irrelevant_chunks',
+          message: 'الأدلة المسترجعة لا تتعلق بموضوع السؤال بشكل مباشر.',
+        };
+      }
+    }
+
+    return { isValid: true };
+  }
+
+  /**
+   * Quick boolean check used by callers that only need pass/fail.
+   * @deprecated Use validateEvidence() for detailed validation with reasons.
+   */
   static isSufficient(evidence: CurriculumEvidence): boolean {
     return (
       evidence.chunks.length > 0 &&

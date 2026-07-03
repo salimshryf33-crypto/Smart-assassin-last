@@ -21,8 +21,12 @@ export async function updateWeaknessFromAttempt(
     const answers = await examSolverStore.getAnswersByAttempt(attemptId);
     if (answers.length === 0) return;
 
-    // Collect all unique question IDs from graded answers
-    const gradedAnswers = answers.filter((a) => a.isCorrect !== null);
+    // Collect all unique question IDs from graded answers.
+    // Exclude 'insufficient' gradingMethod — these answers were not evaluable
+    // due to missing curriculum evidence and must NOT skew weakness statistics.
+    const gradedAnswers = answers.filter(
+      (a) => a.isCorrect !== null && a.gradingMethod !== 'insufficient'
+    );
     if (gradedAnswers.length === 0) return;
 
     const qIds = [...new Set(gradedAnswers.map((a) => a.questionId))];

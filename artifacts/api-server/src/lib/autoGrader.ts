@@ -30,7 +30,7 @@ import type { ExamAnswer }       from '@workspace/db';
 
 export interface GradeResult {
   isCorrect:     boolean;
-  gradingMethod: 'exact' | 'ai' | 'skipped';
+  gradingMethod: 'exact' | 'ai' | 'skipped' | 'insufficient';
   aiFeedback:    string | null;
 }
 

@@ -3,30 +3,41 @@
  *
  * Curriculum Authority Correction Engine — orchestrator.
  *
- * Responsibilities (this file): wire all layers together and expose
- * gradeAttemptWithCurriculum() as a drop-in replacement for the old
- * gradeAttempt() internals.
+ * Full pipeline enforced here:
  *
- * Separation of responsibilities enforced here:
+ *   Student Answer
+ *       ↓
+ *   Sage Backend (this file)
+ *       ↓
+ *   Stage 1: Retrieve Curriculum Evidence  (EvidenceRetriever.retrieve)
+ *       ↓
+ *   Stage 2: Validate Evidence             (EvidenceRetriever.validateEvidence)
+ *       ↓
+ *   Stage 3: Build Correction Package      (curriculumGrader: buildCorrectionPackage)
+ *       ↓
+ *   Stage 4: Gemini Semantic Analysis      (curriculumGrader: callGemini — evidence-only)
+ *       ↓
+ *   Stage 5: Backend Verification          (curriculumGrader: verifyGeminiResponse)
+ *       ↓
+ *   Stage 6: Final Grade                   (isCorrect = scoreRatio >= 0.5)
+ *       ↓
+ *   Persist + Return AttemptGradeResult
+ *
+ * Separation of responsibilities:
  *   CurriculumResolver  → decides WHICH curriculum to search
- *   EvidenceRetriever   → retrieves curriculum evidence (RAG)
+ *   EvidenceRetriever   → Stage 1 retrieve + Stage 2 validate
  *   DeterministicGrader → corrects MCQ/TF/exact-match (no Gemini)
- *   CurriculumGrader    → corrects open-ended (Gemini + evidence only)
+ *   CurriculumGrader    → Stages 3–6 for open-ended questions
  *
- * Pipeline for every student answer after "Finish Exam":
+ * Scoring (Phase 1.5 — partial credit):
+ *   scorePct = weighted average of all scoreRatios (not binary count)
+ *   isCorrect = scoreRatio >= 0.5 (binary flag for DB + flashcard generation)
+ *   correctCount = count of answers where isCorrect=true (backward compat)
  *
- *   Exam record → CurriculumResolver → ResolvedCurriculum
- *       ↓
- *   For each question:
- *       deterministic? → gradeDeterministic()    (no network)
- *       open-ended?    → EvidenceRetriever.retrieve()
- *                        → EvidenceRetriever.isSufficient()?
- *                            YES → gradeWithCurriculum()  (Gemini + evidence)
- *                            NO  → INSUFFICIENT_CURRICULUM_EVIDENCE
- *       ↓
- *   Persist isCorrect + gradingMethod + aiFeedback (unchanged DB schema)
- *       ↓
- *   Return AttemptGradeResult (identical interface to legacy gradeAttempt)
+ * Weakness Analysis integration:
+ *   Answers graded as 'insufficient' (INSUFFICIENT_CURRICULUM_EVIDENCE)
+ *   are persisted with gradingMethod='insufficient' and isCorrect=false.
+ *   The weaknessAnalyzer filters these out — they do NOT skew weakness stats.
  */
 
 import { examStore }              from '../examStore';
@@ -46,6 +57,7 @@ export type { CorrectionResult };
 export interface AttemptGradeResult {
   totalQuestions: number;
   correctCount:   number;
+  /** Weighted average of scoreRatios (partial credit). */
   scorePct:       number;
   answers:        Array<ExamAnswer & { feedback: string | null }>;
 }
@@ -57,6 +69,9 @@ export interface AttemptGradeResult {
  *
  * Return type is identical to the legacy gradeAttempt() so callers
  * (routes/examSolver.ts) need no changes.
+ *
+ * scorePct is now a weighted average of scoreRatios, enabling partial credit
+ * to be reflected in the final score without any DB schema changes.
  */
 export async function gradeAttemptWithCurriculum(
   attemptId: string
@@ -68,7 +83,6 @@ export async function gradeAttemptWithCurriculum(
   }
 
   // ── Step 1: Resolve which curriculum to search ────────────────────────────
-  // Look up the exam record via the first answer's question
   const firstQ     = await examStore.getQuestionById(answers[0]!.questionId);
   const examRecord = firstQ
     ? await examStore.getExamRecord(firstQ.examId).catch(() => null)
@@ -81,8 +95,6 @@ export async function gradeAttemptWithCurriculum(
         grade:                 examRecord.grade,
         subject:               examRecord.subject,
         curriculumDocId:       examRecord.curriculumDocId,
-        // Phase 2: pass approved linked doc ID so LinkedCurriculumResolver
-        // can restrict RAG evidence to the authoritative curriculum.
         linkedCurriculumDocId: (examRecord as Record<string, unknown>)['linkedCurriculumDocId'] as string | null ?? null,
       })
     : {
@@ -101,23 +113,32 @@ export async function gradeAttemptWithCurriculum(
   );
 
   // ── Step 2: Per-attempt evidence cache ───────────────────────────────────
-  // One retriever per gradeAttemptWithCurriculum() call — caches evidence
-  // so questions with the same topic/chapter share the same RAG results.
   const retriever = new EvidenceRetriever();
 
   // ── Step 3: Grade each answer ─────────────────────────────────────────────
-  let correctCount = 0;
+  let correctCount          = 0;
+  let weightedScoreSum      = 0; // sum of scoreRatios for weighted scorePct
+  let gradableCount         = 0; // questions that received a scoreRatio (not skipped with no answer)
+
   const graded: Array<ExamAnswer & { feedback: string | null }> = [];
 
-  let aiCalls = 0;
-  let deterministicCalls = 0;
+  let aiCalls               = 0;
+  let deterministicCalls    = 0;
   let insufficientEvidenceCalls = 0;
-  let skippedCalls = 0;
+  let skippedCalls          = 0;
 
   for (const answer of answers) {
-    // Skip already-graded answers (idempotency)
-    if (answer.isCorrect !== null) {
+    // Skip already-graded answers (idempotency).
+    // scoreRatio is not persisted separately — binary approximation is used here.
+    // In normal flow this path is never reached (all answers start as isCorrect=null).
+    // It only triggers on duplicate gradeAttemptWithCurriculum calls (edge case).
+    // Note: 'insufficient' answers are NOT skipped — they are re-evaluated each run
+    // so that new curriculum evidence (after linking) can produce a valid grade.
+    if (answer.isCorrect !== null && answer.gradingMethod !== 'insufficient') {
       if (answer.isCorrect) correctCount++;
+      // Binary approximation: partial credit not recoverable from stored data
+      weightedScoreSum += answer.isCorrect ? 1.0 : 0.0;
+      gradableCount++;
       graded.push({ ...answer, feedback: answer.aiFeedback ?? null });
       continue;
     }
@@ -149,7 +170,7 @@ export async function gradeAttemptWithCurriculum(
       result = gradeDeterministic(input.studentAnswer, input.correctAnswer, input.questionType);
       deterministicCalls++;
     } else {
-      // ── Curriculum-grounded path ────────────────────────────────────────
+      // ── Curriculum-grounded path (Stages 1–6) ──────────────────────────
       const evidence = await retriever.retrieve(input, curriculum);
       result         = await gradeWithCurriculum(input, evidence);
 
@@ -162,14 +183,20 @@ export async function gradeAttemptWithCurriculum(
       }
     }
 
-    // Persist result (unchanged DB columns — zero regression)
+    // ── Accumulate weighted score ─────────────────────────────────────────
+    // All questions participate in scoring including skipped (scoreRatio=0)
+    weightedScoreSum += result.scoreRatio;
+    gradableCount++;
+    if (result.isCorrect) correctCount++;
+
+    // ── Persist result (unchanged DB columns — zero regression) ───────────
+    // gradingMethod='insufficient' allows weaknessAnalyzer to exclude these
     await examSolverStore.updateAnswer(answer.id, {
       isCorrect:     result.isCorrect,
       gradingMethod: result.gradingMethod,
       aiFeedback:    result.aiFeedback,
     });
 
-    if (result.isCorrect) correctCount++;
     graded.push({
       ...answer,
       isCorrect:     result.isCorrect,
@@ -179,10 +206,12 @@ export async function gradeAttemptWithCurriculum(
     });
   }
 
-  // ── Step 4: Finalise attempt ──────────────────────────────────────────────
+  // ── Step 4: Compute weighted score (partial credit) ───────────────────────
+  // scorePct reflects the weighted average of scoreRatios, not binary count.
+  // This means an essay that is 70% correct contributes 70%, not 0% or 100%.
   const total = answers.length;
-  const score = total > 0
-    ? Math.round((correctCount / total) * 10_000) / 100
+  const score = gradableCount > 0
+    ? Math.round((weightedScoreSum / gradableCount) * 10_000) / 100
     : 0;
 
   await examSolverStore.updateAttempt(attemptId, {
@@ -199,13 +228,15 @@ export async function gradeAttemptWithCurriculum(
       total,
       correctCount,
       scorePct:               score,
+      weightedScoreSum:       weightedScoreSum.toFixed(2),
+      gradableCount,
       deterministicCalls,
       aiCalls,
       insufficientEvidenceCalls,
       skippedCalls,
       strategy:               curriculum.strategy,
     },
-    'correctionEngine: attempt graded with curriculum authority'
+    'correctionEngine: attempt graded with curriculum authority (partial credit active)'
   );
 
   return { totalQuestions: total, correctCount, scorePct: score, answers: graded };
