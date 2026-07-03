@@ -358,6 +358,79 @@ ${ragSection}
 7. أجب بالعربية الفصحى الواضحة. استخدم markdown وLaTeX للمعادلات.`;
 }
 
+// ─── NOTES_MODE: Explicit RAG Handler ────────────────────────────────────────
+
+/**
+ * Handles NOTES_MODE requests.
+ *
+ * Notes storage is not yet implemented on the backend — there is no dedicated
+ * notes index to search. Until that backend exists, NOTES_MODE uses the same
+ * curriculum RAG pipeline as BOOK_MODE.
+ *
+ * This function exists to make the routing EXPLICIT. NOTES_MODE must never
+ * silently fall through to BOOK_MODE's dispatch branch — that would mean any
+ * future NOTES_MODE behaviour change requires editing the core dispatch, which
+ * violates the "one handler per mode" contract.
+ *
+ * When the notes backend is ready:
+ *   1. Add a `searchNotes()` call here (analogous to `retrieveContext()`).
+ *   2. Merge notes results with curriculum RAG results.
+ *   3. Build a notes-aware system prompt (analogous to `buildStrictRAGPrompt()`).
+ *   No other file needs to change.
+ */
+async function answerWithNotesMode(req: AnswerRequest): Promise<AnswerResult> {
+  // Guard — no subject selected
+  if (!req.curriculum.subject) {
+    return {
+      text: NO_SUBJECT_RESPONSE,
+      ragChunksFound: 0,
+      retrievedContext: null,
+      modelUsed: 'none',
+      noSubject: true,
+      noContext: false,
+    };
+  }
+
+  // Step 1 — RAG retrieval (curriculum source; notes source not yet implemented)
+  const [modelId, ragResult] = await Promise.all([
+    resolveModel(),
+    retrieveContext(req.curriculum, req.message),
+  ]);
+
+  // Hard gate — no curriculum content available
+  if (!ragResult) {
+    return {
+      text: NO_CONTEXT_RESPONSE,
+      ragChunksFound: 0,
+      retrievedContext: null,
+      modelUsed: 'none',
+      noSubject: false,
+      noContext: true,
+    };
+  }
+
+  // Step 2 — Build system prompt (reuses strict RAG prompt; notes layer TBD)
+  const systemPrompt = buildStrictRAGPrompt(req.curriculum, ragResult.formatted, req.studentContext);
+
+  // Step 3 — Call Gemini via backend proxy
+  const text = await callGemini(
+    modelId,
+    systemPrompt,
+    req.history,
+    req.message,
+    'NOTES_MODE'
+  );
+
+  return {
+    text,
+    ragChunksFound: ragResult.chunks,
+    retrievedContext: ragResult.formatted,
+    modelUsed: modelId,
+    noSubject: false,
+    noContext: false,
+  };
+}
+
 // ─── EXAM_MODE: Socratic Tutor Handler ───────────────────────────────────────
 
 /**
@@ -402,16 +475,17 @@ async function answerWithExamMode(req: AnswerRequest): Promise<AnswerResult> {
     };
   }
 
-  // Phase 3: append student learning context (depth hint only — EXAM_MODE already
-  // carries its own weakness data from the backend, so we avoid duplication).
-  const baseExamPrompt = buildExamTutorPrompt(
+  // EXAM_MODE system prompt is self-contained: buildExamTutorPrompt() already
+  // embeds the full weakness profile sourced from the exam bank backend (the
+  // authoritative weakness source for this mode). Injecting studentContext on
+  // top would duplicate weak-topic data from two different sources and could
+  // produce contradictory prioritisation. Student context is intentionally
+  // excluded here — it is appropriate only for BOOK_MODE and QUIZ_MODE.
+  const systemPrompt = buildExamTutorPrompt(
     req.curriculum,
     examCtx,
     ragResult?.formatted ?? null
   );
-  const systemPrompt = req.studentContext
-    ? baseExamPrompt + (formatStudentContextSection(req.studentContext) ?? '')
-    : baseExamPrompt;
 
   const text = await callGemini(
     modelId,
@@ -498,10 +572,16 @@ async function answerWithQuizMode(req: AnswerRequest): Promise<AnswerResult> {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Answer a student question. Dispatches to the correct handler based on mode:
- *   - EXAM_MODE  → Socratic Tutor (weakness-targeted exam questions + RAG)
- *   - QUIZ_MODE  → Quiz Master (curriculum RAG-generated questions, one per turn)
- *   - All others → Strict RAG-only (BOOK_MODE behavior)
+ * Answer a student question. Dispatches to the correct handler based on mode.
+ *
+ * Mode → Handler mapping (every registered mode has an explicit branch):
+ *   EXAM_MODE   → answerWithExamMode()  — Socratic Tutor, exam bank + RAG
+ *   QUIZ_MODE   → answerWithQuizMode()  — Quiz Master, curriculum RAG questions
+ *   NOTES_MODE  → answerWithNotesMode() — Notes RAG (notes backend TBD)
+ *   BOOK_MODE   → inline strict RAG path
+ *
+ * No mode falls through to another mode's logic. Adding a future mode requires
+ * only: (1) register in contextMode.ts, (2) create a handler, (3) add a branch here.
  *
  * @throws Error with code 'NO_API_KEY' | 'QUOTA_EXCEEDED' | 'EMPTY_RESPONSE'
  */
@@ -529,9 +609,16 @@ export async function answerQuestion(req: AnswerRequest): Promise<AnswerResult> 
   if (activeMode === 'QUIZ_MODE') {
     return answerWithQuizMode(req);
   }
+
+  if (activeMode === 'NOTES_MODE') {
+    return answerWithNotesMode(req);
+  }
   // ──────────────────────────────────────────────────────────────────────────
 
-  // ── BOOK_MODE (and all non-QUIZ/EXAM modes): Strict RAG path ──────────────
+  // ── BOOK_MODE: Strict RAG path ────────────────────────────────────────────
+  // Only BOOK_MODE reaches this point. Every other registered mode has its own
+  // explicit dispatch branch above. This prevents any future mode from silently
+  // inheriting BOOK_MODE behaviour.
 
   // Step 1 — RAG retrieval (runs in parallel with model discovery)
   const [modelId, ragResult] = await Promise.all([

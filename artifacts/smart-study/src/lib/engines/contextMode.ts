@@ -88,7 +88,7 @@ const MODE_REGISTRY: Record<ContextMode, ContextObject> = {
   QUIZ_MODE: {
     mode: 'QUIZ_MODE',
     useRAG: true,
-    useExamEngine: true,
+    useExamEngine: false, // QUIZ_MODE generates questions from curriculum RAG only — never touches the exam bank
     useNotes: false,
     allowExternalKnowledge: false,
     curriculumOnly: true,
