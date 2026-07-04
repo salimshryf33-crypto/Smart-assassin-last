@@ -19,8 +19,8 @@
  *                     with the question (prevents irrelevant cross-topic matches)
  */
 
-import { searchChunks }   from '../curriculumStorage';
-import { getEmbedding }   from '../embeddingService';
+import { searchChunks, normalizeArabic } from '../curriculumStorage';
+import { getEmbedding }                  from '../embeddingService';
 import { logger }         from '../logger';
 import type {
   CurriculumEvidence,
@@ -181,24 +181,39 @@ export class EvidenceRetriever {
     }
 
     // Check 3: keyword relevance
-    // Extract significant keywords from the question (length > MIN_KEYWORD_LENGTH,
-    // excluding common stopwords)
+    //
+    // Arabic normalisation consistency requirement:
+    // Both question text and chunk content MUST be processed through the same
+    // normalizeArabic() pipeline before any string comparison.  Raw OCR output
+    // from curriculum PDFs frequently carries tashkeel, alif/hamza variants,
+    // and ة/ى inconsistencies.  Using normalizeArabic() on both sides makes
+    // those differences invisible to the comparator, preventing false mismatches.
+    //
+    // Stopwords are stored in their post-normalizeArabic() forms so that the
+    // Set.has() lookup operates on the same character space as the tokens.
+    // (e.g. 'أن' normalises to 'ان', 'إلى' to 'الي', 'على' to 'علي')
     const ARABIC_STOPWORDS = new Set([
-      'من', 'في', 'على', 'إلى', 'عن', 'مع', 'هو', 'هي', 'هم', 'ما', 'لا',
-      'أن', 'إن', 'كان', 'يكون', 'هذا', 'هذه', 'التي', 'الذي', 'وهو',
+      // ── Arabic stopwords (normalized forms) ──────────────────────────────
+      'من', 'في',  'علي', 'الي', 'عن',  'مع',
+      'هو', 'هي',  'هم',  'ما',  'لا',  'ان',
+      'كان', 'يكون', 'هذا', 'هذه', 'التي', 'الذي', 'وهو',
+      // ── English stopwords ─────────────────────────────────────────────────
       'the', 'is', 'are', 'was', 'what', 'how', 'why', 'which', 'that',
     ]);
 
-    const questionKeywords = questionText
+    // Normalize question text ONCE (removes tashkeel, normalises alif/hamza,
+    // ة→ه, ى→ي, lowercases) then split into candidate keywords.
+    const normQuestion     = normalizeArabic(questionText);
+    const questionKeywords = normQuestion
       .split(/\s+/)
-      .map((w) => w.replace(/[^\u0600-\u06FF\w]/g, '').toLowerCase())
       .filter((w) => w.length > MIN_KEYWORD_LENGTH && !ARABIC_STOPWORDS.has(w));
 
     if (questionKeywords.length > 0) {
       const hasRelevantChunk = evidence.chunks.some((chunk) => {
-        const chunkLower = chunk.content.toLowerCase();
+        // Normalize chunk content ONCE per chunk — never compare raw OCR text.
+        const normChunk  = normalizeArabic(chunk.content);
         const sharedCount = questionKeywords.filter((kw) =>
-          chunkLower.includes(kw)
+          normChunk.includes(kw)
         ).length;
         return sharedCount >= MIN_SHARED_KEYWORDS;
       });

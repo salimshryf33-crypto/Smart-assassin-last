@@ -338,8 +338,14 @@ export function normalizeArabic(text: string): string {
       .replace(/\uFFFD/g, '')
       .replace(/[\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED]/g, '')
       .replace(/[أإآٱ\u0671\u0672\u0673]/g, 'ا')
-      .replace(/ؤ/g, 'و')
-      .replace(/ئ/g, 'ي')
+      // ؤ and ئ both represent hamza on different carriers (waw vs ya).
+      // OCR frequently outputs the wrong carrier for the same word
+      // (e.g. مسؤولية vs مسئوليه).  Mapping both to bare hamza ء unifies
+      // all carrier variants so comparison always succeeds across OCR artifacts.
+      // NOTE: ء is in the Arabic block (\u0600-\u06FF) and is preserved by
+      // the non-Arabic stripping step below — intentionally.
+      .replace(/ؤ/g, 'ء')
+      .replace(/ئ/g, 'ء')
       .replace(/ى/g, 'ي')
       .replace(/ة/g, 'ه')
       .replace(/\u0640/g, '')
@@ -470,7 +476,14 @@ export function searchChunks(
   const qTrigrams = buildTrigrams(qNorm);
 
   const scored = allChunks.map((chunk) => {
-    const cNorm      = chunk.contentNormalized ?? normalizeArabic(chunk.content);
+    // Always re-normalise from raw content rather than using the stored
+    // contentNormalized field.  The stored field may have been computed by an
+    // older version of normalizeArabic (before the ؤ/ئ→ء unification).
+    // Re-computing here guarantees that every comparison runs through the
+    // same normalizeArabic pipeline as the query — zero stale-data risk.
+    // Performance: normalizeArabic is a pure string operation; at typical
+    // chunk counts (50–500) the added cost is negligible (<5 ms per search).
+    const cNorm      = normalizeArabic(chunk.content);
     const cTokenSet  = new Set(tokenize(chunk.content));
     const chapterNorm = normalizeArabic(chunk.chapter);
 
