@@ -3,16 +3,23 @@ name: Correction Engine Failure Modes
 description: Root cause analysis of incorrect grading — 6 failure modes with exact file/line refs and severity. Diagnosed 2026-07-03.
 ---
 
-## CRITICAL #1 — Post-topK docId filtering (FIXED 2026-07-03)
+## CRITICAL #1 — Post-topK docId filtering (FIXED 2026-07-03, commit 0a61bde)
 Files: evidenceRetriever.ts + curriculumStorage.ts
-Fix: Added `docId` to SearchOptions; filter now runs inside searchChunks BEFORE docs.flatMap() chunk loading. Post-hoc rawChunks.filter removed.
+Fix: Added `docId` to SearchOptions; filter runs inside searchChunks BEFORE docs.flatMap() chunk loading. Post-hoc rawChunks.filter removed.
 Root cause: searchChunks returned global top-6; competing docs could fill all slots; linked doc got 0 chunks after post-hoc filter → isCorrect=false.
 
-## CRITICAL #2 — Stage 2 keyword check uses un-normalized Arabic (NOT YET FIXED)
-File: evidenceRetriever.ts:191-212, validateEvidence()
-Issue: questionKeywords use .toLowerCase() only — no normalizeArabic(). Chunk content also raw. Diacritics (تشكيل) in OCR text block keyword matches.
-Result: chunk flagged 'irrelevant_chunks' → isCorrect=false even when RAG scored it correctly.
-Fix: call normalizeArabic() on both questionKeywords and chunk.content in validateEvidence().
+## CRITICAL #2 — Stage 2 keyword check used un-normalized Arabic (FIXED 2026-07-04, commit d22294c)
+Files: curriculumStorage.ts (normalizeArabic + searchChunks) + evidenceRetriever.ts (validateEvidence)
+Fix (3 parts):
+  1. normalizeArabic: ؤ→ء, ئ→ء (both hamza carriers unified to bare hamza).
+     Previously ؤ→و and ئ→ي gave DIFFERENT normalized forms for the same word
+     when OCR used the wrong carrier (مسؤولية vs مسئوليه).
+  2. searchChunks: always call normalizeArabic(chunk.content) — drop contentNormalized??
+     cache to prevent stale old-normalization values mismatching fresh query tokens.
+  3. validateEvidence: normalizeArabic(questionText) once before keyword split;
+     normalizeArabic(chunk.content) once per chunk. ARABIC_STOPWORDS updated to
+     post-normalizeArabic normalized forms (علي, الي, ان, …).
+All 5 required test cases pass: الخلية/أهمية/مسؤولية/النواة/الضوء vs diacritized OCR forms.
 
 ## HIGH #3 — Private curriculum docs excluded from correction (NOT YET FIXED)
 Files: curriculumStorage.ts:431-432 + evidenceRetriever.ts:100-107
