@@ -285,6 +285,16 @@ const CREATE_CURRICULUM_LINKS = `
 // ─── Matcher Weights ──────────────────────────────────────────────────────────
 // Stores the adaptive weights used by curriculumMatcher.ts.
 // Single row with id = 'global'; updated on every approval/rejection.
+// ─── Curriculum PDFs (raw binary storage) ─────────────────────────────────────
+const CREATE_CURRICULUM_PDFS = `
+  CREATE TABLE IF NOT EXISTS public.curriculum_pdfs (
+    doc_id      TEXT        PRIMARY KEY,
+    content     BYTEA       NOT NULL,
+    byte_size   INTEGER     NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+`;
+
 const CREATE_MATCHER_WEIGHTS = `
   CREATE TABLE IF NOT EXISTS public.matcher_weights (
     id          TEXT        PRIMARY KEY DEFAULT 'global',
@@ -338,6 +348,7 @@ export async function runStartupMigrations(): Promise<void> {
     await db.query(CREATE_FLASHCARDS);
     await db.query(CREATE_CURRICULUM_LINKS);
     await db.query(CREATE_MATCHER_WEIGHTS);
+    await db.query(CREATE_CURRICULUM_PDFS);
     // Backward-compatible additive column migrations
     await db.query(`ALTER TABLE public.db_backup_log ADD COLUMN IF NOT EXISTS backup_data BYTEA`);
     await db.query(`ALTER TABLE public.weakness_snapshots ADD COLUMN IF NOT EXISTS weak_topics_json TEXT`);
