@@ -9,7 +9,7 @@ import { startBackupScheduler } from "./lib/backupScheduler";
 import { restoreCurriculumFromDB } from "./lib/curriculumPersistence";
 import { scanUnlinkedExams } from "./lib/curriculumLinker";
 import { hasQuestionsSnapshot, loadQuestionsFromFile } from "./lib/questionStorage";
-import { runStartupValidation } from "./lib/examValidation";
+import { runStartupValidation, startRetryScheduler } from "./lib/examValidation";
 
 const rawPort = process.env["PORT"];
 
@@ -33,54 +33,69 @@ app.listen(port, (err) => {
 
   logger.info({ port }, "Server listening");
 
-  // Phase 1: Create all DB tables if they don't exist yet (idempotent)
-  runStartupMigrations()
-    .then(() =>
-      // Phase 2: Restore disk cache from PostgreSQL (or seed DB from disk on first run).
-      // Must run AFTER tables exist and BEFORE migrateIndex / relabelChapters.
-      restoreCurriculumFromDB()
-    )
+  // ── Stage A: DB tables + curriculum cache ─────────────────────────────────
+  // This Promise resolves once:
+  //   1. All tables exist (runStartupMigrations)
+  //   2. Chunk JSON files are restored from PostgreSQL to disk (restoreCurriculumFromDB)
+  //   3. Index is migrated and chapters are labelled (migrateIndex / relabelChapters)
+  //
+  // Curriculum chunks must be in memory before the validation pipeline runs,
+  // because searchChunks() loads chunks lazily via loadChunks() which reads
+  // the disk cache — and that cache is only populated after step 2.
+  const curriculumReady: Promise<void> = runStartupMigrations()
+    .then(() => restoreCurriculumFromDB())
     .then(() => {
       migrateIndex();
       relabelChapters();
     })
-    .then(() => {
-      // Phase 2: Curriculum Linking — scan for done exams with no approved link.
-      // Fire-and-forget; never blocks server startup.
-      setTimeout(() => {
-        scanUnlinkedExams().catch((err) =>
-          logger.error({ err }, 'startup: curriculum linking scan failed')
-        );
-      }, 12_000); // wait for curriculum restore + extraction recovery to settle
-    })
-    .catch((err) =>
-      logger.error({ err }, 'startup: curriculum restore/migration failed')
-    );
+    .catch((err) => {
+      logger.error({ err }, 'startup: curriculum restore/migration failed');
+    });
 
-  // Generate vector embeddings for chunks that don't have them yet.
+  // Curriculum Linking — keep its existing 12s settle window but anchor it
+  // to the curriculum chain completing rather than an absolute timer.
+  curriculumReady.then(() => {
+    setTimeout(() => {
+      scanUnlinkedExams().catch((err) =>
+        logger.error({ err }, 'startup: curriculum linking scan failed')
+      );
+    }, 12_000);
+  });
+
+  // Generate vector embeddings for chunks that don't have them yet (independent).
   generateMissingEmbeddings().catch((err) =>
     logger.error({ err }, 'generateMissingEmbeddings: unexpected error')
   );
 
   startResumeScheduler();
 
-  // Start daily backup scheduler (runs at 02:00 UTC)
+  // Start daily backup scheduler (runs at 02:00 UTC).
   startBackupScheduler();
 
-  // Permanent fix: sync exam docs from index.json → exam_records, then extract.
-  // Runs on every startup. Safe no-op if all records already exist and are done.
-  syncAndRecoverExams().catch((err) =>
-    logger.error({ err }, 'syncAndRecoverExams: unexpected error')
-  );
+  // ── Stage B: Exam extraction / snapshot restore ────────────────────────────
+  // Resolves once all exam docs are synced and any pending extraction is done.
+  // JSON-snapshot exams resolve quickly; Gemini extraction can take minutes.
+  const examsReady: Promise<void> = syncAndRecoverExams().catch((err) => {
+    logger.error({ err }, 'syncAndRecoverExams: unexpected error');
+  });
 
-  // Phase 1 Foundation: validate all extracted exam questions and derive canonical
-  // answers for any MCQ with correct_answer = null.
-  // Delayed 15s so syncAndRecoverExams has time to restore questions first.
-  setTimeout(() => {
-    runStartupValidation().catch((err) =>
-      logger.error({ err }, 'runStartupValidation: unexpected error')
+  // ── Stage C: Validation startup + retry scheduler ──────────────────────────
+  // Phase 3 (event-driven): validation begins ONLY after BOTH:
+  //   • curriculum chunks are in the disk/memory cache   (curriculumReady)
+  //   • exam questions are in the database               (examsReady)
+  //
+  // This eliminates the previous 15-second hardcoded timer and guarantees
+  // searchChunks() never returns empty results due to a restore-timing race.
+  Promise.all([curriculumReady, examsReady])
+    .then(async () => {
+      await runStartupValidation();
+      // Start the periodic retry scheduler after the initial scan completes.
+      // Scheduler fires every 5 min to process questions whose retry window elapsed.
+      startRetryScheduler();
+    })
+    .catch((err) =>
+      logger.error({ err }, 'startup: validation/scheduler startup failed')
     );
-  }, 15_000);
 });
 
 // ─── Sync index.json exam docs → exam_records, then extract pending ───────────

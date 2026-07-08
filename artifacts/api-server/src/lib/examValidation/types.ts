@@ -10,18 +10,21 @@
 /**
  * Lifecycle of a single exam question through the validation pipeline.
  *
- *  PENDING            → not yet processed
- *  VALIDATED          → integrity checks passed; evidence retrieved; answer not yet derived
- *  LOW_EVIDENCE       → integrity ok but curriculum evidence is insufficient for derivation
- *  INVALID            → failed structural integrity checks; must never be shown to students
- *  READY              → canonical answer derived with confidence ≥ threshold; correct_answer populated
+ *  PENDING                → not yet processed
+ *  VALIDATED              → integrity checks passed; evidence retrieved; answer not yet derived
+ *  LOW_EVIDENCE           → integrity ok but curriculum evidence insufficient; scheduled for retry
+ *  INVALID                → failed structural integrity checks; never retried
+ *  READY                  → canonical answer derived with confidence ≥ threshold; correct_answer populated
+ *  PERMANENT_LOW_EVIDENCE → exhausted all retry attempts; curriculum does not contain the answer;
+ *                           blocks publishing (same as LOW_EVIDENCE) but never retried again
  */
 export type ValidationStatus =
   | 'PENDING'
   | 'VALIDATED'
   | 'LOW_EVIDENCE'
   | 'INVALID'
-  | 'READY';
+  | 'READY'
+  | 'PERMANENT_LOW_EVIDENCE';
 
 // ─── Question integrity ───────────────────────────────────────────────────────
 
@@ -69,6 +72,11 @@ export interface CanonicalAnswer {
   evidencePages:    string[];
   validationStatus: ValidationStatus;
   retrievalVersion: number;
+  // ── Phase 3: Attempt tracking ─────────────────────────────────────────────
+  attemptCount:     number;             // incremented on every non-skip attempt
+  lastAttemptAt:    Date | null;        // timestamp of the most recent attempt
+  nextRetryAt:      Date | null;        // when to retry; null = done or not yet scheduled
+  // ─────────────────────────────────────────────────────────────────────────
   createdAt:        Date;
   updatedAt:        Date;
   verified:         boolean;
@@ -99,6 +107,7 @@ export interface PublishReadinessResult {
   readyCount:        number;
   invalidCount:      number;
   lowEvidenceCount:  number;
+  permanentLowCount: number;
   pendingCount:      number;
   blockingQuestions: Array<{ id: string; status: ValidationStatus | 'UNPROCESSED' }>;
 }

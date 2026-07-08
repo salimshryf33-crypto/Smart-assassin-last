@@ -9,6 +9,8 @@
 export { runValidationForExam, runStartupValidation } from './validationPipeline';
 export { getPublishReadiness, listByExamId, countUnready } from './canonicalAnswerStore';
 export { CONFIDENCE_THRESHOLD, DailyQuotaExhaustedError } from './canonicalAnswerDeriver';
+export { startRetryScheduler, stopRetryScheduler } from './retryScheduler';
+export { MAX_VALIDATION_ATTEMPTS } from './retryPolicy';
 export type {
   CanonicalAnswer,
   ValidationStatus,

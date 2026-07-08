@@ -396,6 +396,36 @@ export async function runStartupMigrations(): Promise<void> {
       UPDATE public.curriculum_documents SET doc_type = 'book'
       WHERE doc_type IS NULL
     `);
+    // ── Phase 3: Validation Reliability Layer ──────────────────────────────
+    // Add attempt tracking columns to exam_canonical_answers.
+    // All migrations are ADD COLUMN IF NOT EXISTS — safe to re-run, no data loss.
+    await db.query(`
+      ALTER TABLE public.exam_canonical_answers
+        ADD COLUMN IF NOT EXISTS attempt_count   INTEGER     NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS next_retry_at   TIMESTAMPTZ
+    `);
+    // Extend the validation_status CHECK constraint to include PERMANENT_LOW_EVIDENCE.
+    // DROP + ADD is the only way to modify a CHECK constraint in PostgreSQL.
+    // Existing rows are unaffected (their status values remain valid under the new constraint).
+    await db.query(`
+      ALTER TABLE public.exam_canonical_answers
+        DROP CONSTRAINT IF EXISTS exam_canonical_answers_validation_status_check
+    `);
+    await db.query(`
+      ALTER TABLE public.exam_canonical_answers
+        ADD CONSTRAINT exam_canonical_answers_validation_status_check
+        CHECK (validation_status IN (
+          'PENDING','VALIDATED','LOW_EVIDENCE','INVALID','READY','PERMANENT_LOW_EVIDENCE'
+        ))
+    `);
+    // Partial index for the retry scheduler — only covers rows with a scheduled retry.
+    // O(k) where k = rows with next_retry_at set, not total table size.
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_eca_retry
+        ON public.exam_canonical_answers (next_retry_at, validation_status)
+        WHERE next_retry_at IS NOT NULL
+    `);
     logger.info('dbMigrations: all startup tables created/verified');
   } catch (err) {
     logger.error({ err }, 'dbMigrations: migration failed');

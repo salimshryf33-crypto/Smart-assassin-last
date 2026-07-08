@@ -51,13 +51,15 @@ export async function listByExamId(
 /**
  * Returns a summary of how many MCQ questions per status for an exam.
  * Used by the publish safety gate and admin diagnostics.
+ *
+ * PERMANENT_LOW_EVIDENCE is treated as blocking — it means the curriculum
+ * does not contain the answer and no further retries will be made.
  */
 export async function getPublishReadiness(
   examId: string,
 ): Promise<PublishReadinessResult> {
   const pool = getSharedPool();
 
-  // Fetch all MCQ/true_false questions and their canonical answer status
   const { rows } = await pool.query<{
     question_id:       string;
     validation_status: string | null;
@@ -70,11 +72,12 @@ export async function getPublishReadiness(
     [examId],
   );
 
-  const totalMcq       = rows.length;
-  let readyCount        = 0;
-  let invalidCount      = 0;
-  let lowEvidenceCount  = 0;
-  let pendingCount      = 0;
+  const totalMcq          = rows.length;
+  let readyCount           = 0;
+  let invalidCount         = 0;
+  let lowEvidenceCount     = 0;
+  let permanentLowCount    = 0;
+  let pendingCount         = 0;
   const blocking: PublishReadinessResult['blockingQuestions'] = [];
 
   for (const row of rows) {
@@ -82,9 +85,10 @@ export async function getPublishReadiness(
     if (status === 'READY') {
       readyCount++;
     } else {
-      if (status === 'INVALID')        invalidCount++;
-      else if (status === 'LOW_EVIDENCE') lowEvidenceCount++;
-      else                             pendingCount++;      // PENDING / VALIDATED / null
+      if (status === 'INVALID')                invalidCount++;
+      else if (status === 'LOW_EVIDENCE')       lowEvidenceCount++;
+      else if (status === 'PERMANENT_LOW_EVIDENCE') permanentLowCount++;
+      else                                     pendingCount++;    // PENDING/VALIDATED/null
 
       blocking.push({
         id:     row.question_id,
@@ -94,11 +98,12 @@ export async function getPublishReadiness(
   }
 
   return {
-    ready:            totalMcq > 0 && readyCount === totalMcq,
+    ready:             totalMcq > 0 && readyCount === totalMcq,
     totalMcq,
     readyCount,
     invalidCount,
     lowEvidenceCount,
+    permanentLowCount,
     pendingCount,
     blockingQuestions: blocking,
   };
@@ -109,6 +114,8 @@ export async function getPublishReadiness(
 /**
  * Upsert a canonical answer record.
  * If a row already exists for question_id it is updated; otherwise inserted.
+ *
+ * Phase 3: includes attempt_count, last_attempt_at, next_retry_at.
  */
 export async function upsert(
   answer: Omit<CanonicalAnswer, 'id' | 'createdAt' | 'updatedAt'> & { id?: string },
@@ -119,8 +126,9 @@ export async function upsert(
   const { rows } = await pool.query<DbRow>(
     `INSERT INTO public.exam_canonical_answers
        (id, question_id, correct_option, confidence, reasoning_summary,
-        evidence_chunk_ids, evidence_pages, validation_status, retrieval_version, verified)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        evidence_chunk_ids, evidence_pages, validation_status, retrieval_version,
+        attempt_count, last_attempt_at, next_retry_at, verified)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
      ON CONFLICT (question_id) DO UPDATE SET
        correct_option      = EXCLUDED.correct_option,
        confidence          = EXCLUDED.confidence,
@@ -129,6 +137,9 @@ export async function upsert(
        evidence_pages      = EXCLUDED.evidence_pages,
        validation_status   = EXCLUDED.validation_status,
        retrieval_version   = EXCLUDED.retrieval_version,
+       attempt_count       = EXCLUDED.attempt_count,
+       last_attempt_at     = EXCLUDED.last_attempt_at,
+       next_retry_at       = EXCLUDED.next_retry_at,
        verified            = EXCLUDED.verified,
        updated_at          = now()
      RETURNING *`,
@@ -142,6 +153,9 @@ export async function upsert(
       JSON.stringify(answer.evidencePages),
       answer.validationStatus,
       answer.retrievalVersion,
+      answer.attemptCount,
+      answer.lastAttemptAt      ?? null,
+      answer.nextRetryAt        ?? null,
       answer.verified,
     ],
   );
@@ -152,6 +166,7 @@ export async function upsert(
 /**
  * Propagate a READY canonical answer into exam_questions.correct_answer.
  * This is the only write path to exam_questions in the validation module.
+ * The WHERE guard ensures an existing correct_answer is never overwritten.
  */
 export async function populateCorrectAnswer(
   questionId:    string,
@@ -172,8 +187,15 @@ export async function populateCorrectAnswer(
 }
 
 /**
- * Count questions for an exam that still need validation.
- * Returns 0 if all MCQ questions are READY.
+ * Count questions for an exam that are still eligible for (re-)validation.
+ *
+ * Excludes:
+ *   READY                  — already done
+ *   INVALID                — structural failure; no retry makes sense
+ *   PERMANENT_LOW_EVIDENCE — all retries exhausted
+ *   LOW_EVIDENCE with a future next_retry_at — scheduler will handle those
+ *
+ * Only counts questions the startup scan can actually make progress on now.
  */
 export async function countUnready(examId: string): Promise<number> {
   const pool = getSharedPool();
@@ -183,7 +205,13 @@ export async function countUnready(examId: string): Promise<number> {
      LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = q.id
      WHERE q.exam_id = $1
        AND q.question_type IN ('mcq', 'true_false')
-       AND (ca.validation_status IS NULL OR ca.validation_status != 'READY')`,
+       AND (
+         ca.validation_status IS NULL
+         OR (
+           ca.validation_status IN ('PENDING', 'VALIDATED', 'LOW_EVIDENCE')
+           AND (ca.next_retry_at IS NULL OR ca.next_retry_at <= now())
+         )
+       )`,
     [examId],
   );
   return parseInt(rows[0]?.cnt ?? '0', 10);
@@ -201,6 +229,9 @@ interface DbRow {
   evidence_pages:    unknown;
   validation_status: string;
   retrieval_version: number;
+  attempt_count:     number;
+  last_attempt_at:   Date | null;
+  next_retry_at:     Date | null;
   created_at:        Date;
   updated_at:        Date;
   verified:          boolean;
@@ -225,6 +256,9 @@ function rowToCanonical(row: DbRow): CanonicalAnswer {
     evidencePages:    parseJsonArray(row.evidence_pages),
     validationStatus: row.validation_status as ValidationStatus,
     retrievalVersion: row.retrieval_version,
+    attemptCount:     row.attempt_count     ?? 0,
+    lastAttemptAt:    row.last_attempt_at   ?? null,
+    nextRetryAt:      row.next_retry_at     ?? null,
     createdAt:        row.created_at,
     updatedAt:        row.updated_at,
     verified:         row.verified,
