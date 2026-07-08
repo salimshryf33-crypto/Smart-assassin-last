@@ -1,0 +1,17 @@
+/**
+ * examValidation/index.ts
+ *
+ * Public API for the Exam Validation Pipeline and Canonical Answer Layer.
+ *
+ * Import from here — not from individual module files.
+ */
+
+export { runValidationForExam, runStartupValidation } from './validationPipeline';
+export { getPublishReadiness, listByExamId, countUnready } from './canonicalAnswerStore';
+export { CONFIDENCE_THRESHOLD, DailyQuotaExhaustedError } from './canonicalAnswerDeriver';
+export type {
+  CanonicalAnswer,
+  ValidationStatus,
+  PublishReadinessResult,
+  PipelineQuestion,
+} from './types';

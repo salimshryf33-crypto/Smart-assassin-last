@@ -30,6 +30,7 @@ import {
 import { normalizeAll, deduplicateEnhanced } from './questionNormalizer';
 import { getCachedExtraction, setCachedExtraction, getExtractionCacheStats } from './extractionCache';
 import { saveQuestionsToFile } from './questionStorage';
+import { runValidationForExam } from './examValidation';
 import type { InsertExamQuestion } from '@workspace/db';
 
 // Lazy import to avoid circular dependency (curriculumLinker → examStore ← questionExtractor)
@@ -678,6 +679,20 @@ export async function triggerQuestionExtraction(docId: string): Promise<void> {
 
     // Phase 2: trigger curriculum matching asynchronously — never blocks extraction
     fireCurriculumMatch(examId).catch(() => {});
+
+    // Phase 1 Foundation: run validation pipeline in background.
+    // Derives canonical answers via Hybrid RAG + Gemini for any MCQ question
+    // where correct_answer is null. Fire-and-forget — never blocks extraction.
+    runValidationForExam(examId).catch((err: unknown) => {
+      if (err instanceof Error && err.name === 'DailyQuotaExhaustedError') {
+        logger.warn(
+          { examId },
+          'triggerQuestionExtraction: validation deferred — Gemini daily quota exhausted',
+        );
+      } else {
+        logger.error({ err, examId }, 'triggerQuestionExtraction: validation pipeline error');
+      }
+    });
 
   } catch (err) {
     // Daily quota: re-throw so batch callers can stop

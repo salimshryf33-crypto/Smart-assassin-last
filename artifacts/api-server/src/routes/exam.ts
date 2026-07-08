@@ -1,13 +1,16 @@
 /**
  * Exam Bank API routes
  *
- * GET    /api/exams/records              — list exam records visible to caller
- * GET    /api/exams/records/:examId      — single exam record
- * DELETE /api/exams/records/:examId      — delete exam record + questions (admin or owner)
- * GET    /api/exams/records/:examId/questions — list questions for an exam
- * GET    /api/exams/questions            — search questions by country/grade/subject
- * DELETE /api/exams/questions/:id        — delete a single question (admin or owner)
- * POST   /api/exams/records/:examId/retry — retry extraction for error/pending record (admin)
+ * GET    /api/exams/records                         — list exam records visible to caller
+ * GET    /api/exams/records/:examId                 — single exam record
+ * DELETE /api/exams/records/:examId                 — delete exam record + questions (admin or owner)
+ * GET    /api/exams/records/:examId/questions       — list questions for an exam
+ * GET    /api/exams/questions                       — search questions by country/grade/subject
+ * DELETE /api/exams/questions/:id                   — delete a single question (admin only)
+ * POST   /api/exams/records/:examId/retry           — retry extraction (admin)
+ * GET    /api/exams/records/:examId/validation      — canonical answer validation status (admin)
+ * POST   /api/exams/records/:examId/validate        — trigger validation pipeline (admin)
+ * POST   /api/exams/records/:examId/publish         — safely publish exam (admin/owner); blocks if not READY
  */
 import { Router } from 'express';
 import { examStore } from '../lib/examStore';
@@ -15,6 +18,12 @@ import { triggerQuestionExtraction } from '../lib/questionExtractor';
 import { requireAuth, requireAdmin, isAdmin } from '../middleware/auth';
 import { loadChunks } from '../lib/curriculumStorage';
 import { analyzeOcrText, detectQuestionPatterns } from '../lib/ocrQualityAnalyzer';
+import {
+  getPublishReadiness,
+  listByExamId        as listCanonicalAnswers,
+  runValidationForExam,
+  DailyQuotaExhaustedError,
+} from '../lib/examValidation';
 
 const router = Router();
 
@@ -266,6 +275,110 @@ router.post('/records/:examId/retry', requireAuth, requireAdmin, async (req, res
 
     req.log.info({ examId, docId: record.curriculumDocId }, 'Exam extraction retry queued');
     res.status(202).json({ examId, status: 'extracting', message: 'Re-extraction queued' });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ─── GET /api/exams/records/:examId/validation ───────────────────────────────
+// Returns canonical answer validation status for every MCQ question in an exam.
+// Admin-only — exposes internal confidence scores and evidence references.
+router.get('/records/:examId/validation', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const examId = str(req.params.examId);
+    const record = await examStore.getExamRecord(examId);
+    if (!record) { res.status(404).json({ error: 'Exam record not found' }); return; }
+
+    const [readiness, canonicalAnswers] = await Promise.all([
+      getPublishReadiness(examId),
+      listCanonicalAnswers(examId),
+    ]);
+
+    res.json({
+      examId,
+      title:           record.title,
+      questionCount:   record.questionCount,
+      readiness,
+      canonicalAnswers,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ─── POST /api/exams/records/:examId/validate ────────────────────────────────
+// Admin-only — manually trigger the validation pipeline for an exam.
+// Useful for retrying LOW_EVIDENCE questions after curriculum is updated.
+router.post('/records/:examId/validate', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const examId = str(req.params.examId);
+    const record = await examStore.getExamRecord(examId);
+    if (!record) { res.status(404).json({ error: 'Exam record not found' }); return; }
+
+    if (record.extractionStatus !== 'done') {
+      res.status(409).json({ error: 'Exam extraction not yet complete' });
+      return;
+    }
+
+    // Fire-and-forget so the endpoint returns immediately
+    runValidationForExam(examId).catch((err: unknown) => {
+      if (err instanceof DailyQuotaExhaustedError) {
+        req.log.warn({ examId }, 'validate: Gemini daily quota exhausted mid-run');
+      } else {
+        req.log.error({ err, examId }, 'validate: pipeline error');
+      }
+    });
+
+    req.log.info({ examId }, 'validate: pipeline queued');
+    res.status(202).json({ examId, status: 'validating', message: 'Validation pipeline queued' });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ─── POST /api/exams/records/:examId/publish ─────────────────────────────────
+// Safely publish an exam. Blocks if any MCQ question is not READY.
+// Admin or owner of a private exam may publish.
+router.post('/records/:examId/publish', requireAuth, async (req, res) => {
+  try {
+    const examId = str(req.params.examId);
+    const record = await examStore.getExamRecord(examId);
+    if (!record) { res.status(404).json({ error: 'Exam record not found' }); return; }
+
+    const uid   = req.user!.uid;
+    const admin = isAdmin(req.user!);
+    const owner = record.ownerId === uid;
+
+    if (!admin && !owner) {
+      res.status(403).json({ error: 'Only the owner or an admin may publish this exam' });
+      return;
+    }
+
+    if (record.extractionStatus !== 'done') {
+      res.status(409).json({ error: 'Exam extraction not yet complete' });
+      return;
+    }
+
+    if ((record.questionCount ?? 0) === 0) {
+      res.status(422).json({ error: 'Exam has no questions — cannot publish' });
+      return;
+    }
+
+    // Safety gate: ensure all MCQ questions have canonical answers
+    const readiness = await getPublishReadiness(examId);
+
+    if (!readiness.ready) {
+      res.status(422).json({
+        error: 'Exam is not ready to publish — some MCQ questions lack validated canonical answers',
+        readiness,
+      });
+      return;
+    }
+
+    await examStore.upsertExamRecord({ ...record, visibility: 'public' });
+
+    req.log.info({ examId, publishedBy: uid }, 'exam published');
+    res.json({ examId, visibility: 'public', readiness });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }

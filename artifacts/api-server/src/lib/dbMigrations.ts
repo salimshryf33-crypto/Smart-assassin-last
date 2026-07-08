@@ -305,6 +305,36 @@ const CREATE_MATCHER_WEIGHTS = `
   ON CONFLICT (id) DO NOTHING;
 `;
 
+// ─── Exam Canonical Answers (Phase 1 Foundation) ─────────────────────────────
+//
+// One row per exam question that has passed through the validation pipeline.
+// Stores the canonical answer, confidence score, and curriculum evidence used.
+// exam_questions.correct_answer is backfilled from this table when status=READY.
+const CREATE_EXAM_CANONICAL_ANSWERS = `
+  CREATE TABLE IF NOT EXISTS public.exam_canonical_answers (
+    id                  TEXT        PRIMARY KEY,
+    question_id         TEXT        NOT NULL UNIQUE
+                                    REFERENCES public.exam_questions(id) ON DELETE CASCADE,
+    correct_option      TEXT,
+    confidence          NUMERIC(4,3),
+    reasoning_summary   TEXT,
+    evidence_chunk_ids  JSONB       NOT NULL DEFAULT '[]',
+    evidence_pages      JSONB       NOT NULL DEFAULT '[]',
+    validation_status   TEXT        NOT NULL DEFAULT 'PENDING'
+                                    CHECK (validation_status IN
+                                      ('PENDING','VALIDATED','LOW_EVIDENCE','INVALID','READY')),
+    retrieval_version   INTEGER     NOT NULL DEFAULT 1,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    verified            BOOLEAN     NOT NULL DEFAULT false
+  );
+  CREATE INDEX IF NOT EXISTS idx_eca_question_id ON public.exam_canonical_answers (question_id);
+  CREATE INDEX IF NOT EXISTS idx_eca_status      ON public.exam_canonical_answers (validation_status);
+  CREATE INDEX IF NOT EXISTS idx_eca_exam
+    ON public.exam_canonical_answers (question_id)
+    INCLUDE (validation_status, correct_option);
+`;
+
 // ─── Flashcards ───────────────────────────────────────────────────────────────
 const CREATE_FLASHCARDS = `
   CREATE TABLE IF NOT EXISTS public.flashcards (
@@ -349,6 +379,7 @@ export async function runStartupMigrations(): Promise<void> {
     await db.query(CREATE_CURRICULUM_LINKS);
     await db.query(CREATE_MATCHER_WEIGHTS);
     await db.query(CREATE_CURRICULUM_PDFS);
+    await db.query(CREATE_EXAM_CANONICAL_ANSWERS);
     // Backward-compatible additive column migrations
     await db.query(`ALTER TABLE public.db_backup_log ADD COLUMN IF NOT EXISTS backup_data BYTEA`);
     await db.query(`ALTER TABLE public.weakness_snapshots ADD COLUMN IF NOT EXISTS weak_topics_json TEXT`);

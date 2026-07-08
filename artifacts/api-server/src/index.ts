@@ -9,6 +9,7 @@ import { startBackupScheduler } from "./lib/backupScheduler";
 import { restoreCurriculumFromDB } from "./lib/curriculumPersistence";
 import { scanUnlinkedExams } from "./lib/curriculumLinker";
 import { hasQuestionsSnapshot, loadQuestionsFromFile } from "./lib/questionStorage";
+import { runStartupValidation } from "./lib/examValidation";
 
 const rawPort = process.env["PORT"];
 
@@ -71,6 +72,15 @@ app.listen(port, (err) => {
   syncAndRecoverExams().catch((err) =>
     logger.error({ err }, 'syncAndRecoverExams: unexpected error')
   );
+
+  // Phase 1 Foundation: validate all extracted exam questions and derive canonical
+  // answers for any MCQ with correct_answer = null.
+  // Delayed 15s so syncAndRecoverExams has time to restore questions first.
+  setTimeout(() => {
+    runStartupValidation().catch((err) =>
+      logger.error({ err }, 'runStartupValidation: unexpected error')
+    );
+  }, 15_000);
 });
 
 // ─── Sync index.json exam docs → exam_records, then extract pending ───────────

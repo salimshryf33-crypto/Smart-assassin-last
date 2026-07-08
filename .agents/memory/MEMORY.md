@@ -21,3 +21,4 @@
 - [Phase 3 AI Teacher Intelligence](phase3-ai-teacher.md) — ephemeral StudentLearningContext built from WeaknessProfile per-request; injected into all 3 prompt modes; never stored; optional recommendation section.
 - [Exam Correction Bug Fixes](exam-correction-bugs.md) — 4 bugs: duplicate answer rows (deterministic ID fix), JSON truncation in curriculumGrader (MAX_TOKENS 512→2048 + regex fallback), MCQ key mismatch, options array format.
 - [Correction Engine Failure Modes](correction-engine-failures.md) — 6 failure modes diagnosed; Critical #1 (post-topK docId filter) fixed; Critical #2 (un-normalized Arabic in Stage 2) still open.
+- [Phase 1 Validation Pipeline](phase1-validation-pipeline.md) — RAG+Gemini derives MCQ correct_answer; exam_canonical_answers table; CONFIDENCE_THRESHOLD=0.70; 3 API routes; startup scan with 15s delay; free tier ~20 q/day.

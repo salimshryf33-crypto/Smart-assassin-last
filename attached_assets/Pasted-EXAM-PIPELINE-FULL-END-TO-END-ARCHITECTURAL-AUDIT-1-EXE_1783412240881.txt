@@ -1,0 +1,698 @@
+EXAM PIPELINE — FULL END-TO-END ARCHITECTURAL AUDIT
+1. EXECUTIVE SUMMARY
+The Sage exam pipeline consists of nine identifiable stages: curriculum ingestion, question extraction, question storage, answer key generation, exam publishing, attempt creation, grading, weakness analysis, and flashcard generation.
+
+Seven of those nine stages are implemented and functional. The pipeline is architecturally coherent, well-structured, and handles edge cases (OCR fallback, quota exhaustion, DB recovery, Jaccard dedup) with genuine sophistication.
+
+One stage is entirely absent: Answer Key Enrichment — the process of giving MCQ questions a correctAnswer when that answer is not embedded in the source PDF. This is not a runtime bug. It is a missing pipeline stage.
+
+One stage is architecturally naïve in its safety gates: Publishing — an exam with zero gradeable questions can be made visibility='public' and served to students with no validation warning.
+
+Every downstream component — grading, weakness tracking, flashcard backs — degrades silently when correct_answer is NULL. Nothing throws. Nothing warns. The system produces a completed, scored, analyzed exam that is numerically meaningless.
+
+2. ARCHITECTURE DIAGRAM
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         SAGE EXAM PIPELINE                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+  ADMIN / TEACHER
+       │
+       ▼
+┌─────────────────┐     ┌──────────────────┐     ✓ = Implemented
+│  PDF Upload     │────▶│  curriculumQueue  │     ✗ = Missing
+│  POST /upload   │     │  (background job) │     ⚠ = Partial / Silent failure
+│  multer 150MB   │     └──────────────────┘
+│  SHA-256 dedup  │              │
+│  PDF validated  │              ▼
+│  ✓ COMPLETE     │     ┌──────────────────┐
+└─────────────────┘     │   pdfExtractor   │
+       │                │   4-stage OCR    │
+       │                │   (native→image) │
+       │                │   ✓ COMPLETE     │
+       │                └──────────────────┘
+       │                        │
+       ▼                        ▼
+┌─────────────────┐     ┌──────────────────┐
+│  PDF Storage    │     │    chunker.ts    │
+│  disk: pdfs/    │     │  4pg chunks      │
+│  PG: curriculum │     │  5000 char limit │
+│  _pdfs bytea    │     │  embeddings:     │
+│  ✓ COMPLETE     │     │  text-embed-004  │
+└─────────────────┘     │  ✓ COMPLETE      │
+                        └──────────────────┘
+                                 │
+                                 ▼
+                        ┌──────────────────┐
+                        │ curriculumStorage│
+                        │ index.json       │
+                        │ curriculum_docs  │
+                        │ Redis cache      │
+                        │ Hybrid RAG search│
+                        │ ✓ COMPLETE       │
+                        └──────────────────┘
+                                 │
+                                 │ (docType='exam' detected)
+                                 ▼
+                        ┌──────────────────┐
+                        │questionExtractor │
+                        │ 3-pass Gemini    │
+                        │ buildPrompt()    │
+                        │ dedup (J≥0.80)   │
+                        │ normalizeAll()   │
+                        │ ✓ COMPLETE       │
+                        │ ⚠ correctAnswer  │
+                        │   = null when    │
+                        │   not in PDF     │
+                        └──────────────────┘
+                                 │
+                                 ▼
+                   ╔═════════════════════════╗
+                   ║  ✗ ANSWER KEY STAGE     ║
+                   ║       MISSING           ║
+                   ║                         ║
+                   ║  No route.              ║
+                   ║  No job.                ║
+                   ║  No RAG enricher.       ║
+                   ║  No admin input.        ║
+                   ║  No verifier.           ║
+                   ╚═════════════════════════╝
+                                 │
+                                 ▼
+                        ┌──────────────────┐
+                        │ questionStorage  │
+                        │ snapshot .json   │
+                        │ examStore.save   │
+                        │ INSERT only      │
+                        │ no UPDATE path   │
+                        │ ✓ COMPLETE       │
+                        │ ⚠ propagates     │
+                        │   null answers   │
+                        └──────────────────┘
+                                 │
+                                 ▼
+                        ┌──────────────────┐
+                        │ exam_records     │
+                        │ visibility gate  │
+                        │ extractionStatus │
+                        │ questionCount    │
+                        │ ⚠ PARTIAL        │
+                        │   No nullAnswer  │
+                        │   guard before   │
+                        │   publish        │
+                        └──────────────────┘
+                                 │
+                    ┌────────────┴────────────┐
+                    ▼                         ▼
+           STUDENT TAKES EXAM        ADMIN PUBLISHES
+                    │                         │
+                    ▼                    (no gate → ⚠)
+           ┌──────────────────┐
+           │ exam_attempts    │
+           │ POST /start      │
+           │ POST /answer     │
+           │ POST /submit     │
+           │ ✓ COMPLETE       │
+           └──────────────────┘
+                    │
+                    ▼
+           ┌──────────────────┐
+           │correctionEngine  │
+           │deterministicGrdr │
+           │ if !correctAnswer│
+           │   → isCorrect=F  │
+           │   (short-circuit)│
+           │ ✓ CODE CORRECT   │
+           │ ✗ DATA MISSING   │
+           └──────────────────┘
+                    │
+         ┌──────────┼──────────┐
+         ▼          ▼          ▼
+  ┌────────────┐  ┌──────┐  ┌────────────────┐
+  │exam_answers│  │score │  │weaknessAnalyzer│
+  │is_correct=F│  │ 0.00 │  │topic_scores    │
+  │all MCQ     │  │      │  │correct=0 all   │
+  │✓ stored    │  │✓ calc│  │weakScore=1.0   │
+  │⚠ all wrong │  │⚠ 0   │  │⚠ POISONED      │
+  └────────────┘  └──────┘  └────────────────┘
+         │
+         ▼
+  ┌────────────────┐
+  │ Flashcards     │
+  │ back=correctAns│
+  │    ?? explantn │
+  │    ?? aiFeedbk │
+  │    ?? 'راجع'   │
+  │ ⚠ back='راجع' │
+  │   (no content) │
+  └────────────────┘
+3. PHASE-BY-PHASE TRACE
+PHASE 1 — CURRICULUM INGESTION ✓ COMPLETE
+Entry Point: POST /api/curriculum/upload → routes/curriculum.ts
+
+Middleware Stack (in order):
+
+requireAuth — Firebase JWT verification
+rateLimit('pdf_upload') — token-bucket rate limiter (PostgreSQL-backed)
+multer — multipart/form-data, temp storage at data/tmp/
+PDF validator — magic bytes check + SHA-256 dedup + malicious pattern scan
+PDF Storage (dual-write):
+
+Layer	Path / Table	Implementation
+Disk	data/pdfs/{docId}.pdf	curriculumStorage.getPdfPath()
+PostgreSQL	public.curriculum_pdfs (bytea)	pdfPersistence.savePdfToDb()
+At restart: if disk file missing, restores from curriculum_pdfs table.
+
+OCR Pipeline (pdfExtractor.ts):
+
+Stage 1: Native text-layer extraction (pdf-parse)
+         ↓ if empty/garbled
+Stage 2: Form-feed split (physical page boundaries)
+         ↓ if still poor
+Stage 3: Virtual page split (heuristic page markers)
+         ↓ if still poor
+Stage 4: Image OCR — pdftoppm → PNG → Gemini gemini-2.5-flash inline
+         ↓
+         Raw text per page
+Supports resume (startFromPage), QuotaExhaustedError bailout, partial status + appendChunks.
+
+Chunk Generation (chunker.ts):
+
+PAGES_PER_CHUNK = 4
+MAX_CHUNK_CHARS = 5000 — sub-split at whitespace if exceeded
+Every CurriculumChunk carries: {id, docId, country, grade, subject, chapter, pageRange, chunkIndex, content, contentNormalized, keywords, embedding}
+Embeddings:
+
+Model: text-embedding-004 via embeddingService.ts
+Storage: embedded directly in chunk JSON files on disk + curriculum_chunks.embedding JSONB
+Timing: async post-ingestion, also backfilled at startup (generateMissingEmbeddings())
+Vector Index: No standalone vector DB (Pinecone/pgvector/etc). Hybrid scoring computed at query time in searchChunks(): cosine similarity on stored embeddings + trigram keyword weight (×25).
+
+Curriculum Registry:
+
+Disk: data/curriculum/index.json — array of CurriculumDocument objects
+PostgreSQL: curriculum_documents table, mirrored via curriculumPersistence.upsertDocMetaToDB()
+Key document fields: {id, filename, subject, grade, country, track, visibility, status, docType, ownerId}
+Search Cache: Redis, key = search:{userId}:{subject}:{hash}, TTL = cache.TTL.SEARCH. X-Cache: HIT/MISS header on every response.
+
+Final Searchability: GET /api/curriculum/search → searchChunks(query, filters) in curriculumStorage.ts Chunks become searchable once embeddings are generated (async — may lag upload by seconds to minutes depending on chunk count).
+
+PHASE 2 — QUESTION EXTRACTION ✓ COMPLETE (with data-quality gap)
+Triggers (4 paths):
+
+Trigger	Location	When
+Upload pipeline	curriculumQueue.ts	After OCR completes for docType='exam'
+Startup sync	index.ts syncAndRecoverExams()	Pending/error/stuck exams on boot
+Admin manual	routes/admin.ts	Explicit admin POST
+On-demand	routes/exam.ts	Exam requested but questionCount=0
+Call Chain:
+
+triggerQuestionExtraction(docId)
+  → loadChunks(docId)           — reads chunk JSON files from disk
+  → compressFillerDots(chunk)   — strips long .... / ____ runs (token saving)
+  → buildPrompt(chunkText, examTitle)  — per chunk
+  → callGemini(prompt)          — gemini-2.5-flash, maxOutputTokens=32768
+  → parseResponse(raw)          — JSON.parse with regex fallback
+  → [REPEAT per chunk, 3 passes]
+  → normalizeAll(allParsed)     — Arabic normalization (tatweel, kashida, invisible chars)
+  → deduplicateEnhanced(normalized, { discriminatorField: 'correctAnswer' })
+     — Jaccard threshold: 0.80
+  → analyzeCoverage(chunkDiags, deduped.length)  — LOW_EXTRACTION_COVERAGE warn
+  → analyzeOcrText(allChunkText)  — OCR quality score 0-100
+  → computeExtractionScore(...)   — composite score 0-100, grade A-F
+  → saveQuestions(toInsert)        — INSERT to PostgreSQL
+  → saveQuestionsToFile(examId, toInsert)  — JSON snapshot
+  → upsertExamRecord({...status:'done', questionCount})
+Gemini Prompt (Arabic, verbatim):
+
+أنت نظام استخراج أسئلة امتحانات للمحتوى التعليمي العربي.
+استخرج كل الأسئلة من نص الامتحان التالي.
+أعد مصفوفة JSON فقط. كل عنصر يجب أن يكون:
+{
+  "question": "<نص السؤال كاملاً بالعربي>",
+  "questionType": "mcq" | "true_false" | "short_answer" | "essay" | "calculation",
+  "options": ["أ) ...", "ب) ...", "ج) ...", "د) ..."] أو null للأسئلة المقالية,
+  "correctAnswer": "<الإجابة الصحيحة أو null إذا لم تذكر في النص>",
+  "explanation": "<الشرح إن وُجد أو null>",
+  "topic": "<الموضوع إن وُجد>",
+  "chapter": "<الفصل إن وُجد>",
+  "difficulty": "easy" | "medium" | "hard" | null
+}
+Key phrase: "null إذا لم تذكر في النص" — null if not mentioned in the text. This is architecturally correct for PDFs that embed answer keys inline. It is architecturally incomplete for standalone question papers (the standard format for Sudanese national exams).
+
+Multi-Pass Extraction:
+
+Pass	Trigger	Prompt
+Pass 1	Always	buildPrompt() — standard extraction
+Pass 2	LOW_EXTRACTION_COVERAGE flag	buildRetryPrompt() — aggressive, includes table handling
+Pass 3	Chunk returned 0 questions but had question-pattern signals	buildRecoveryPrompt() — targeted recovery
+Final Output Shape (per question before INSERT):
+
+{
+  id:               uuidv4(),          // generated here
+  examId:           string,            // from exam_record
+  question:         string,            // from Gemini
+  questionType:     'mcq' | ...,       // from Gemini
+  options:          string[] | null,   // from Gemini (["أ) ...", ...])
+  correctAnswer:    string | null,     // from Gemini — null if not in PDF text
+  explanation:      string | null,     // from Gemini
+  topic:            string | null,     // from Gemini
+  chapter:          string | null,     // from Gemini
+  subject:          string,            // from curriculum document metadata
+  grade:            string,            // from curriculum document metadata
+  country:          string,            // from curriculum document metadata
+  year:             null,              // always null (not extracted from prompt)
+  examType:         'final',           // hardcoded
+  difficulty:       string | null,     // from Gemini
+  organization:     null,              // always null
+  sourceExamId:     string,            // = examId
+  sourceExamTitle:  string,            // from exam_record.title
+  questionOrder:    idx + 1,           // positional
+}
+PHASE 3 — QUESTION STORAGE ✓ COMPLETE (propagates null)
+Two parallel write paths execute simultaneously:
+
+Path A — PostgreSQL (runtime):
+
+examStore.saveQuestions(InsertExamQuestion[])
+  → db.insert(examQuestionsTable).values(questions.slice(i, i+100))
+  — chunked in 100-row batches
+  — INSERT only — no onConflictDoUpdate
+  — no UPDATE path exists anywhere in codebase
+Path B — JSON snapshot (disaster recovery):
+
+saveQuestionsToFile(examId, InsertExamQuestion[])
+  → DATA_DIR = path.resolve(dirname(dist/index.mjs), '../../data/curriculum/questions')
+            = artifacts/data/curriculum/questions/    ← resolved at runtime
+  → writes: {version:1, examId, savedAt, count, questions: [...]}
+  → file: {examId}.json
+Field-by-field transformation (Gemini JSON → DB column):
+
+Gemini field	InsertExamQuestion field	DB column	Nullable
+question	question	question TEXT NOT NULL	✗
+questionType	questionType	question_type TEXT	✗ (default 'mcq')
+options	options	options JSONB	✓
+correctAnswer	correctAnswer	correct_answer TEXT	✓ (critical)
+explanation	explanation	explanation TEXT	✓
+topic	topic	topic TEXT	✓
+chapter	chapter	chapter TEXT	✓
+difficulty	difficulty	difficulty TEXT	✓
+(generated)	id	id TEXT PRIMARY KEY	✗
+(from doc)	subject	subject TEXT NOT NULL	✗
+(from doc)	grade	grade TEXT NOT NULL	✗
+(from doc)	country	country TEXT NOT NULL	✗
+(hardcoded null)	year	year TEXT	✓
+(hardcoded)	examType	exam_type TEXT	✓
+(hardcoded null)	organization	organization TEXT	✓
+Startup recovery path (runs every restart):
+
+syncAndRecoverExams()
+  → listExamRecords (all)
+  → filter: status IN ('pending','extracting','error') OR (status='done' AND questionCount=0)
+  → for each pending:
+      if hasQuestionsSnapshot(examId):
+          questions = loadQuestionsFromFile(examId)
+          examStore.saveQuestions(questions)     ← same INSERT, same null propagation
+          upsertExamRecord({status:'done', questionCount})
+      else:
+          triggerQuestionExtraction()            ← Gemini re-extraction
+The snapshot is an exact serialization of InsertExamQuestion[]. No transformation occurs during restore. correctAnswer: null in the snapshot → correct_answer = NULL in PostgreSQL after restore.
+
+PHASE 4 — ANSWER KEY GENERATION ✗ MISSING
+Exhaustive search result: this phase does not exist.
+
+The following were searched and confirmed absent:
+
+What was searched	Result
+Any UPDATE exam_questions SQL statement	Zero occurrences
+Any UPDATE.*correct_answer	Zero occurrences
+Any PATCH/PUT route for exam_questions	Zero routes exist
+Any admin API to set correctAnswer	None
+Any RAG pipeline that derives answers from curriculum chunks	None
+Any background job/cron that enriches questions post-extraction	None
+Any migration that populates correctAnswer	None
+Any onConflictDoUpdate in saveQuestions()	None — INSERT only
+Any "answer key upload" endpoint or concept	None
+Any function named generateAnswerKey, enrichAnswers, etc.	None
+What examGenerator.ts does (and why it does not fill this gap): examGenerator.ts generates synthetic exam questions from curriculum chunks. It prompts Gemini to produce {question, options, correctAnswer, explanation} in one pass — Gemini invents questions AND their answers simultaneously from curriculum text. This only applies to generated (synthetic) exams. It does not retroactively enrich real extracted exam questions that arrived with correctAnswer = null.
+
+Lifecycle proof (no update path exists):
+
+1. triggerQuestionExtraction()
+   → Gemini returns correctAnswer=null (not in PDF text)
+   
+2. examStore.saveQuestions()
+   → INSERT INTO exam_questions ... correct_answer = NULL
+   
+3. saveQuestionsToFile()
+   → snapshot: {correctAnswer: null}
+   
+4. [NOTHING WRITES HERE]
+   
+5. deterministicGrader reads correct_answer = NULL
+   → returns isCorrect=false immediately
+   
+6. [STILL NOTHING WRITES HERE]
+   
+7. Next restart: loadQuestionsFromFile() → saveQuestions()
+   → same INSERT, NULL propagated again
+Current state in production DB:
+
+Exam	Questions	correctAnswer populated
+إمتحان الأحياء 2024	50	0 / 50 (0%)
+إمتحان الأحياء 2022	87	0 / 87 (0%)
+إمتحان الكيمياء 2022	48	1 / 48 (2%)
+Total	185	1 / 185 (0.5%)
+PHASE 5 — PUBLISHING ⚠️ PARTIAL
+exam_records state machine:
+
+pending → extracting → done
+                    ↘ error
+Visibility values: 'private' (default) | 'public'
+
+listExamRecords() for non-admin students:
+
+SELECT * FROM exam_records
+WHERE visibility = 'public'
+   OR (visibility = 'private' AND owner_id = :userId)
+No filter on extraction_status — an exam with status='error' that is also visibility='public' will appear in student listings.
+
+No filter on question_count — an exam with question_count=0 and visibility='public' will appear.
+
+No filter on correct_answer completeness — no concept of "gradeable" exists at the publishing layer.
+
+POST /start guard (access check only):
+
+if (record.visibility === 'private' && record.ownerId !== uid && !isAdmin(req.user!)) {
+  return 403;
+}
+// No check: record.extractionStatus !== 'done'
+// No check: record.questionCount > 0
+// No check: questions have non-null correctAnswer
+Can an exam with all-null correctAnswer be published and attempted?
+
+Yes. Confirmed live. Biology 2024: visibility='public', extraction_status='done', question_count=50, correct_answer=NULL for all 50 rows. Students can start, answer, and submit this exam. They receive a score of 0.00 regardless of their actual answers.
+
+PHASE 6 — ATTEMPT CREATION ✓ COMPLETE
+POST /api/exams/solve/start → creates exam_attempts row:
+
+{id, examId, studentId, status:'in_progress', totalQuestions:record.questionCount,
+ correctCount:0, scorePct:null, startedAt:now(), completedAt:null}
+Returns questions without correctAnswer (security correct — answers not exposed to student).
+
+POST /api/exams/solve/:attemptId/answer → upsert exam_answers:
+
+{id: `${attemptId}::${questionId}`, attemptId, questionId, studentAnswer, isCorrect:null,
+ gradingMethod:null, aiFeedback:null, answeredAt:now()}
+POST /api/exams/solve/:attemptId/submit → gradeAttempt():
+
+Loads all exam_answers for the attempt
+Loads exam_questions for those IDs
+Per question: calls correction engine
+Writes isCorrect, gradingMethod, aiFeedback back to each exam_answers row
+Computes correctCount = answers.filter(a => a.isCorrect).length
+Computes scorePct = (correctCount / totalQuestions) * 100
+Updates exam_attempts: {status:'completed', correctCount, scorePct, completedAt:now()}
+Fire-and-forget: updateWeaknessFromAttempt(), generateFlashcardsFromAttempt()
+Returns {correctCount, scorePct, ...} immediately
+Complete table schemas:
+
+exam_attempts:
+
+id              TEXT PRIMARY KEY
+exam_id         TEXT NOT NULL REFERENCES exam_records ON DELETE CASCADE
+student_id      TEXT NOT NULL
+status          TEXT NOT NULL DEFAULT 'in_progress'
+total_questions INTEGER DEFAULT 0
+correct_count   INTEGER DEFAULT 0
+score_pct       NUMERIC(5,2)
+started_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+completed_at    TIMESTAMPTZ
+exam_answers:
+
+id              TEXT PRIMARY KEY   -- format: '{attemptId}::{questionId}'
+attempt_id      TEXT NOT NULL REFERENCES exam_attempts ON DELETE CASCADE
+question_id     TEXT NOT NULL REFERENCES exam_questions
+student_answer  TEXT
+is_correct      BOOLEAN
+grading_method  TEXT               -- 'exact' | 'ai' | 'skipped'
+ai_feedback     TEXT
+answered_at     TIMESTAMPTZ
+PHASE 7 — WEAKNESS ENGINE ✗ SILENTLY POISONED
+Trigger: updateWeaknessFromAttempt(attemptId, studentId) — fire-and-forget, immediately after gradeAttempt() completes.
+
+Data flow:
+
+// 1. Load all graded answers
+const answers = getAnswersByAttempt(attemptId)
+const qIds = answers.map(a => a.questionId)
+const questions = getQuestionsByIds(qIds)
+// 2. Group by (country, grade, subject) → topic → {correct, total}
+for each answer:
+    topic = question.topic ?? question.chapter ?? 'عام'
+    key   = `${country}::${grade}::${subject}`
+    entry.total++
+    if (answer.isCorrect) entry.correct++     // ← with null answers, never true
+// 3. Merge with previous snapshot (accumulates across all attempts)
+merged.correct = prev.correct + counts.correct   // += 0 each time
+merged.total   = prev.total   + counts.total     // keeps growing
+merged.score   = merged.correct / merged.total   // stays 0.0
+// 4. Upsert weakness_snapshots
+upsertWeaknessSnapshot(studentId, country, grade, subject, newScores, totalExams)
+weakness_snapshots schema:
+
+id           SERIAL PRIMARY KEY
+student_id   TEXT NOT NULL
+country      TEXT NOT NULL
+grade        TEXT NOT NULL
+subject      TEXT NOT NULL
+topic_scores JSONB NOT NULL DEFAULT '{}'
+total_exams  INTEGER DEFAULT 0
+last_updated TIMESTAMPTZ DEFAULT now()
+UNIQUE (student_id, country, grade, subject)
+topic_scores JSONB structure:
+
+{
+  "الوراثة":          {"correct": 0, "total": 5, "score": 0.0},
+  "الإيكولوجيا":      {"correct": 0, "total": 3, "score": 0.0},
+  "الجهاز العصبي":   {"correct": 0, "total": 4, "score": 0.0}
+}
+weaknessScore computation:
+
+weaknessScore = 1 - ts.score   // = 1 - 0.0 = 1.0 for every topic
+Result: Every topic in every exam the student has taken shows weaknessScore = 1.0 (maximum weakness). A student who correctly answers every question still appears to have 0% proficiency in every topic. The weakness dashboard becomes noise: it reports everything as catastrophically weak, which is identical to reporting nothing.
+
+No floor, no null-check, no "data integrity" flag. The engine processes whatever isCorrect values it receives, faithfully computing a score from poisoned input.
+
+PHASE 8 — FLASHCARDS ⚠️ DEGRADED
+Two flashcard generation paths:
+
+Path A — AI Chat (flashcardGenEngine.ts): Triggered by AI tutor responses. Extracts "key concepts" from chat context. Completely independent of exam correctAnswer. Not affected by the answer-key gap.
+
+Path B — Exam Wrong Answers (routes/examSolver.ts /flashcards):
+
+GET /api/exams/solve/:attemptId/flashcards
+const wrong = answers.filter((a) => a.isCorrect === false)
+// ↑ With null answers: all 10 MCQ answers qualify as "wrong"
+for each wrong answer:
+  flashcard = {
+    front:         question.question,
+    back:          question.correctAnswer    // NULL
+                   ?? question.explanation  // NULL (rarely populated)
+                   ?? answer.aiFeedback     // NULL (deterministicGrader skipped AI)
+                   ?? 'راجع الشرح',         // ← always falls through to this
+    category:      question.topic ?? question.chapter ?? question.subject ?? 'عام',
+    source:        'exam_question',
+    studentAnswer: answer.studentAnswer,
+    aiFeedback:    null,
+  }
+Impact:
+
+Every MCQ question produces a flashcard (10/10, not just wrong answers)
+Every flashcard back = 'راجع الشرح' (Arabic: "Review the explanation")
+Zero learning content in the back
+SM-2 scheduler still runs on these cards — repetition intervals are computed and stored, but the student is reviewing blank cards
+Daily limit: MAX_FLASHCARDS_PER_DAY = 10. With 10 "wrong" answers per exam, the limit is consumed on the first exam session, blocking AI-chat flashcards for the rest of the day.
+
+4. DATA TRANSFORMATIONS (Complete Chain)
+PDF bytes
+  → OCR text (Gemini 2.5-flash)
+    → raw chunk text (4 pages, 5000 char limit)
+      → compressFillerDots (strip ..../____)
+        → Gemini prompt (Arabic JSON schema)
+          → raw JSON array
+            → parseResponse (JSON.parse + regex fallback)
+              → normalizeAll (Arabic normalization)
+                → deduplicateEnhanced (Jaccard 0.80)
+                  → InsertExamQuestion[] (idx+1 ordering)
+                    │
+                    ├──→ exam_questions (INSERT, 100/batch)
+                    │       correct_answer = NULL preserved
+                    │
+                    └──→ {examId}.json snapshot
+                            questions[].correctAnswer = null preserved
+                              │
+                              └──→ startup restore → INSERT again
+                                      NULL still preserved
+                                        │
+                                        ▼
+                                  deterministicGrader
+                                  !correctAnswer → isCorrect=false
+                                        │
+                              ┌─────────┴────────┐
+                              ▼                  ▼
+                        exam_answers      weaknessAnalyzer
+                        is_correct=false  correct += 0
+                        grading='exact'   weaknessScore = 1.0
+                              │
+                              ▼
+                        flashcard.back = 'راجع الشرح'
+5. EXISTING COMPONENTS ✓
+Component	File	Status
+PDF Upload + Validation	routes/curriculum.ts, middleware/pdfValidator.ts	✓
+OCR Pipeline (4-stage)	lib/pdfExtractor.ts	✓
+Chunker + Embeddings	lib/chunker.ts, lib/embeddingService.ts	✓
+Hybrid RAG Search	lib/curriculumStorage.ts searchChunks()	✓
+Curriculum Registry	index.json + curriculum_documents table	✓
+PDF Persistence (DB backup)	lib/pdfPersistence.ts, curriculum_pdfs table	✓
+Redis Cache Layer	services/cacheService.ts, services/redisService.ts	✓
+Question Extractor (3-pass)	lib/questionExtractor.ts	✓
+Extraction Quality Engine	lib/ocrQualityAnalyzer.ts, lib/extractionQuality.ts	✓
+Question Storage (snapshot)	lib/questionStorage.ts	✓
+Question DB Store	lib/examStore.ts	✓
+Startup Recovery	index.ts syncAndRecoverExams()	✓
+Exam Record Management	routes/exam.ts, exam_records table	✓
+Visibility Gate	lib/examStore.ts listExamRecords()	✓
+Attempt Creation	routes/examSolver.ts POST /start	✓
+Answer Saving	routes/examSolver.ts POST /answer	✓
+Correction Engine	lib/correctionEngine/	✓
+Deterministic Grader	lib/correctionEngine/deterministicGrader.ts	✓
+AI Grader	lib/correctionEngine/aiGrader.ts	✓
+Curriculum Authority Corrector	lib/correctionEngine/correctionEngine.ts	✓
+Weakness Analyzer	lib/weaknessAnalyzer.ts	✓
+Weakness Snapshots	weakness_snapshots table	✓
+SM-2 Flashcard Engine	lib/flashcardEngine.ts	✓
+AI Chat Flashcards	lib/engines/flashcardGenEngine.ts	✓
+Exam Flashcard Bridge	routes/examSolver.ts GET /flashcards	✓
+Streak Engine	lib/streakEngine.ts	✓
+Rate Limiter	middleware/rateLimiter.ts	✓
+RBAC	middleware/auth.ts, user_roles table	✓
+DB Backup Scheduler	lib/dbBackupScheduler.ts	✓
+Curriculum Linking Matcher	lib/curriculumMatcher.ts	✓
+Exam Generator (synthetic)	lib/examGenerator.ts	✓
+6. MISSING COMPONENTS ✗
+Component	What it should do	Impact of absence
+Answer Key Enricher	For question papers without inline answers, derive correctAnswer from curriculum text via RAG or accept admin input	All MCQ grading returns isCorrect=false
+Answer Key Upload Route	POST /api/exams/:examId/answer-key — accept a separate answer key PDF or JSON	No way to provide answers post-extraction
+RAG Answer Deriver	Given question + options + curriculum chunks → select correct option	Answers from exam papers without keys remain null
+Publish Validation Gate	Block visibility='public' if correctAnswerCoverage < threshold	Ungradeable exams reach students silently
+Gradeability Check in /start	Return 4xx or warning if exam has 0 gradeable questions	Students start exams that cannot be scored
+Answer Completeness Metric	Field on exam_records: answer_key_coverage NUMERIC (0.0–1.0)	No visibility into which exams can be graded
+correctAnswer PATCH Route	PATCH /api/exams/questions/:id with admin-only auth	No way to correct wrong answers post-extraction
+Question Update Path	examStore.updateQuestion(id, patch)	Even if answers were known, no write path exists
+Weakness Data Integrity Flag	Detect when all isCorrect=false for an attempt and exclude from weakness calculation	Weakness data permanently poisoned per-exam
+7. FIRST ARCHITECTURAL GAP
+EXAM PDF UPLOADED
+      │
+      ▼
+ OCR extracts text
+      │
+      ▼
+ Gemini extracts questions + options
+      │
+      ▼
+      ▲ ─────────────────────────────────────────────────────────┐
+      │                                                           │
+      │  THE GAP IS HERE                                          │
+      │                                                           │
+      │  The architecture assumes the source PDF is one of:       │
+      │  (A) A question paper WITH an inline answer key, OR       │
+      │  (B) A generated question set                             │
+      │                                                           │
+      │  Sudanese national exam papers are format (C):            │
+      │  A question paper distributed WITHOUT an answer key.      │
+      │  Answer keys are published separately, if at all.         │
+      │                                                           │
+      │  No handling for format (C) exists.                       │
+      │                                                           │
+      └───────────────────────────────────────────────────────────┘
+      │
+      ▼
+ correctAnswer = null for all MCQ
+      │
+      ▼
+ Saved to DB. Snapshot. Done.
+      │
+      ▼
+ [Nothing can correct this without a code change + data pipeline]
+The first missing architectural stage is between Phase 2 (Extraction) and Phase 3 (Storage):
+
+Answer Key Enrichment — the process of deriving, accepting, or verifying the correctAnswer for every MCQ question when the exam source PDF does not contain an answer key.
+
+This is not a bug in any existing component. Every existing component behaves correctly:
+
+Gemini correctly returns null when the answer is not in the text
+The storage layer correctly preserves null
+The grader correctly short-circuits on null
+The code comments even acknowledge the possibility: "correctAnswer": "<الإجابة الصحيحة أو null إذا لم تذكر في النص>"
+The problem is that the pipeline was designed with a silent assumption that exam PDFs would always contain their own answer keys. That assumption is false for this domain.
+
+8. DOWNSTREAM CONSEQUENCES
+Each consequence is silent — no exception is thrown, no error is logged, no warning is surfaced to the student or admin.
+
+Stage	Consequence
+Grading	All MCQ answers graded isCorrect=false. Score always 0.00. Equivalent to not taking the exam.
+Exam Results Page	Shows 0/N correct. Student receives "ضعيف" (Weak) regardless of actual performance.
+Weakness Snapshots	weaknessScore=1.0 for every topic. Accumulates across every exam session. Never recoverable without data reset.
+Weakness Dashboard	Reports every topic as maximally weak. Functionally identical to no data — but appears to have data, so it is trusted.
+AI Teacher Intelligence	Phase 3 injects WeaknessProfile into every Gemini tutor prompt. Tutor tells every student they are weakest in every topic — always. Tutor recommendations are noise.
+Flashcard Backs	All exam-sourced flashcard backs = 'راجع الشرح'. Students are shown blank flashcards.
+Daily Flashcard Limit	10 blank cards consume the full daily quota, blocking AI-chat cards (the only functional flashcard source) for the rest of the day.
+SM-2 Intervals	Spaced repetition intervals are computed and stored against blank cards. Effort is spent scheduling reviews of cards that teach nothing.
+Streak Engine	"Flashcard reviewed" condition is satisfiable with blank cards. Streaks are maintained even with zero learning.
+Student Trust	Every metric the student sees — score, weakness, flashcards — is incorrect in the same direction (always worst-case). A student who studies diligently and answers correctly sees identical results to one who answers randomly.
+9. COMPONENTS AFFECTED
+Component	Affected	Mechanism	Recoverable without data fix?
+deterministicGrader.ts	✗ Yes	null-guard short-circuit	No
+exam_answers table	✗ Yes	All rows: is_correct=false	No (without re-grade)
+exam_attempts table	✗ Yes	score_pct=0.00, correct_count=0	No (without re-grade)
+weaknessAnalyzer.ts	✗ Yes	correct always 0	No (without re-calculate)
+weakness_snapshots table	✗ Yes	Cumulative poisoning across sessions	No (without reset + re-calculate)
+AI Teacher (Phase 3)	✗ Yes	Tutor prompt injected with all-weak profile	No (depends on snapshots)
+examSolver.ts /flashcards	✗ Yes	isCorrect=false → all become "wrong" flashcards	No
+Flashcard backs	✗ Yes	correctAnswer ?? explanation ?? aiFeedback ?? 'راجع الشرح'	No
+Daily flashcard quota	✗ Yes	Consumed by blank exam cards	No
+SM-2 intervals	✗ Yes	Computed against blank cards	No (wasted data)
+Streak engine	⚠ Partial	Streak maintained via blank cards (not blocked)	N/A
+AI chat flashcards	✓ No	Independent of exam pipeline	N/A
+OCR pipeline	✓ No	Upstream of the gap	N/A
+Curriculum RAG search	✓ No	Independent of exam answer keys	N/A
+Authentication / RBAC	✓ No	Not data-dependent	N/A
+PDF storage	✓ No	Not data-dependent	N/A
+10. PRODUCTION READINESS ASSESSMENT
+Subsystem	Readiness	Blocker
+Curriculum ingestion	✅ Production ready	None
+OCR pipeline	✅ Production ready	None
+Hybrid RAG search	✅ Production ready	None
+Curriculum persistence	✅ Production ready	None
+Redis caching	✅ Production ready	None
+Authentication & RBAC	✅ Production ready	None
+Rate limiting & security	✅ Production ready	None
+Question extraction	⚠️ Conditionally ready	Only for PDFs with embedded answer keys
+Exam publishing	⚠️ Conditionally ready	No gradeability gate before visibility='public'
+Exam attempt creation	✅ Production ready	None
+MCQ grading	🔴 Not ready	All MCQ correctAnswer = NULL → score always 0
+Weakness analysis	🔴 Not ready	All topic scores poisoned to 1.0
+AI teacher intelligence	🔴 Not ready	Weakness profile is all-weak noise
+Exam flashcards	🔴 Not ready	All backs = 'راجع الشرح'
+AI chat flashcards	✅ Production ready	None
+Streak engine	⚠️ Conditionally ready	Streaks maintained by blank cards (inflated)
+Exam generator (synthetic)	✅ Production ready	Generates answers in one pass — not affected
+Overall: The curriculum and chat subsystems are production-ready. The exam grading subsystem requires the answer-key gap to be closed before it produces meaningful data. Any student data recorded under the current state (weakness snapshots, attempt histories) will need to be reset or re-graded once the gap is closed, as it is permanently poisoned in the same direction.
+
+11. FINAL
+The Sage exam pipeline is architecturally sound in structure but incomplete in data contract.
+
+It was designed and built for exam PDFs that self-contain their answer keys. Sudanese national exam papers do not. Every component downstream of extraction operates on the silent assumption that correct_answer is populated. None verify it. None refuse to proceed without it. The system completes every operation — extraction, storage, grading, weakness, flashcards — and at every step produces a result that is internally consistent, structurally valid, and numerically meaningless.
+
+The first missing architectural stage is Answer Key Enrichment: a mechanism by which, after extraction produces correct_answer = null for MCQ questions, those answers can be supplied — whether by uploading a separate answer key PDF, by an admin manually specifying answers, or by a RAG pipeline that reads curriculum text, considers each question and its options, and identifies the correct option from the educational content.
+
+Until that stage exists, the exam grading subsystem cannot function for the domain it was built to serve.
