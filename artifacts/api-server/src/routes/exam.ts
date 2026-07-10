@@ -24,6 +24,14 @@ import {
   runValidationForExam,
   DailyQuotaExhaustedError,
 } from '../lib/examValidation';
+import { generateIntegrityReport } from '../lib/integrity/integrityChecker';
+import { evaluatePublishGate } from '../lib/integrity/publishGate';
+import { listVersions } from '../lib/integrity/canonicalVersionStore';
+import { getRecentMetrics, getAuditLog } from '../lib/observability/metricsQueries';
+import { checkHealth } from '../lib/observability/healthEndpoints';
+import { ok, fail } from '../lib/validation/responseEnvelope';
+import { getSharedPool } from '../lib/dbPool';
+import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
 
@@ -381,6 +389,125 @@ router.post('/records/:examId/publish', requireAuth, async (req, res) => {
     res.json({ examId, visibility: 'public', readiness });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 4/5 — Enterprise Integrity & Observability Layer (additive, admin-only)
+// All routes below use the standard { success, errorCode, message, details,
+// timestamp } response envelope. Existing routes above are unchanged.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── GET /api/exams/records/:examId/integrity-report ─────────────────────────
+router.get('/records/:examId/integrity-report', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const examId = str(req.params.examId);
+    const record = await examStore.getExamRecord(examId);
+    if (!record) { res.status(404).json(fail('EXAM_NOT_FOUND', 'Exam record not found')); return; }
+
+    const report = await generateIntegrityReport(examId);
+    res.json(ok(report));
+  } catch (err) {
+    res.status(500).json(fail('INTEGRITY_REPORT_FAILED', err instanceof Error ? err.message : String(err)));
+  }
+});
+
+// ─── GET /api/exams/records/:examId/publish-readiness ────────────────────────
+// Extended readiness check (Phase 4) — does not replace the existing gate
+// inside POST /publish; this is a read-only preview for admin dashboards.
+router.get('/records/:examId/publish-readiness', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const examId = str(req.params.examId);
+    const record = await examStore.getExamRecord(examId);
+    if (!record) { res.status(404).json(fail('EXAM_NOT_FOUND', 'Exam record not found')); return; }
+
+    const gate = await evaluatePublishGate(examId);
+    res.json(ok(gate));
+  } catch (err) {
+    res.status(500).json(fail('PUBLISH_READINESS_FAILED', err instanceof Error ? err.message : String(err)));
+  }
+});
+
+// ─── POST /api/exams/records/:examId/publish-gated ────────────────────────────
+// Strict Phase 4 publish path. Blocks on ANY critical integrity issue, in
+// addition to the pre-existing readiness check. Records blocked attempts.
+router.post('/records/:examId/publish-gated', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const examId = str(req.params.examId);
+    const record = await examStore.getExamRecord(examId);
+    if (!record) { res.status(404).json(fail('EXAM_NOT_FOUND', 'Exam record not found')); return; }
+
+    const gate = await evaluatePublishGate(examId);
+
+    if (!gate.canPublish) {
+      const pool = getSharedPool();
+      await pool.query(
+        `INSERT INTO public.publish_blocks (id, exam_id, blocking_reasons, attempted_by)
+         VALUES ($1, $2, $3, $4)`,
+        [uuidv4(), examId, JSON.stringify(gate.reasons), req.user!.uid],
+      );
+      res.status(422).json(fail('PUBLISH_BLOCKED', 'Exam blocked from publishing by the integrity gate', gate));
+      return;
+    }
+
+    await examStore.upsertExamRecord({ ...record, visibility: 'public' });
+    await getSharedPool().query(
+      `UPDATE public.exam_records SET publish_status = 'published' WHERE exam_id = $1`,
+      [examId],
+    );
+
+    req.log.info({ examId, publishedBy: req.user!.uid }, 'exam published via gated pipeline');
+    res.json(ok({ examId, visibility: 'public', gate }));
+  } catch (err) {
+    res.status(500).json(fail('PUBLISH_GATED_FAILED', err instanceof Error ? err.message : String(err)));
+  }
+});
+
+// ─── GET /api/exams/questions/:id/answer-versions ─────────────────────────────
+router.get('/questions/:id/answer-versions', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const questionId = str(req.params.id);
+    const versions = await listVersions(questionId);
+    res.json(ok({ questionId, versions }));
+  } catch (err) {
+    res.status(500).json(fail('VERSION_HISTORY_FAILED', err instanceof Error ? err.message : String(err)));
+  }
+});
+
+// ─── GET /api/exams/observability/metrics ─────────────────────────────────────
+router.get('/observability/metrics', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const hours = req.query.hours ? parseInt(str(req.query.hours as string | string[] | undefined), 10) : 24;
+    const metrics = await getRecentMetrics(Number.isFinite(hours) && hours > 0 ? hours : 24);
+    res.json(ok({ metrics }));
+  } catch (err) {
+    res.status(500).json(fail('METRICS_FAILED', err instanceof Error ? err.message : String(err)));
+  }
+});
+
+// ─── GET /api/exams/observability/audit-log ───────────────────────────────────
+router.get('/observability/audit-log', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const examId     = str(req.query.examId as string | string[] | undefined) || undefined;
+    const questionId = str(req.query.questionId as string | string[] | undefined) || undefined;
+    const limitRaw    = str(req.query.limit as string | string[] | undefined);
+    const limit       = limitRaw ? parseInt(limitRaw, 10) : undefined;
+
+    const entries = await getAuditLog({ examId, questionId, limit });
+    res.json(ok({ entries }));
+  } catch (err) {
+    res.status(500).json(fail('AUDIT_LOG_FAILED', err instanceof Error ? err.message : String(err)));
+  }
+});
+
+// ─── GET /api/exams/observability/health ──────────────────────────────────────
+// Extended health check — public (no admin required), read-only.
+router.get('/observability/health', async (_req, res) => {
+  try {
+    const report = await checkHealth();
+    res.status(report.status === 'ok' ? 200 : 503).json(ok(report));
+  } catch (err) {
+    res.status(503).json(fail('HEALTH_CHECK_FAILED', err instanceof Error ? err.message : String(err)));
   }
 });
 

@@ -426,6 +426,136 @@ export async function runStartupMigrations(): Promise<void> {
         ON public.exam_canonical_answers (next_retry_at, validation_status)
         WHERE next_retry_at IS NOT NULL
     `);
+
+    // ── Phase 4/5: Enterprise Integrity & Observability Layer ──────────────
+    // All additive — no existing table is altered destructively, no column
+    // is dropped or renamed, no existing constraint is removed except the
+    // validation_status CHECK above (which only ADDS an allowed value).
+    await db.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`); // gen_random_uuid()
+
+    // publish_status on exam_records — new column, safe default, existing
+    // rows are backfilled to 'published' if already public so nothing that
+    // was visible to students before this migration becomes hidden.
+    await db.query(`
+      ALTER TABLE public.exam_records
+        ADD COLUMN IF NOT EXISTS publish_status TEXT NOT NULL DEFAULT 'draft'
+    `);
+    await db.query(`
+      UPDATE public.exam_records
+      SET publish_status = 'published'
+      WHERE visibility = 'public' AND publish_status = 'draft'
+    `);
+    await db.query(`
+      ALTER TABLE public.exam_records
+        DROP CONSTRAINT IF EXISTS exam_records_publish_status_check
+    `);
+    await db.query(`
+      ALTER TABLE public.exam_records
+        ADD CONSTRAINT exam_records_publish_status_check
+        CHECK (publish_status IN ('draft','blocked','published'))
+    `);
+
+    // Phase 4 — Integrity Reports (one open row per question+rule; historical
+    // rows are kept by setting resolved_at instead of deleting).
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS public.integrity_reports (
+        id           TEXT        PRIMARY KEY,
+        exam_id      TEXT        NOT NULL REFERENCES public.exam_records(exam_id) ON DELETE CASCADE,
+        question_id  TEXT        NOT NULL REFERENCES public.exam_questions(id) ON DELETE CASCADE,
+        rule_id      TEXT        NOT NULL,
+        severity     TEXT        NOT NULL
+                                 CHECK (severity IN ('CRITICAL','HIGH','MEDIUM','LOW','WARNING')),
+        message      TEXT        NOT NULL,
+        detected_at  TIMESTAMPTZ NOT NULL,
+        resolved_at  TIMESTAMPTZ,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    // Partial unique index enforces "one OPEN issue per question+rule" —
+    // the idempotency contract for persistIssues()'s ON CONFLICT clause.
+    await db.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_integrity_open_issue
+        ON public.integrity_reports (question_id, rule_id)
+        WHERE resolved_at IS NULL
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_integrity_exam_severity ON public.integrity_reports (exam_id, severity)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_integrity_question ON public.integrity_reports (question_id)`);
+
+    // Phase 4 — Canonical Answer Versions (append-only history; never
+    // updated or deleted by application code).
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS public.exam_canonical_answer_versions (
+        id             TEXT        PRIMARY KEY,
+        question_id    TEXT        NOT NULL REFERENCES public.exam_questions(id) ON DELETE CASCADE,
+        version_no     INTEGER     NOT NULL,
+        answer_payload JSONB       NOT NULL,
+        evidence       JSONB       NOT NULL DEFAULT '{}',
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (question_id, version_no)
+      );
+    `);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_canonical_versions_question
+        ON public.exam_canonical_answer_versions (question_id, version_no DESC)
+    `);
+
+    // Phase 5 — Validation Audit Log (append-only, detailed, per-event trace).
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS public.validation_audit_log (
+        id            TEXT        PRIMARY KEY,
+        trace_id      TEXT        NOT NULL,
+        request_id    TEXT,
+        validation_id TEXT,
+        worker_id     TEXT        NOT NULL,
+        exam_id       TEXT,
+        question_id   TEXT,
+        event         TEXT        NOT NULL,
+        severity      TEXT        NOT NULL DEFAULT 'info',
+        duration_ms   INTEGER,
+        payload       JSONB       NOT NULL DEFAULT '{}',
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_audit_log_trace     ON public.validation_audit_log (trace_id)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_audit_log_exam      ON public.validation_audit_log (exam_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_audit_log_question  ON public.validation_audit_log (question_id, created_at DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_audit_log_created   ON public.validation_audit_log (created_at DESC)`);
+
+    // Phase 5 — Aggregated hourly metrics (pre-computed rollups; dashboard
+    // reads this table only, never the raw audit log, to stay <100ms).
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS public.validation_metrics_hourly (
+        id                 UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+        bucket_start       TIMESTAMPTZ NOT NULL,
+        questions_per_min  NUMERIC(10,3),
+        avg_validation_ms  NUMERIC(10,2),
+        avg_retrieval_ms   NUMERIC(10,2),
+        avg_gemini_ms      NUMERIC(10,2),
+        success_rate       NUMERIC(5,4),
+        retry_rate         NUMERIC(5,4),
+        ready_rate         NUMERIC(5,4),
+        low_evidence_rate  NUMERIC(5,4),
+        invalid_rate       NUMERIC(5,4),
+        sample_count       INTEGER     NOT NULL DEFAULT 0,
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (bucket_start)
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_metrics_bucket ON public.validation_metrics_hourly (bucket_start DESC)`);
+
+    // Phase 4 — Publish block attempts (diagnostic trail of blocked publishes).
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS public.publish_blocks (
+        id               TEXT        PRIMARY KEY,
+        exam_id          TEXT        NOT NULL REFERENCES public.exam_records(exam_id) ON DELETE CASCADE,
+        blocking_reasons JSONB       NOT NULL DEFAULT '[]',
+        attempted_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        attempted_by     TEXT
+      );
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_publish_blocks_exam ON public.publish_blocks (exam_id, attempted_at DESC)`);
+
+    logger.info('dbMigrations: Phase 4/5 integrity & observability tables created/verified');
     logger.info('dbMigrations: all startup tables created/verified');
   } catch (err) {
     logger.error({ err }, 'dbMigrations: migration failed');

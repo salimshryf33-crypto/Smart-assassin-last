@@ -15,6 +15,7 @@
 import { getSharedPool }    from '../dbPool';
 import { logger }           from '../logger';
 import { v4 as uuidv4 }    from 'uuid';
+import { snapshotBeforeUpsert } from '../integrity/canonicalVersionStore';
 import type {
   CanonicalAnswer,
   ValidationStatus,
@@ -123,44 +124,68 @@ export async function upsert(
   const pool = getSharedPool();
   const id   = answer.id ?? uuidv4();
 
-  const { rows } = await pool.query<DbRow>(
-    `INSERT INTO public.exam_canonical_answers
-       (id, question_id, correct_option, confidence, reasoning_summary,
-        evidence_chunk_ids, evidence_pages, validation_status, retrieval_version,
-        attempt_count, last_attempt_at, next_retry_at, verified)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-     ON CONFLICT (question_id) DO UPDATE SET
-       correct_option      = EXCLUDED.correct_option,
-       confidence          = EXCLUDED.confidence,
-       reasoning_summary   = EXCLUDED.reasoning_summary,
-       evidence_chunk_ids  = EXCLUDED.evidence_chunk_ids,
-       evidence_pages      = EXCLUDED.evidence_pages,
-       validation_status   = EXCLUDED.validation_status,
-       retrieval_version   = EXCLUDED.retrieval_version,
-       attempt_count       = EXCLUDED.attempt_count,
-       last_attempt_at     = EXCLUDED.last_attempt_at,
-       next_retry_at       = EXCLUDED.next_retry_at,
-       verified            = EXCLUDED.verified,
-       updated_at          = now()
-     RETURNING *`,
-    [
-      id,
-      answer.questionId,
-      answer.correctOption      ?? null,
-      answer.confidence         ?? null,
-      answer.reasoningSummary   ?? null,
-      JSON.stringify(answer.evidenceChunkIds),
-      JSON.stringify(answer.evidencePages),
-      answer.validationStatus,
-      answer.retrievalVersion,
-      answer.attemptCount,
-      answer.lastAttemptAt      ?? null,
-      answer.nextRetryAt        ?? null,
-      answer.verified,
-    ],
-  );
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  return rowToCanonical(rows[0]!);
+    // Phase 4: snapshot the current row into the append-only version history
+    // BEFORE it gets overwritten, in the SAME transaction as the upsert below
+    // so the snapshot and the new state are always consistent. Serialized
+    // per-question via an advisory xact lock so concurrent upserts for the
+    // same question can never race on version numbering.
+    try {
+      await snapshotBeforeUpsert(client, answer.questionId);
+    } catch (err) {
+      logger.error({ err, questionId: answer.questionId }, 'canonicalAnswerStore: version snapshot failed — continuing with upsert');
+    }
+
+    const { rows } = await client.query<DbRow>(
+      `INSERT INTO public.exam_canonical_answers
+         (id, question_id, correct_option, confidence, reasoning_summary,
+          evidence_chunk_ids, evidence_pages, validation_status, retrieval_version,
+          attempt_count, last_attempt_at, next_retry_at, verified)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       ON CONFLICT (question_id) DO UPDATE SET
+         correct_option      = EXCLUDED.correct_option,
+         confidence          = EXCLUDED.confidence,
+         reasoning_summary   = EXCLUDED.reasoning_summary,
+         evidence_chunk_ids  = EXCLUDED.evidence_chunk_ids,
+         evidence_pages      = EXCLUDED.evidence_pages,
+         validation_status   = EXCLUDED.validation_status,
+         retrieval_version   = EXCLUDED.retrieval_version,
+         attempt_count       = EXCLUDED.attempt_count,
+         last_attempt_at     = EXCLUDED.last_attempt_at,
+         next_retry_at       = EXCLUDED.next_retry_at,
+         verified            = EXCLUDED.verified,
+         updated_at          = now()
+       RETURNING *`,
+      [
+        id,
+        answer.questionId,
+        answer.correctOption      ?? null,
+        answer.confidence         ?? null,
+        answer.reasoningSummary   ?? null,
+        JSON.stringify(answer.evidenceChunkIds),
+        JSON.stringify(answer.evidencePages),
+        answer.validationStatus,
+        answer.retrievalVersion,
+        answer.attemptCount,
+        answer.lastAttemptAt      ?? null,
+        answer.nextRetryAt        ?? null,
+        answer.verified,
+      ],
+    );
+
+    await client.query('COMMIT');
+    return rowToCanonical(rows[0]!);
+  } catch (err) {
+    await client.query('ROLLBACK').catch((rollbackErr: unknown) =>
+      logger.error({ err: rollbackErr }, 'canonicalAnswerStore: rollback failed'),
+    );
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /**

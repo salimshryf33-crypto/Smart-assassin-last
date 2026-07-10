@@ -42,6 +42,8 @@ import {
   shouldGiveUp,
   computeNextRetryAt,
 }                                 from './retryPolicy';
+import { logAuditEvent }          from '../observability/auditLogger';
+import { recordSample }           from '../observability/metricsCollector';
 import type {
   PipelineQuestion,
   ValidationStatus,
@@ -238,6 +240,15 @@ async function processQuestion(
 ): Promise<void> {
   const { id: questionId }  = question;
   const currentAttemptCount = existing?.attemptCount ?? 0;
+  const startedAt = Date.now();
+
+  logAuditEvent({
+    examId: question.examId,
+    questionId,
+    event: 'validation_started',
+    severity: 'info',
+    payload: { attemptCount: currentAttemptCount },
+  });
 
   // ── Stage 1: Integrity check ──────────────────────────────────────────────
   const integrity = checkQuestionIntegrity(question);
@@ -261,11 +272,19 @@ async function processQuestion(
       nextRetryAt:      null,
       verified:         false,
     });
+    recordSample({ validationMs: Date.now() - startedAt, outcome: 'invalid' });
+    logAuditEvent({
+      examId: question.examId, questionId, event: 'validation_invalid',
+      severity: 'warn', durationMs: Date.now() - startedAt,
+      payload: { reason: integrity.reason },
+    });
     return;
   }
 
   // ── Stage 2: Evidence retrieval ───────────────────────────────────────────
+  const retrievalStartedAt = Date.now();
   const evidence = retrieveEvidence(question);
+  const retrievalMs = Date.now() - retrievalStartedAt;
 
   if (evidence.retrievalStatus === 'NONE') {
     const newAttemptCount = currentAttemptCount + 1;
@@ -292,6 +311,12 @@ async function processQuestion(
       lastAttemptAt:    new Date(),
       nextRetryAt,
       verified:         false,
+    });
+    recordSample({ validationMs: Date.now() - startedAt, retrievalMs, outcome: giveUp ? 'invalid' : 'retry' });
+    logAuditEvent({
+      examId: question.examId, questionId, event: 'validation_no_evidence',
+      severity: 'warn', durationMs: Date.now() - startedAt,
+      payload: { finalStatus, newAttemptCount, giveUp },
     });
     return;
   }
@@ -322,6 +347,7 @@ async function processQuestion(
 
   // ── Stage 3: Canonical answer derivation (Gemini) ─────────────────────────
   // DailyQuotaExhaustedError propagates up through withExamLock → caller
+  const geminiStartedAt = Date.now();
   let derivation;
   try {
     derivation = await deriveCanonicalAnswer(question, evidence.topChunks);
@@ -330,6 +356,7 @@ async function processQuestion(
     logger.error({ err, questionId }, 'validationPipeline: derivation error');
     derivation = null;
   }
+  const geminiMs = Date.now() - geminiStartedAt;
 
   // Gemini was called — now increment attempt_count
   const newAttemptCount = currentAttemptCount + 1;
@@ -354,6 +381,12 @@ async function processQuestion(
       lastAttemptAt:    new Date(),
       nextRetryAt,
       verified:         false,
+    });
+    recordSample({ validationMs: Date.now() - startedAt, retrievalMs, geminiMs, outcome: giveUp ? 'invalid' : 'retry' });
+    logAuditEvent({
+      examId: question.examId, questionId, event: 'validation_derivation_failed',
+      severity: 'warn', durationMs: Date.now() - startedAt,
+      payload: { finalStatus, newAttemptCount, giveUp },
     });
     return;
   }
@@ -383,6 +416,12 @@ async function processQuestion(
       { questionId, confidence: derivation.confidence },
       'validationPipeline: question READY — correct_answer populated',
     );
+    recordSample({ validationMs: Date.now() - startedAt, retrievalMs, geminiMs, outcome: 'ready' });
+    logAuditEvent({
+      examId: question.examId, questionId, event: 'validation_ready',
+      severity: 'info', durationMs: Date.now() - startedAt,
+      payload: { confidence: derivation.confidence },
+    });
   } else {
     const giveUp      = shouldGiveUp(newAttemptCount);
     const nextRetryAt = giveUp ? null : computeNextRetryAt(newAttemptCount);
@@ -416,6 +455,12 @@ async function processQuestion(
       },
       `validationPipeline: confidence below threshold → ${finalStatus}`,
     );
+    recordSample({ validationMs: Date.now() - startedAt, retrievalMs, geminiMs, outcome: giveUp ? 'invalid' : 'retry' });
+    logAuditEvent({
+      examId: question.examId, questionId, event: 'validation_low_confidence',
+      severity: 'warn', durationMs: Date.now() - startedAt,
+      payload: { confidence: derivation.confidence, finalStatus, newAttemptCount, giveUp },
+    });
   }
 }
 

@@ -10,6 +10,7 @@ import { restoreCurriculumFromDB } from "./lib/curriculumPersistence";
 import { scanUnlinkedExams } from "./lib/curriculumLinker";
 import { hasQuestionsSnapshot, loadQuestionsFromFile } from "./lib/questionStorage";
 import { runStartupValidation, startRetryScheduler } from "./lib/examValidation";
+import { startMetricsFlushTimer } from "./lib/observability/metricsCollector";
 
 const rawPort = process.env["PORT"];
 
@@ -71,6 +72,9 @@ app.listen(port, (err) => {
 
   // Start daily backup scheduler (runs at 02:00 UTC).
   startBackupScheduler();
+
+  // Phase 5: periodic metrics flush (durable rollups, never memory-only).
+  startMetricsFlushTimer();
 
   // ── Stage B: Exam extraction / snapshot restore ────────────────────────────
   // Resolves once all exam docs are synced and any pending extraction is done.
