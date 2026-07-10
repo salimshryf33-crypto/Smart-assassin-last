@@ -21,9 +21,9 @@ An Arabic-language AI-powered smart study platform for Sudanese grade-12 student
 
 | Secret | Status | Purpose |
 |---|---|---|
-| `GEMINI_API_KEY` | ❌ MISSING | AI chat, OCR, exam grading, flashcards, embeddings |
+| `GEMINI_API_KEY` | ✅ Set | AI chat, OCR, exam grading, flashcards, embeddings |
 | `FIREBASE_ADMIN_SERVICE_ACCOUNT` | ❌ MISSING | Admin custom claim management (regular auth still works) |
-| `REDIS_URL` | ⚠️ Optional | Cache persistence; falls back to in-memory without it |
+| `REDIS_URL` | ✅ Set | Cache persistence; falls back to in-memory without it |
 | `REPLIT_OBJECT_STORAGE_BUCKET_ID` | ⚠️ Optional | Object storage for PDFs |
 
 Already set (via `.replit` userenv or Replit Secrets):
