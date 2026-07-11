@@ -224,7 +224,7 @@
     "filename": "إمتحان الأحياء 2022 (1).pdf",
     "totalPages": 0,
     "chunkCount": 0,
-    "status": "ocr_running",
+    "status": "partial",
     "uploadedAt": 1783760984982,
     "docType": "exam",
     "pdfStoragePath": "/home/runner/workspace/artifacts/api-server/data/pdfs/32c2d33a-71c9-473b-9d38-629c214a2040.pdf",
@@ -232,7 +232,7 @@
     "visibility": "public",
     "bookTitle": "إمتحان الأحياء 2022 (1)",
     "lastRenderedPage": 0,
-    "lastResumeAttempt": 1783772364448,
-    "resumeAttempts": 1
+    "lastResumeAttempt": 1783796940095,
+    "resumeAttempts": 2
   }
 ]
