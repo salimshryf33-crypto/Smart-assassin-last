@@ -43,6 +43,10 @@ onlyBuiltDependencies:
   - unrs-resolver
 
 overrides:
+  # websocket-driver@0.7.4 is blocked by Replit's package firewall (no newer version exists on npm).
+  # It's only needed by faye-websocket → @firebase/database, which is never imported in this app
+  # (Sage only uses firebase-admin/app and firebase-admin/auth). ws@8 is already in the lockfile.
+  websocket-driver: 'npm:ws@8'
   '@babel/core': '>=7.29.6'
   '@esbuild-kit/esm-loader': npm:tsx@^4.21.0
   '@expo/ngrok-bin>@expo/ngrok-bin-darwin-arm64': '-'
