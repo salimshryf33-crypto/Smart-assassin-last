@@ -37,13 +37,23 @@ import {
   CONFIDENCE_THRESHOLD,
 }                                 from './canonicalAnswerDeriver';
 import * as store                 from './canonicalAnswerStore';
-import { withExamLock }           from './validationLock';
+import { withExamLock, updateHeartbeat } from './validationLock';
 import {
   shouldGiveUp,
   computeNextRetryAt,
 }                                 from './retryPolicy';
 import { logAuditEvent }          from '../observability/auditLogger';
 import { recordSample }           from '../observability/metricsCollector';
+import { insertDLQ }              from './deadLetterQueue';
+import { syncPreparationStatus }  from './examPreparationStatus';
+import {
+  enqueueExam,
+  completeJob,
+  pauseJob,
+  getJobByExamId,
+  updateProgress,
+  HEARTBEAT_INTERVAL_MS,
+}                                 from './preparationQueue';
 import type {
   PipelineQuestion,
   ValidationStatus,
@@ -136,11 +146,28 @@ export async function runStartupValidation(): Promise<void> {
 async function _runValidation(examId: string): Promise<void> {
   logger.info({ examId }, 'validationPipeline: starting');
 
+  // ── Ensure a preparation job exists for this exam ─────────────────────────
+  let job = await getJobByExamId(examId);
+  if (!job || !['pending','running','paused'].includes(job.status)) {
+    job = await enqueueExam(examId, 5);
+  }
+  const jobId = job.id;
+
+  // ── Heartbeat: update every HEARTBEAT_INTERVAL_MS while pipeline runs ─────
+  const heartbeatTimer = setInterval(() => {
+    updateHeartbeat(jobId).catch(() => undefined);
+  }, HEARTBEAT_INTERVAL_MS);
+
   const questions = await loadQuestions(examId);
   if (questions.length === 0) {
     logger.info({ examId }, 'validationPipeline: no questions found — skipping');
+    clearInterval(heartbeatTimer);
+    await completeJob(jobId, 0);
+    await syncPreparationStatus(examId).catch(() => undefined);
     return;
   }
+
+  const totalMcqQuestions = questions.filter(q => requiresCanonicalAnswer(q.questionType)).length;
 
   let readyCount    = 0;
   let skippedCount  = 0;
@@ -149,72 +176,108 @@ async function _runValidation(examId: string): Promise<void> {
   let permLowCount  = 0;
   let geminiCalls   = 0;
 
-  for (const question of questions) {
-    // Only MCQ / true_false need a canonical answer
-    if (!requiresCanonicalAnswer(question.questionType)) {
-      skippedCount++;
-      continue;
-    }
-
-    const existing = await store.getByQuestionId(question.id);
-
-    // ── Skip terminal statuses ─────────────────────────────────────────────
-    if (
-      existing?.validationStatus === 'READY' ||
-      existing?.validationStatus === 'INVALID' ||
-      existing?.validationStatus === 'PERMANENT_LOW_EVIDENCE'
-    ) {
-      skippedCount++;
-      continue;
-    }
-
-    // ── Respect retry window ───────────────────────────────────────────────
-    // Questions with a future next_retry_at are handled by the retry scheduler.
-    if (existing?.nextRetryAt && existing.nextRetryAt > new Date()) {
-      skippedCount++;
-      continue;
-    }
-
-    // ── Backfill: existing correct_answer from prior extraction ───────────
-    if (question.correctAnswer?.trim()) {
-      if (!existing) {
-        await store.upsert({
-          questionId:       question.id,
-          correctOption:    question.correctAnswer,
-          confidence:       null,
-          reasoningSummary: 'Pre-existing correct_answer — canonical record backfilled',
-          evidenceChunkIds: [],
-          evidencePages:    [],
-          validationStatus: 'READY',
-          retrievalVersion: 1,
-          attemptCount:     0,
-          lastAttemptAt:    null,
-          nextRetryAt:      null,
-          verified:         false,
-        });
+  try {
+    for (const question of questions) {
+      // Only MCQ / true_false need a canonical answer
+      if (!requiresCanonicalAnswer(question.questionType)) {
+        skippedCount++;
+        continue;
       }
-      skippedCount++;
-      continue;
+
+      const existing = await store.getByQuestionId(question.id);
+
+      // ── Skip terminal statuses ─────────────────────────────────────────────
+      if (existing?.validationStatus === 'READY') {
+        readyCount++;
+        skippedCount++;
+        continue;
+      }
+      if (
+        existing?.validationStatus === 'INVALID' ||
+        existing?.validationStatus === 'PERMANENT_LOW_EVIDENCE'
+      ) {
+        skippedCount++;
+        continue;
+      }
+
+      // ── Respect retry window ───────────────────────────────────────────────
+      if (existing?.nextRetryAt && existing.nextRetryAt > new Date()) {
+        skippedCount++;
+        continue;
+      }
+
+      // ── Backfill: existing correct_answer from prior extraction ───────────
+      if (question.correctAnswer?.trim()) {
+        if (!existing) {
+          await store.upsert({
+            questionId:       question.id,
+            correctOption:    question.correctAnswer,
+            confidence:       null,
+            reasoningSummary: 'Pre-existing correct_answer — canonical record backfilled',
+            evidenceChunkIds: [],
+            evidencePages:    [],
+            validationStatus: 'READY',
+            retrievalVersion: 1,
+            attemptCount:     0,
+            lastAttemptAt:    null,
+            nextRetryAt:      null,
+            verified:         false,
+          });
+        }
+        readyCount++;
+        skippedCount++;
+        continue;
+      }
+
+      // ── Process this question ─────────────────────────────────────────────
+      // DailyQuotaExhaustedError propagates to the advisory-lock wrapper → caller
+      await processQuestion(question, existing, geminiCalls);
+      geminiCalls++;
+
+      const updated = await store.getByQuestionId(question.id);
+      switch (updated?.validationStatus) {
+        case 'READY':                  readyCount++;    break;
+        case 'INVALID':                invalidCount++;  break;
+        case 'LOW_EVIDENCE':           lowEvidCount++;  break;
+        case 'PERMANENT_LOW_EVIDENCE':
+          permLowCount++;
+          // Insert into DLQ — fire-and-forget
+          insertDLQ({
+            questionId:   question.id,
+            examId,
+            attemptCount: updated.attemptCount,
+            lastError:    updated.reasoningSummary ?? undefined,
+          }).catch((err: unknown) =>
+            logger.error({ err, questionId: question.id }, 'validationPipeline: DLQ insert failed'),
+          );
+          break;
+        default:                       break;
+      }
+
+      // Update progress on the job row
+      await updateProgress(jobId, readyCount, totalMcqQuestions).catch(() => undefined);
+
+      // Cooldown between Gemini calls
+      if (geminiCalls > 0) {
+        await sleep(INTER_QUESTION_DELAY_MS);
+      }
     }
 
-    // ── Process this question ─────────────────────────────────────────────
-    // DailyQuotaExhaustedError propagates to the advisory-lock wrapper → caller
-    await processQuestion(question, existing, geminiCalls);
-    geminiCalls++;
+    // ── Mark job complete ─────────────────────────────────────────────────
+    await completeJob(jobId, readyCount);
 
-    const updated = await store.getByQuestionId(question.id);
-    switch (updated?.validationStatus) {
-      case 'READY':                  readyCount++;    break;
-      case 'INVALID':                invalidCount++;  break;
-      case 'LOW_EVIDENCE':           lowEvidCount++;  break;
-      case 'PERMANENT_LOW_EVIDENCE': permLowCount++;  break;
-      default:                       break;
+  } catch (err) {
+    // On quota exhaustion: pause the job so scheduler can resume tomorrow
+    if (err instanceof DailyQuotaExhaustedError) {
+      await pauseJob(jobId, 'DailyQuotaExhausted').catch(() => undefined);
     }
-
-    // Cooldown between Gemini calls
-    if (geminiCalls > 0) {
-      await sleep(INTER_QUESTION_DELAY_MS);
-    }
+    throw err;
+  } finally {
+    clearInterval(heartbeatTimer);
+    // Always sync exam-level preparation_status when pipeline exits
+    await syncPreparationStatus(examId).catch((syncErr: unknown) =>
+      logger.error({ syncErr, examId }, 'validationPipeline: syncPreparationStatus failed'),
+    );
   }
 
   logger.info(

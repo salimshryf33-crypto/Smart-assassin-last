@@ -23,7 +23,18 @@ import {
   listByExamId        as listCanonicalAnswers,
   runValidationForExam,
   DailyQuotaExhaustedError,
+  enqueueExam,
+  getQueueOverview,
+  listPendingJobs,
+  getPreparationSummary,
+  listDLQ,
+  getDLQStats,
+  resolveDLQ,
+  recordDLQRetry,
+  insertDLQ,
 } from '../lib/examValidation';
+import { syncPreparationStatus } from '../lib/examValidation/examPreparationStatus';
+import { getJobByExamId } from '../lib/examValidation/preparationQueue';
 import { generateIntegrityReport } from '../lib/integrity/integrityChecker';
 import { evaluatePublishGate } from '../lib/integrity/publishGate';
 import { listVersions } from '../lib/integrity/canonicalVersionStore';
@@ -508,6 +519,172 @@ router.get('/observability/health', async (_req, res) => {
     res.status(report.status === 'ok' ? 200 : 503).json(ok(report));
   } catch (err) {
     res.status(503).json(fail('HEALTH_CHECK_FAILED', err instanceof Error ? err.message : String(err)));
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase 6 — Preparation-First Pipeline Admin Endpoints
+// All endpoints below are admin-only and read-only (GET) or action-safe (POST).
+// No student-facing routes are altered.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── GET /api/exams/admin/preparation/overview ────────────────────────────────
+// Queue depth, worker status, DLQ stats — the admin monitoring dashboard.
+router.get('/admin/preparation/overview', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const [queue, dlq, pending] = await Promise.all([
+      getQueueOverview(),
+      getDLQStats(),
+      listPendingJobs(10),
+    ]);
+    res.json(ok({ queue, dlq, pending }));
+  } catch (err) {
+    res.status(500).json(fail('PREP_OVERVIEW_FAILED', err instanceof Error ? err.message : String(err)));
+  }
+});
+
+// ─── GET /api/exams/admin/preparation/:examId ─────────────────────────────────
+// Per-exam preparation status: question breakdown + active job.
+router.get('/admin/preparation/:examId', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const examId = str(req.params.examId);
+    const [summary, job] = await Promise.all([
+      getPreparationSummary(examId),
+      getJobByExamId(examId),
+    ]);
+    res.json(ok({ summary, job }));
+  } catch (err) {
+    res.status(500).json(fail('PREP_STATUS_FAILED', err instanceof Error ? err.message : String(err)));
+  }
+});
+
+// ─── POST /api/exams/admin/preparation/:examId/enqueue ────────────────────────
+// Manually enqueue (or re-enqueue) an exam for preparation.
+router.post('/admin/preparation/:examId/enqueue', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const examId   = str(req.params.examId);
+    const priority = typeof req.body?.priority === 'number' ? req.body.priority : 5;
+    const record   = await examStore.getExamRecord(examId);
+    if (!record) { res.status(404).json(fail('NOT_FOUND', 'Exam not found')); return; }
+
+    const job = await enqueueExam(examId, priority);
+    // Kick off validation in the background (fire-and-forget)
+    runValidationForExam(examId).then(() => syncPreparationStatus(examId)).catch(() => undefined);
+    res.json(ok({ job }));
+  } catch (err) {
+    res.status(500).json(fail('ENQUEUE_FAILED', err instanceof Error ? err.message : String(err)));
+  }
+});
+
+// ─── GET /api/exams/admin/preparation/:examId/questions ──────────────────────
+// Per-question canonical answer status for one exam — detailed breakdown.
+router.get('/admin/preparation/:examId/questions', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const examId = str(req.params.examId);
+    const answers = await listCanonicalAnswers(examId);
+    res.json(ok({ examId, count: answers.length, answers }));
+  } catch (err) {
+    res.status(500).json(fail('PREP_QUESTIONS_FAILED', err instanceof Error ? err.message : String(err)));
+  }
+});
+
+// ─── GET /api/exams/admin/dlq ─────────────────────────────────────────────────
+// Dead Letter Queue listing with optional filtering.
+router.get('/admin/dlq', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const examId        = str(req.query.examId as string | string[] | undefined) || undefined;
+    const unresolvedOnly = str(req.query.unresolved as string | string[] | undefined) !== 'false';
+    const limitRaw      = str(req.query.limit as string | string[] | undefined);
+    const offsetRaw     = str(req.query.offset as string | string[] | undefined);
+    const limit         = limitRaw  ? parseInt(limitRaw,  10) : 50;
+    const offset        = offsetRaw ? parseInt(offsetRaw, 10) : 0;
+
+    const result = await listDLQ({ examId, unresolvedOnly, limit, offset });
+    res.json(ok(result));
+  } catch (err) {
+    res.status(500).json(fail('DLQ_LIST_FAILED', err instanceof Error ? err.message : String(err)));
+  }
+});
+
+// ─── POST /api/exams/admin/dlq/:questionId/retry ──────────────────────────────
+// Manually retry a DLQ question by resetting its canonical answer to PENDING
+// and recording the retry on the DLQ entry.
+router.post('/admin/dlq/:questionId/retry', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const questionId = str(req.params.questionId);
+    const pool       = getSharedPool();
+
+    // Reset the canonical answer status to PENDING so the pipeline re-processes it
+    await pool.query(
+      `UPDATE public.exam_canonical_answers
+       SET validation_status = 'PENDING',
+           attempt_count     = 0,
+           next_retry_at     = NOW(),
+           updated_at        = NOW()
+       WHERE question_id = $1`,
+      [questionId],
+    );
+
+    // Record the retry on the DLQ entry
+    await recordDLQRetry(questionId);
+
+    // Find the exam and kick off validation
+    const { rows } = await pool.query<{ exam_id: string }>(
+      `SELECT exam_id FROM public.exam_questions WHERE id = $1 LIMIT 1`,
+      [questionId],
+    );
+    const examId = rows[0]?.exam_id;
+    if (examId) {
+      runValidationForExam(examId).then(() => syncPreparationStatus(examId)).catch(() => undefined);
+    }
+
+    res.json(ok({ questionId, examId, reset: true }));
+  } catch (err) {
+    res.status(500).json(fail('DLQ_RETRY_FAILED', err instanceof Error ? err.message : String(err)));
+  }
+});
+
+// ─── POST /api/exams/admin/dlq/:questionId/resolve ────────────────────────────
+// Mark a DLQ entry as resolved (admin acknowledgement — no retry).
+router.post('/admin/dlq/:questionId/resolve', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const questionId = str(req.params.questionId);
+    const resolvedBy = req.user!.uid;
+    const note       = typeof req.body?.note === 'string' ? req.body.note : 'Resolved by admin';
+
+    await resolveDLQ(questionId, resolvedBy, note);
+    res.json(ok({ questionId, resolvedBy, note }));
+  } catch (err) {
+    res.status(500).json(fail('DLQ_RESOLVE_FAILED', err instanceof Error ? err.message : String(err)));
+  }
+});
+
+// ─── POST /api/exams/admin/dlq/:questionId/force-add ─────────────────────────
+// Manually add a question to the DLQ (admin override for investigation).
+router.post('/admin/dlq/:questionId/force-add', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const questionId = str(req.params.questionId);
+    const pool       = getSharedPool();
+
+    const { rows } = await pool.query<{ exam_id: string; attempt_count: number }>(
+      `SELECT q.exam_id,
+              COALESCE(ca.attempt_count, 0) AS attempt_count
+       FROM public.exam_questions q
+       LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = q.id
+       WHERE q.id = $1 LIMIT 1`,
+      [questionId],
+    );
+    if (!rows[0]) { res.status(404).json(fail('NOT_FOUND', 'Question not found')); return; }
+
+    await insertDLQ({
+      questionId,
+      examId:       rows[0].exam_id,
+      attemptCount: rows[0].attempt_count,
+      lastError:    'Manually added by admin',
+    });
+    res.json(ok({ questionId, examId: rows[0].exam_id }));
+  } catch (err) {
+    res.status(500).json(fail('DLQ_FORCE_ADD_FAILED', err instanceof Error ? err.message : String(err)));
   }
 });
 

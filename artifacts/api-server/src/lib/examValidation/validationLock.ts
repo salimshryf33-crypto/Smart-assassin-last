@@ -18,6 +18,10 @@
  *
  *   A dedicated pool client is checked out for the duration of the lock so
  *   the session-level lock is tied to one stable connection.
+ *
+ * Phase 6 addition:
+ *   updateHeartbeat(jobId) — call periodically inside the locked fn to signal
+ *   liveness to the preparation scheduler stale-job detector.
  */
 
 import { getSharedPool } from '../dbPool';
@@ -75,5 +79,23 @@ export async function withExamLock<T>(
     }
   } finally {
     client.release();
+  }
+}
+
+/**
+ * Update the heartbeat timestamp on an exam_preparation_jobs row.
+ * Call this periodically inside a withExamLock fn to signal liveness.
+ * Failures are logged but never thrown — heartbeat is best-effort.
+ */
+export async function updateHeartbeat(jobId: string): Promise<void> {
+  if (!jobId) return;
+  const pool = getSharedPool();
+  try {
+    await pool.query(
+      `UPDATE public.exam_preparation_jobs SET heartbeat = NOW(), updated_at = NOW() WHERE id = $1`,
+      [jobId],
+    );
+  } catch (err) {
+    logger.error({ err, jobId }, 'validationLock: heartbeat update failed');
   }
 }

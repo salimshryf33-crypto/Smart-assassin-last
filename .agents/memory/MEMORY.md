@@ -23,3 +23,4 @@
 - [Correction Engine Failure Modes](correction-engine-failures.md) — 6 failure modes diagnosed; Critical #1 (post-topK docId filter) fixed; Critical #2 (un-normalized Arabic in Stage 2) still open.
 - [Phase 1 Validation Pipeline](phase1-validation-pipeline.md) — RAG+Gemini derives MCQ correct_answer; exam_canonical_answers table; CONFIDENCE_THRESHOLD=0.70; 3 API routes; startup scan; free tier ~20 q/day.
 - [Phase 3 Reliability Layer](phase3-reliability-layer.md) — advisory lock (pg_try_advisory_lock int,int NOT bigint,int); exponential retry (10min/1hr/24hr); PERMANENT_LOW_EVIDENCE at attempt 4; event-driven startup (Promise.all); retry scheduler 5min.
+- [Preparation-First Exam Pipeline](preparation-first-pipeline.md) — Phase 6: persistent PG job queue (exam_preparation_jobs), DLQ (exam_dlq), exam-level preparation_status, heartbeat stale recovery, grading gate blocks non-READY MCQ, 7 admin endpoints.

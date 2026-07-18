@@ -556,6 +556,114 @@ export async function runStartupMigrations(): Promise<void> {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_publish_blocks_exam ON public.publish_blocks (exam_id, attempted_at DESC)`);
 
     logger.info('dbMigrations: Phase 4/5 integrity & observability tables created/verified');
+
+    // ── Phase 6: Preparation-First Pipeline ──────────────────────────────────
+    // All additive — no existing column is dropped, renamed, or altered.
+
+    // preparation tracking columns on exam_records
+    await db.query(`ALTER TABLE public.exam_records ADD COLUMN IF NOT EXISTS preparation_status TEXT NOT NULL DEFAULT 'pending'`);
+    await db.query(`ALTER TABLE public.exam_records DROP CONSTRAINT IF EXISTS exam_records_prep_status_check`);
+    await db.query(`
+      ALTER TABLE public.exam_records
+        ADD CONSTRAINT exam_records_prep_status_check
+        CHECK (preparation_status IN ('pending','preparing','ready','partially_ready','blocked','failed'))
+    `);
+    await db.query(`ALTER TABLE public.exam_records ADD COLUMN IF NOT EXISTS preparation_started_at   TIMESTAMPTZ`);
+    await db.query(`ALTER TABLE public.exam_records ADD COLUMN IF NOT EXISTS preparation_completed_at TIMESTAMPTZ`);
+    await db.query(`ALTER TABLE public.exam_records ADD COLUMN IF NOT EXISTS preparation_worker_id    TEXT`);
+    await db.query(`ALTER TABLE public.exam_records ADD COLUMN IF NOT EXISTS preparation_heartbeat    TIMESTAMPTZ`);
+
+    // Persistent preparation job queue
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS public.exam_preparation_jobs (
+        id               TEXT        PRIMARY KEY,
+        exam_id          TEXT        NOT NULL REFERENCES public.exam_records(exam_id) ON DELETE CASCADE,
+        status           TEXT        NOT NULL DEFAULT 'pending'
+                                     CHECK (status IN ('pending','running','completed','failed','paused')),
+        priority         INT         NOT NULL DEFAULT 5,
+        total_questions  INT,
+        ready_questions  INT         NOT NULL DEFAULT 0,
+        worker_id        TEXT,
+        heartbeat        TIMESTAMPTZ,
+        started_at       TIMESTAMPTZ,
+        completed_at     TIMESTAMPTZ,
+        last_error       TEXT,
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`
+      CREATE INDEX IF NOT EXISTS idx_prep_jobs_status_priority
+        ON public.exam_preparation_jobs(status, priority, created_at)
+        WHERE status IN ('pending','paused')
+    `);
+    await db.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_prep_jobs_exam_active
+        ON public.exam_preparation_jobs(exam_id)
+        WHERE status IN ('pending','running','paused')
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_prep_jobs_exam       ON public.exam_preparation_jobs(exam_id)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_prep_jobs_heartbeat  ON public.exam_preparation_jobs(heartbeat) WHERE status = 'running'`);
+
+    // Dead Letter Queue for permanently failed questions
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS public.exam_dlq (
+        id                  TEXT        PRIMARY KEY,
+        question_id         TEXT        NOT NULL REFERENCES public.exam_questions(id) ON DELETE CASCADE,
+        exam_id             TEXT        NOT NULL,
+        attempt_count       INT         NOT NULL DEFAULT 0,
+        last_error          TEXT,
+        last_prompt_version TEXT,
+        last_rules_version  TEXT,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_retry          TIMESTAMPTZ,
+        resolved_at         TIMESTAMPTZ,
+        resolved_by         TEXT,
+        resolution_note     TEXT
+      )
+    `);
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_dlq_question   ON public.exam_dlq(question_id) WHERE resolved_at IS NULL`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_dlq_exam              ON public.exam_dlq(exam_id)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_dlq_unresolved        ON public.exam_dlq(created_at) WHERE resolved_at IS NULL`);
+
+    // Backfill preparation_status for existing exams from current canonical answer states.
+    // Only updates rows still at the default 'pending' to avoid overwriting in-progress work.
+    await db.query(`
+      UPDATE public.exam_records er
+      SET preparation_status = CASE
+        WHEN NOT EXISTS (
+          SELECT 1 FROM public.exam_questions eq
+          WHERE eq.exam_id = er.exam_id AND eq.question_type IN ('mcq','true_false')
+        ) THEN 'ready'
+        WHEN NOT EXISTS (
+          SELECT 1 FROM public.exam_canonical_answers ca
+          JOIN public.exam_questions eq ON eq.id = ca.question_id
+          WHERE eq.exam_id = er.exam_id
+        ) THEN 'pending'
+        WHEN (
+          SELECT COUNT(*) FILTER (WHERE ca.validation_status = 'READY')
+          FROM public.exam_canonical_answers ca
+          JOIN public.exam_questions eq ON eq.id = ca.question_id
+          WHERE eq.exam_id = er.exam_id AND eq.question_type IN ('mcq','true_false')
+        ) = (
+          SELECT COUNT(*)
+          FROM public.exam_questions eq
+          WHERE eq.exam_id = er.exam_id AND eq.question_type IN ('mcq','true_false')
+        ) THEN 'ready'
+        WHEN (
+          SELECT COUNT(*) FILTER (WHERE ca.validation_status = 'READY')
+          FROM public.exam_canonical_answers ca
+          JOIN public.exam_questions eq ON eq.id = ca.question_id
+          WHERE eq.exam_id = er.exam_id AND eq.question_type IN ('mcq','true_false')
+        ) > 0 THEN 'partially_ready'
+        ELSE 'preparing'
+      END
+      WHERE preparation_status = 'pending'
+        AND extraction_status = 'done'
+        AND question_count > 0
+    `);
+
+    logger.info('dbMigrations: Phase 6 preparation-first pipeline tables created/verified');
     logger.info('dbMigrations: all startup tables created/verified');
   } catch (err) {
     logger.error({ err }, 'dbMigrations: migration failed');

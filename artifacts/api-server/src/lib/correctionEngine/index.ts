@@ -47,8 +47,22 @@ import { createCurriculumResolver } from './curriculumResolver';
 import { EvidenceRetriever }      from './evidenceRetriever';
 import { gradeDeterministic, DETERMINISTIC_TYPES } from './deterministicGrader';
 import { gradeWithCurriculum }    from './curriculumGrader';
+import { getSharedPool }          from '../dbPool';
 import type { CorrectionResult, QuestionCorrectionInput } from './types';
 import type { ExamAnswer }        from '@workspace/db';
+
+// ─── Grading Gate ─────────────────────────────────────────────────────────────
+// Checks whether a question's canonical answer is READY.
+// Used to exclude questions still in preparation from grading.
+
+async function getCanonicalStatus(questionId: string): Promise<string | null> {
+  const pool = getSharedPool();
+  const { rows } = await pool.query<{ validation_status: string }>(
+    `SELECT validation_status FROM public.exam_canonical_answers WHERE question_id = $1 LIMIT 1`,
+    [questionId],
+  );
+  return rows[0]?.validation_status ?? null;
+}
 
 export type { CorrectionResult };
 
@@ -166,6 +180,31 @@ export async function gradeAttemptWithCurriculum(
     let result: CorrectionResult;
 
     if (DETERMINISTIC_TYPES.has(question.questionType)) {
+      // ── Grading Gate: only grade MCQ/TF if canonical answer is READY ──────
+      // Preparation-First rule: no Gemini at grading time.
+      // If canonical answer is not READY, mark as pending_preparation and skip.
+      const canonicalStatus = await getCanonicalStatus(question.id);
+      if (canonicalStatus !== 'READY') {
+        logger.debug(
+          { questionId: question.id, canonicalStatus },
+          'correctionEngine: question not READY — marking pending_preparation',
+        );
+        await examSolverStore.updateAnswer(answer.id, {
+          isCorrect:     null,
+          gradingMethod: 'pending_preparation',
+          aiFeedback:    'هذا السؤال في طور الإعداد — سيُصحح عند اكتمال التحقق من الإجابة الصحيحة',
+        });
+        graded.push({
+          ...answer,
+          isCorrect:     null,
+          gradingMethod: 'pending_preparation',
+          aiFeedback:    'هذا السؤال في طور الإعداد',
+          feedback:      'هذا السؤال في طور الإعداد',
+        });
+        // Do NOT count toward correctCount or weightedScoreSum
+        continue;
+      }
+
       // ── Deterministic path (no Gemini, no network) ─────────────────────
       result = gradeDeterministic(input.studentAnswer, input.correctAnswer, input.questionType);
       deterministicCalls++;
@@ -208,7 +247,8 @@ export async function gradeAttemptWithCurriculum(
 
   // ── Step 4: Compute weighted score (partial credit) ───────────────────────
   // scorePct reflects the weighted average of scoreRatios, not binary count.
-  // This means an essay that is 70% correct contributes 70%, not 0% or 100%.
+  // pending_preparation answers are excluded from both numerator and denominator
+  // so they don't drag down the score of students who answered what was available.
   const total = answers.length;
   const score = gradableCount > 0
     ? Math.round((weightedScoreSum / gradableCount) * 10_000) / 100

@@ -1,28 +1,38 @@
 /**
  * examValidation/retryScheduler.ts
  *
- * Periodic scheduler that finds LOW_EVIDENCE / PENDING / VALIDATED questions
- * whose next_retry_at window has elapsed and re-runs the validation pipeline.
+ * Global preparation scheduler — finds eligible exams and drives the
+ * validation pipeline to completion.
  *
- * Design:
- *   - Queries ONLY rows with next_retry_at <= now() via the idx_eca_retry
- *     partial index — no full-table scans, scales to millions of rows.
- *   - Groups eligible questions by exam_id; validates one exam at a time.
- *   - Stops immediately on DailyQuotaExhaustedError (quota resets at UTC midnight).
- *   - In-process guard (running flag) prevents tick overlap.
- *   - startRetryScheduler() is idempotent — calling it twice is a no-op.
+ * Phase 6 evolution (Preparation-First):
+ *   - Priority ordering: oldest unfinished first (ORDER BY priority, created_at)
+ *   - Throttling: configurable MAX_CONCURRENT_EXAMS per tick
+ *   - Stale-job recovery: resets crashed workers before each tick
+ *   - DLQ: PERMANENT_LOW_EVIDENCE questions inserted into exam_dlq
+ *   - Preparation status: synced after each exam completes
+ *   - Queue integration: claims/completes preparation jobs from exam_preparation_jobs
  *
- * Scheduler interval: every 5 minutes.
- * Batch cap: 100 distinct exams per tick (prevents unbounded memory usage).
+ * Original behaviour preserved:
+ *   - Stops on DailyQuotaExhaustedError (quota resets UTC midnight)
+ *   - In-process guard prevents tick overlap
+ *   - startRetryScheduler() is idempotent
+ *   - 5-minute interval
  */
 
-import { getSharedPool }        from '../dbPool';
-import { logger }               from '../logger';
-import { runValidationForExam } from './validationPipeline';
-import { DailyQuotaExhaustedError } from './canonicalAnswerDeriver';
+import { getSharedPool }                    from '../dbPool';
+import { logger }                           from '../logger';
+import { runValidationForExam }             from './validationPipeline';
+import { DailyQuotaExhaustedError }         from './canonicalAnswerDeriver';
+import {
+  recoverStaleJobs,
+  enqueueExam,
+  getQueueOverview,
+} from './preparationQueue';
+import { syncPreparationStatus }            from './examPreparationStatus';
 
-const SCHEDULER_INTERVAL_MS = 5 * 60 * 1_000;   // 5 minutes
-const BATCH_LIMIT            = 100;               // max distinct exams per tick
+const SCHEDULER_INTERVAL_MS  = 5 * 60 * 1_000;   // 5 minutes
+const MAX_CONCURRENT_EXAMS   = 10;                 // max exams processed per tick (throttle)
+const BATCH_LIMIT            = 100;                // max distinct exams fetched from DB
 
 let schedulerHandle: ReturnType<typeof setInterval> | null = null;
 let running                                                  = false;
@@ -30,14 +40,14 @@ let running                                                  = false;
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Start the retry scheduler.
+ * Start the global preparation / retry scheduler.
  * Idempotent — calling more than once has no effect.
  */
 export function startRetryScheduler(): void {
   if (schedulerHandle !== null) return;
 
   logger.info(
-    { intervalMs: SCHEDULER_INTERVAL_MS },
+    { intervalMs: SCHEDULER_INTERVAL_MS, maxConcurrentExams: MAX_CONCURRENT_EXAMS },
     'retryScheduler: started',
   );
 
@@ -50,8 +60,7 @@ export function startRetryScheduler(): void {
 
 /**
  * Stop the retry scheduler.
- * Primarily for clean shutdown in tests; not required in normal operation
- * (Node.js exits regardless of outstanding intervals when the process ends).
+ * Primarily for clean shutdown in tests.
  */
 export function stopRetryScheduler(): void {
   if (schedulerHandle !== null) {
@@ -71,17 +80,38 @@ async function runRetryTick(): Promise<void> {
   running = true;
 
   try {
-    const examIds = await getExamsWithEligibleQuestions();
-    if (examIds.length === 0) return;
+    // ── 1. Recover stale crashed workers ─────────────────────────────────────
+    const recovered = await recoverStaleJobs();
+    if (recovered > 0) {
+      logger.info({ recovered }, 'retryScheduler: recovered stale preparation jobs');
+    }
 
+    // ── 2. Ensure any eligible exam has a preparation job ────────────────────
+    await ensureQueuedForEligibleExams();
+
+    // ── 3. Fetch eligible exams ordered by priority ───────────────────────────
+    const examIds = await getExamsWithEligibleQuestions();
+    if (examIds.length === 0) {
+      logger.debug('retryScheduler: tick — no eligible exams');
+      return;
+    }
+
+    const overview = await getQueueOverview();
     logger.info(
-      { examCount: examIds.length },
-      'retryScheduler: tick — found exams with questions due for retry',
+      { examCount: examIds.length, queue: overview },
+      'retryScheduler: tick — processing eligible exams',
     );
 
-    for (const examId of examIds) {
+    // ── 4. Throttled processing ───────────────────────────────────────────────
+    const batch = examIds.slice(0, MAX_CONCURRENT_EXAMS);
+
+    for (const examId of batch) {
       try {
         await runValidationForExam(examId);
+        // Sync exam-level preparation_status after each exam
+        await syncPreparationStatus(examId).catch((err: unknown) =>
+          logger.error({ err, examId }, 'retryScheduler: syncPreparationStatus failed'),
+        );
       } catch (err) {
         if (err instanceof DailyQuotaExhaustedError) {
           logger.warn(
@@ -91,12 +121,12 @@ async function runRetryTick(): Promise<void> {
           return;   // stop the whole tick; other exams would fail too
         }
         logger.error({ err, examId }, 'retryScheduler: validation failed for exam');
-        // continue to next exam — one failure should not block others
+        // continue to next exam — one failure must not block others
       }
     }
 
     logger.info(
-      { examCount: examIds.length },
+      { processed: batch.length, total: examIds.length },
       'retryScheduler: tick complete',
     );
   } finally {
@@ -107,12 +137,10 @@ async function runRetryTick(): Promise<void> {
 // ─── Eligible exam query ──────────────────────────────────────────────────────
 
 /**
- * Returns distinct exam IDs that have at least one question eligible for retry.
+ * Returns distinct exam IDs that have at least one question eligible for retry,
+ * ordered by preparation job priority (oldest unfinished first).
  *
- * Uses the  idx_eca_retry  partial index on (next_retry_at, validation_status)
- * WHERE next_retry_at IS NOT NULL — O(k) where k = eligible rows, not table size.
- *
- * Scales to 100,000 questions / 10,000 exams without changes.
+ * Uses the idx_eca_retry partial index — O(k) where k = eligible rows.
  */
 async function getExamsWithEligibleQuestions(): Promise<string[]> {
   const pool = getSharedPool();
@@ -128,4 +156,33 @@ async function getExamsWithEligibleQuestions(): Promise<string[]> {
     [BATCH_LIMIT],
   );
   return rows.map((r) => r.exam_id);
+}
+
+/**
+ * For every exam with unready questions that has no active preparation job,
+ * enqueue it with priority 1 (backlog).
+ */
+async function ensureQueuedForEligibleExams(): Promise<void> {
+  const pool = getSharedPool();
+  const { rows } = await pool.query<{ exam_id: string }>(
+    `SELECT DISTINCT q.exam_id
+     FROM public.exam_questions q
+     LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = q.id
+     WHERE q.question_type IN ('mcq','true_false')
+       AND (
+         ca.validation_status IS NULL
+         OR ca.validation_status IN ('PENDING','VALIDATED','LOW_EVIDENCE')
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM public.exam_preparation_jobs epj
+         WHERE epj.exam_id = q.exam_id AND epj.status IN ('pending','running','paused')
+       )
+     LIMIT 50`,
+  );
+
+  for (const { exam_id } of rows) {
+    await enqueueExam(exam_id, 1).catch((err: unknown) =>
+      logger.error({ err, examId: exam_id }, 'retryScheduler: enqueue failed'),
+    );
+  }
 }

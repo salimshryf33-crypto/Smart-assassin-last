@@ -9,7 +9,7 @@ import { startBackupScheduler } from "./lib/backupScheduler";
 import { restoreCurriculumFromDB } from "./lib/curriculumPersistence";
 import { scanUnlinkedExams } from "./lib/curriculumLinker";
 import { hasQuestionsSnapshot, loadQuestionsFromFile } from "./lib/questionStorage";
-import { runStartupValidation, startRetryScheduler } from "./lib/examValidation";
+import { runStartupValidation, startRetryScheduler, initPreparationQueue, syncAllPreparationStatuses } from "./lib/examValidation";
 import { startMetricsFlushTimer } from "./lib/observability/metricsCollector";
 
 const rawPort = process.env["PORT"];
@@ -92,9 +92,17 @@ app.listen(port, (err) => {
   // searchChunks() never returns empty results due to a restore-timing race.
   Promise.all([curriculumReady, examsReady])
     .then(async () => {
+      // Phase 6: init preparation queue — enqueues backlog exams before validation
+      await initPreparationQueue().catch((err: unknown) =>
+        logger.error({ err }, 'startup: initPreparationQueue failed'),
+      );
+      // Backfill preparation_status from current canonical answer states
+      await syncAllPreparationStatuses().catch((err: unknown) =>
+        logger.error({ err }, 'startup: syncAllPreparationStatuses failed'),
+      );
       await runStartupValidation();
-      // Start the periodic retry scheduler after the initial scan completes.
-      // Scheduler fires every 5 min to process questions whose retry window elapsed.
+      // Start the periodic retry/preparation scheduler after the initial scan.
+      // Scheduler fires every 5 min, throttled to MAX_CONCURRENT_EXAMS per tick.
       startRetryScheduler();
     })
     .catch((err) =>
