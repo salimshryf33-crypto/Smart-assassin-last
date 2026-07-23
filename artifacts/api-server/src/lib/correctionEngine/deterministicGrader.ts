@@ -18,6 +18,11 @@
  */
 
 import type { CorrectionResult } from './types';
+import { DETERMINISTIC_TYPES } from '../questionTypeRegistry';
+
+// Re-export so existing callers (correctionEngine/index.ts, autoGrader.ts)
+// continue to import DETERMINISTIC_TYPES from this module unchanged.
+export { DETERMINISTIC_TYPES };
 
 // ─── Arabic-aware normalisation ───────────────────────────────────────────────
 
@@ -107,13 +112,6 @@ function matchTrueFalse(student: string, correct: string): boolean {
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
-
-/** Question types that are always graded deterministically. */
-export const DETERMINISTIC_TYPES = new Set<string>([
-  'mcq',
-  'true_false',
-  'fill_in_blank',
-]);
 
 /**
  * Grade a student answer deterministically.

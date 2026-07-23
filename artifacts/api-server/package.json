@@ -8,7 +8,8 @@
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:backup": "tsx --test src/lib/backupScheduler.test.ts"
+    "test:backup": "tsx --test src/lib/backupScheduler.test.ts",
+    "test:registry": "tsx --test src/lib/questionTypeRegistry.test.ts"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.21.0",

@@ -11,22 +11,18 @@
  *   4. MCQ options count is within bounds (2-6)
  *   5. No option is empty or whitespace-only
  *   6. No duplicate options (case/whitespace normalised)
- *   7. short_answer / essay / calculation questions are structurally valid
- *      (no options required)
+ *   7. short_answer / essay / calculation / fill_in_blank questions are
+ *      structurally valid (no options required)
+ *
+ * All type sets are imported from questionTypeRegistry — never duplicated here.
  */
 
 import type { PipelineQuestion, QuestionIntegrityResult } from './types';
-
-const KNOWN_TYPES = new Set([
-  'mcq',
-  'true_false',
-  'short_answer',
-  'essay',
-  'calculation',
-]);
-
-/** Question types that require an options array for grading. */
-const OPTION_REQUIRED_TYPES = new Set(['mcq', 'true_false']);
+import {
+  KNOWN_TYPES,
+  OPTION_REQUIRED_TYPES,
+  CANONICAL_ANSWER_REQUIRED_TYPES,
+} from '../questionTypeRegistry';
 
 const MIN_OPTIONS = 2;
 const MAX_OPTIONS = 6;
@@ -86,9 +82,10 @@ export function checkQuestionIntegrity(
  * Returns true when this question type needs a canonical answer at all.
  * essay / short_answer / calculation use the AI grader; they don't need
  * a deterministic correctOption.
+ * fill_in_blank DOES need one — it is graded by exact-match.
  */
 export function requiresCanonicalAnswer(questionType: string): boolean {
-  return OPTION_REQUIRED_TYPES.has(questionType);
+  return CANONICAL_ANSWER_REQUIRED_TYPES.has(questionType);
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
