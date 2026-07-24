@@ -664,6 +664,40 @@ export async function runStartupMigrations(): Promise<void> {
     `);
 
     logger.info('dbMigrations: Phase 6 preparation-first pipeline tables created/verified');
+
+    // ── Phase 7: Open preparation packages for short_answer/calculation/essay ─
+    logger.info('dbMigrations: Phase 7 — open preparation packages');
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS public.exam_open_preparations (
+        id                 TEXT        PRIMARY KEY,
+        question_id        TEXT        NOT NULL UNIQUE
+                                       REFERENCES public.exam_questions(id) ON DELETE CASCADE,
+        exam_id            TEXT        NOT NULL
+                                       REFERENCES public.exam_records(exam_id) ON DELETE CASCADE,
+        question_type      TEXT        NOT NULL,
+        preparation_status TEXT        NOT NULL DEFAULT 'PENDING'
+                                       CHECK (preparation_status IN (
+                                         'PENDING','VALIDATED','READY',
+                                         'LOW_EVIDENCE','PERMANENT_LOW_EVIDENCE','INVALID'
+                                       )),
+        package            JSONB,
+        confidence         NUMERIC(5,4),
+        evidence_chunk_ids JSONB       NOT NULL DEFAULT '[]',
+        evidence_pages     JSONB       NOT NULL DEFAULT '[]',
+        reasoning_summary  TEXT,
+        attempt_count      INTEGER     NOT NULL DEFAULT 0,
+        last_attempt_at    TIMESTAMPTZ,
+        next_retry_at      TIMESTAMPTZ,
+        retrieval_version  INTEGER     NOT NULL DEFAULT 1,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_open_prep_exam_id    ON public.exam_open_preparations(exam_id)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_open_prep_status     ON public.exam_open_preparations(preparation_status)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_open_prep_next_retry ON public.exam_open_preparations(next_retry_at) WHERE preparation_status IN ('PENDING','LOW_EVIDENCE','VALIDATED')`);
+    logger.info('dbMigrations: Phase 7 complete');
+
     logger.info('dbMigrations: all startup tables created/verified');
   } catch (err) {
     logger.error({ err }, 'dbMigrations: migration failed');

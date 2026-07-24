@@ -49,46 +49,69 @@ export interface ExamPreparationSummary {
 export async function syncPreparationStatus(examId: string): Promise<ExamPreparationStatus> {
   const pool = getSharedPool();
 
-  const { rows } = await pool.query<{
-    total_mcq:         string;
-    ready_count:       string;
-    invalid_count:     string;
-    perm_low_count:    string;
-    pending_count:     string;
-    preparing_count:   string;
+  // ── Canonical (MCQ / true_false / fill_in_blank) ──────────────────────────
+  const { rows: canonRows } = await pool.query<{
+    total:          string;
+    ready_count:    string;
+    invalid_count:  string;
+    perm_low_count: string;
+    pending_count:  string;
+    preparing_count:string;
   }>(
     `SELECT
-       COUNT(*) FILTER (WHERE eq.question_type IN ('mcq','true_false'))                                          AS total_mcq,
-       COUNT(*) FILTER (WHERE ca.validation_status = 'READY')                                                    AS ready_count,
-       COUNT(*) FILTER (WHERE ca.validation_status = 'INVALID')                                                  AS invalid_count,
-       COUNT(*) FILTER (WHERE ca.validation_status = 'PERMANENT_LOW_EVIDENCE')                                   AS perm_low_count,
-       COUNT(*) FILTER (WHERE ca.validation_status IS NULL OR ca.validation_status = 'PENDING')                  AS pending_count,
-       COUNT(*) FILTER (WHERE ca.validation_status IN ('GENERATING','VALIDATED','LOW_EVIDENCE'))                  AS preparing_count
+       COUNT(*)                                                                                    AS total,
+       COUNT(*) FILTER (WHERE ca.validation_status = 'READY')                                     AS ready_count,
+       COUNT(*) FILTER (WHERE ca.validation_status = 'INVALID')                                   AS invalid_count,
+       COUNT(*) FILTER (WHERE ca.validation_status = 'PERMANENT_LOW_EVIDENCE')                    AS perm_low_count,
+       COUNT(*) FILTER (WHERE ca.validation_status IS NULL OR ca.validation_status = 'PENDING')   AS pending_count,
+       COUNT(*) FILTER (WHERE ca.validation_status IN ('GENERATING','VALIDATED','LOW_EVIDENCE'))   AS preparing_count
      FROM public.exam_questions eq
      LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = eq.id
-     WHERE eq.exam_id = $1 AND eq.question_type IN ('mcq','true_false')`,
+     WHERE eq.exam_id = $1
+       AND eq.question_type IN ('mcq','true_false','fill_in_blank')`,
     [examId],
   );
 
-  const row = rows[0];
-  if (!row) {
-    await writeStatus(examId, 'pending');
-    return 'pending';
-  }
+  // ── Open (short_answer / calculation / essay) ─────────────────────────────
+  const { rows: openRows } = await pool.query<{
+    total:          string;
+    ready_count:    string;
+    invalid_count:  string;
+    perm_low_count: string;
+    pending_count:  string;
+    preparing_count:string;
+  }>(
+    `SELECT
+       COUNT(*)                                                                                    AS total,
+       COUNT(*) FILTER (WHERE op.preparation_status = 'READY')                                    AS ready_count,
+       COUNT(*) FILTER (WHERE op.preparation_status = 'INVALID')                                  AS invalid_count,
+       COUNT(*) FILTER (WHERE op.preparation_status = 'PERMANENT_LOW_EVIDENCE')                   AS perm_low_count,
+       COUNT(*) FILTER (WHERE op.preparation_status IS NULL OR op.preparation_status = 'PENDING') AS pending_count,
+       COUNT(*) FILTER (WHERE op.preparation_status IN ('VALIDATED','LOW_EVIDENCE'))              AS preparing_count
+     FROM public.exam_questions eq
+     LEFT JOIN public.exam_open_preparations op ON op.question_id = eq.id
+     WHERE eq.exam_id = $1
+       AND eq.question_type IN ('short_answer','calculation','essay')`,
+    [examId],
+  );
 
-  const totalMcq      = parseInt(row.total_mcq, 10);
-  const readyCount    = parseInt(row.ready_count, 10);
-  const invalidCount  = parseInt(row.invalid_count, 10);
-  const permLowCount  = parseInt(row.perm_low_count, 10);
-  const pendingCount  = parseInt(row.pending_count, 10);
-  const preparingCount= parseInt(row.preparing_count, 10);
+  const canon = canonRows[0];
+  const open  = openRows[0];
+
+  // Aggregate across both tables
+  const totalPreparable  = parseInt(canon?.total ?? '0', 10) + parseInt(open?.total ?? '0', 10);
+  const readyCount       = parseInt(canon?.ready_count    ?? '0', 10) + parseInt(open?.ready_count    ?? '0', 10);
+  const invalidCount     = parseInt(canon?.invalid_count  ?? '0', 10) + parseInt(open?.invalid_count  ?? '0', 10);
+  const permLowCount     = parseInt(canon?.perm_low_count ?? '0', 10) + parseInt(open?.perm_low_count ?? '0', 10);
+  const pendingCount     = parseInt(canon?.pending_count  ?? '0', 10) + parseInt(open?.pending_count  ?? '0', 10);
+  const preparingCount   = parseInt(canon?.preparing_count?? '0', 10) + parseInt(open?.preparing_count?? '0', 10);
 
   let status: ExamPreparationStatus;
 
-  if (totalMcq === 0) {
-    // No MCQ/TF questions — nothing to prepare
+  if (totalPreparable === 0) {
+    // Exam has no questions that need preparation
     status = 'ready';
-  } else if (readyCount === totalMcq) {
+  } else if (readyCount === totalPreparable) {
     status = 'ready';
   } else if (readyCount > 0 && pendingCount === 0 && preparingCount === 0) {
     // Some READY, rest are terminal (INVALID or PERMANENT_LOW_EVIDENCE)
@@ -96,9 +119,8 @@ export async function syncPreparationStatus(examId: string): Promise<ExamPrepara
   } else if (preparingCount > 0) {
     status = 'preparing';
   } else if (pendingCount > 0) {
-    // All non-ready questions are pending — not yet started
     status = 'preparing';
-  } else if (invalidCount + permLowCount === totalMcq) {
+  } else if (invalidCount + permLowCount === totalPreparable) {
     // Every question failed permanently
     status = 'failed';
   } else {
@@ -111,7 +133,7 @@ export async function syncPreparationStatus(examId: string): Promise<ExamPrepara
     {
       examId,
       status,
-      totalMcq,
+      totalPreparable,
       readyCount,
       invalidCount,
       permLowCount,
@@ -147,33 +169,57 @@ export async function syncAllPreparationStatuses(): Promise<void> {
 export async function getPreparationSummary(examId: string): Promise<ExamPreparationSummary> {
   const pool = getSharedPool();
 
-  const { rows } = await pool.query<{
-    total_mcq:        string;
-    ready_count:      string;
-    invalid_count:    string;
-    perm_low_count:   string;
-    pending_count:    string;
-    preparing_count:  string;
-    prep_status:      string | null;
+  // Canonical (MCQ/TF/fill_in_blank) stats
+  const { rows: canonRows } = await pool.query<{
+    total:          string;
+    ready_count:    string;
+    invalid_count:  string;
+    perm_low_count: string;
+    pending_count:  string;
+    preparing_count:string;
+    prep_status:    string | null;
   }>(
     `SELECT
-       COUNT(*) FILTER (WHERE eq.question_type IN ('mcq','true_false'))                                          AS total_mcq,
-       COUNT(*) FILTER (WHERE ca.validation_status = 'READY')                                                    AS ready_count,
-       COUNT(*) FILTER (WHERE ca.validation_status = 'INVALID')                                                  AS invalid_count,
-       COUNT(*) FILTER (WHERE ca.validation_status = 'PERMANENT_LOW_EVIDENCE')                                   AS perm_low_count,
-       COUNT(*) FILTER (WHERE ca.validation_status IS NULL OR ca.validation_status = 'PENDING')                  AS pending_count,
-       COUNT(*) FILTER (WHERE ca.validation_status IN ('GENERATING','VALIDATED','LOW_EVIDENCE'))                  AS preparing_count,
+       COUNT(eq.id)                                                                                AS total,
+       COUNT(*) FILTER (WHERE ca.validation_status = 'READY')                                     AS ready_count,
+       COUNT(*) FILTER (WHERE ca.validation_status = 'INVALID')                                   AS invalid_count,
+       COUNT(*) FILTER (WHERE ca.validation_status = 'PERMANENT_LOW_EVIDENCE')                    AS perm_low_count,
+       COUNT(*) FILTER (WHERE ca.validation_status IS NULL OR ca.validation_status = 'PENDING')   AS pending_count,
+       COUNT(*) FILTER (WHERE ca.validation_status IN ('GENERATING','VALIDATED','LOW_EVIDENCE'))   AS preparing_count,
        er.preparation_status AS prep_status
      FROM public.exam_records er
-     LEFT JOIN public.exam_questions eq ON eq.exam_id = er.exam_id AND eq.question_type IN ('mcq','true_false')
+     LEFT JOIN public.exam_questions eq ON eq.exam_id = er.exam_id
+       AND eq.question_type IN ('mcq','true_false','fill_in_blank')
      LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = eq.id
      WHERE er.exam_id = $1
      GROUP BY er.exam_id, er.preparation_status`,
     [examId],
   );
 
-  const row = rows[0];
-  if (!row) {
+  // Open (short_answer/calculation/essay) stats
+  const { rows: openRows } = await pool.query<{
+    total:          string;
+    ready_count:    string;
+    invalid_count:  string;
+    perm_low_count: string;
+    pending_count:  string;
+    preparing_count:string;
+  }>(
+    `SELECT
+       COUNT(eq.id)                                                                                AS total,
+       COUNT(*) FILTER (WHERE op.preparation_status = 'READY')                                    AS ready_count,
+       COUNT(*) FILTER (WHERE op.preparation_status = 'INVALID')                                  AS invalid_count,
+       COUNT(*) FILTER (WHERE op.preparation_status = 'PERMANENT_LOW_EVIDENCE')                   AS perm_low_count,
+       COUNT(*) FILTER (WHERE op.preparation_status IS NULL OR op.preparation_status = 'PENDING') AS pending_count,
+       COUNT(*) FILTER (WHERE op.preparation_status IN ('VALIDATED','LOW_EVIDENCE'))              AS preparing_count
+     FROM public.exam_questions eq
+     LEFT JOIN public.exam_open_preparations op ON op.question_id = eq.id
+     WHERE eq.exam_id = $1
+       AND eq.question_type IN ('short_answer','calculation','essay')`,
+    [examId],
+  );
+
+  if (!canonRows[0]) {
     return {
       examId,
       preparationStatus: 'pending',
@@ -187,19 +233,29 @@ export async function getPreparationSummary(examId: string): Promise<ExamPrepara
     };
   }
 
-  const totalMcq      = parseInt(row.total_mcq, 10);
-  const readyCount    = parseInt(row.ready_count, 10);
+  const canon = canonRows[0];
+  const open  = openRows[0];
+
+  const totalMcq        = parseInt(canon.total         ?? '0', 10);
+  const totalOpen       = parseInt(open?.total         ?? '0', 10);
+  const totalPreparable = totalMcq + totalOpen;
+
+  const readyCount    = parseInt(canon.ready_count    ?? '0', 10) + parseInt(open?.ready_count    ?? '0', 10);
+  const pendingCount  = parseInt(canon.pending_count  ?? '0', 10) + parseInt(open?.pending_count  ?? '0', 10);
+  const preparingCount= parseInt(canon.preparing_count?? '0', 10) + parseInt(open?.preparing_count?? '0', 10);
+  const invalidCount  = parseInt(canon.invalid_count  ?? '0', 10) + parseInt(open?.invalid_count  ?? '0', 10);
+  const permLowCount  = parseInt(canon.perm_low_count ?? '0', 10) + parseInt(open?.perm_low_count ?? '0', 10);
 
   return {
     examId,
-    preparationStatus: (row.prep_status ?? 'pending') as ExamPreparationStatus,
-    totalMcq,
+    preparationStatus: (canon.prep_status ?? 'pending') as ExamPreparationStatus,
+    totalMcq:          totalPreparable, // field kept for API compat; now means "all preparable"
     readyCount,
-    pendingCount:      parseInt(row.pending_count, 10),
-    preparingCount:    parseInt(row.preparing_count, 10),
-    invalidCount:      parseInt(row.invalid_count, 10),
-    permanentLowCount: parseInt(row.perm_low_count, 10),
-    readinessPct:      totalMcq > 0 ? Math.round((readyCount / totalMcq) * 100) : 100,
+    pendingCount,
+    preparingCount,
+    invalidCount,
+    permanentLowCount: permLowCount,
+    readinessPct:      totalPreparable > 0 ? Math.round((readyCount / totalPreparable) * 100) : 100,
   };
 }
 

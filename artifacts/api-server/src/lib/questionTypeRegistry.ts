@@ -30,16 +30,29 @@ export interface QuestionTypeConfig {
   /**
    * 'deterministic' — graded by exact-match logic, no Gemini.
    * 'ai'            — graded by the CurriculumGrader (Gemini semantic analysis).
+   *
+   * Note: open-ended types (short_answer, calculation, essay) use gradingStrategy
+   * 'ai' here but are graded deterministically at runtime via the stored open
+   * preparation package (openGrader.ts).  'ai' signals that Gemini is involved
+   * in their PREPARATION, not their grading path.
    */
   gradingStrategy: 'deterministic' | 'ai';
   /**
    * Whether a READY canonical answer must exist in exam_canonical_answers
-   * before this question can be graded.
+   * before this question can be graded.  True only for deterministic types
+   * (mcq, true_false, fill_in_blank).
    */
   requiresCanonicalAnswer: boolean;
   /**
+   * Whether this type uses the open preparation store (exam_open_preparations)
+   * instead of exam_canonical_answers.  True for short_answer, calculation, essay.
+   * When true: requiresCanonicalAnswer must be false.
+   */
+  requiresOpenPreparation: boolean;
+  /**
    * Whether a preparation job must complete before grading is allowed.
-   * true implies requiresCanonicalAnswer=true.
+   * Invariant: requiresPreparation=true implies
+   *   (requiresCanonicalAnswer=true OR requiresOpenPreparation=true).
    */
   requiresPreparation: boolean;
   /**
@@ -52,12 +65,13 @@ export interface QuestionTypeConfig {
 // ─── Registry ─────────────────────────────────────────────────────────────────
 
 export const QUESTION_TYPE_REGISTRY: readonly QuestionTypeConfig[] = [
-  // ── Deterministic types (no Gemini at grading time) ────────────────────────
+  // ── Deterministic types (canonical answer from exam_canonical_answers) ──────
   {
     type:                    'mcq',
     known:                   true,
     gradingStrategy:         'deterministic',
     requiresCanonicalAnswer: true,
+    requiresOpenPreparation: false,
     requiresPreparation:     true,
     requiresOptions:         true,
   },
@@ -66,6 +80,7 @@ export const QUESTION_TYPE_REGISTRY: readonly QuestionTypeConfig[] = [
     known:                   true,
     gradingStrategy:         'deterministic',
     requiresCanonicalAnswer: true,
+    requiresOpenPreparation: false,
     requiresPreparation:     true,
     requiresOptions:         true,
   },
@@ -78,16 +93,22 @@ export const QUESTION_TYPE_REGISTRY: readonly QuestionTypeConfig[] = [
     known:                   true,
     gradingStrategy:         'deterministic',
     requiresCanonicalAnswer: true,
+    requiresOpenPreparation: false,
     requiresPreparation:     true,
     requiresOptions:         false,
   },
-  // ── AI-graded types (Gemini semantic analysis via CurriculumGrader) ─────────
+  // ── Open-prepared types (preparation package from exam_open_preparations) ───
+  // Gemini runs ONCE at preparation time to produce a structured package.
+  // At grading time openGrader.ts uses the stored package deterministically —
+  // zero Gemini calls.  gradingStrategy='ai' signals Gemini involvement in
+  // preparation (not in grading).
   {
     type:                    'short_answer',
     known:                   true,
     gradingStrategy:         'ai',
     requiresCanonicalAnswer: false,
-    requiresPreparation:     false,
+    requiresOpenPreparation: true,
+    requiresPreparation:     true,
     requiresOptions:         false,
   },
   {
@@ -95,7 +116,8 @@ export const QUESTION_TYPE_REGISTRY: readonly QuestionTypeConfig[] = [
     known:                   true,
     gradingStrategy:         'ai',
     requiresCanonicalAnswer: false,
-    requiresPreparation:     false,
+    requiresOpenPreparation: true,
+    requiresPreparation:     true,
     requiresOptions:         false,
   },
   {
@@ -103,7 +125,8 @@ export const QUESTION_TYPE_REGISTRY: readonly QuestionTypeConfig[] = [
     known:                   true,
     gradingStrategy:         'ai',
     requiresCanonicalAnswer: false,
-    requiresPreparation:     false,
+    requiresOpenPreparation: true,
+    requiresPreparation:     true,
     requiresOptions:         false,
   },
 ] as const;
@@ -141,6 +164,17 @@ export const CANONICAL_ANSWER_REQUIRED_TYPES = new Set<string>(
 export const PREPARATION_REQUIRED_TYPES = new Set<string>(
   QUESTION_TYPE_REGISTRY
     .filter((t) => t.requiresPreparation)
+    .map((t) => t.type),
+);
+
+/**
+ * Types whose preparation package is stored in exam_open_preparations
+ * (short_answer, calculation, essay).  Graded at grading time via openGrader.ts
+ * using the stored package — no Gemini at grading time.
+ */
+export const OPEN_PREPARATION_TYPES = new Set<string>(
+  QUESTION_TYPE_REGISTRY
+    .filter((t) => t.requiresOpenPreparation)
     .map((t) => t.type),
 );
 

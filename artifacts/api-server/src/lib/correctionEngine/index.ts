@@ -47,6 +47,9 @@ import { createCurriculumResolver } from './curriculumResolver';
 import { EvidenceRetriever }      from './evidenceRetriever';
 import { gradeDeterministic, DETERMINISTIC_TYPES } from './deterministicGrader';
 import { gradeWithCurriculum }    from './curriculumGrader';
+import { gradeWithOpenPackage }   from './openGrader';
+import * as openPrepStore         from '../examValidation/openPreparationStore';
+import { OPEN_PREPARATION_TYPES } from '../questionTypeRegistry';
 import { getSharedPool }          from '../dbPool';
 import type { CorrectionResult, QuestionCorrectionInput } from './types';
 import type { ExamAnswer }        from '@workspace/db';
@@ -208,8 +211,38 @@ export async function gradeAttemptWithCurriculum(
       // ── Deterministic path (no Gemini, no network) ─────────────────────
       result = gradeDeterministic(input.studentAnswer, input.correctAnswer, input.questionType);
       deterministicCalls++;
+    } else if (OPEN_PREPARATION_TYPES.has(question.questionType)) {
+      // ── Open-prepared path (short_answer / calculation / essay) ────────
+      // Phase 2: only grade if preparation package is READY.
+      // If not ready, mark pending_preparation (same UX as MCQ gate above).
+      const openPrep = await openPrepStore.getByQuestionId(question.id);
+
+      if (openPrep?.preparationStatus === 'READY' && openPrep.package) {
+        result = gradeWithOpenPackage(input, openPrep.package);
+        deterministicCalls++;  // graded deterministically from stored package — no Gemini
+      } else {
+        logger.debug(
+          { questionId: question.id, openPrepStatus: openPrep?.preparationStatus ?? 'none' },
+          'correctionEngine: open question not READY — marking pending_preparation',
+        );
+        await examSolverStore.updateAnswer(answer.id, {
+          isCorrect:     null,
+          gradingMethod: 'pending_preparation',
+          aiFeedback:    'هذا السؤال في طور الإعداد — سيُصحح عند اكتمال التحقق من الإجابة النموذجية',
+        });
+        graded.push({
+          ...answer,
+          isCorrect:     null,
+          gradingMethod: 'pending_preparation',
+          aiFeedback:    'هذا السؤال في طور الإعداد',
+          feedback:      'هذا السؤال في طور الإعداد',
+        });
+        continue;
+      }
     } else {
-      // ── Curriculum-grounded path (Stages 1–6) ──────────────────────────
+      // ── Curriculum-grounded fallback (Stages 1–6 via Gemini) ───────────
+      // Reached only by question types not in the registry with requiresPreparation.
+      // Currently this path is unreachable for all known types — kept for safety.
       const evidence = await retriever.retrieve(input, curriculum);
       result         = await gradeWithCurriculum(input, evidence);
 

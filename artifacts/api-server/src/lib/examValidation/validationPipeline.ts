@@ -36,7 +36,13 @@ import {
   DailyQuotaExhaustedError,
   CONFIDENCE_THRESHOLD,
 }                                 from './canonicalAnswerDeriver';
+import {
+  deriveOpenPreparation,
+  OPEN_PREP_CONFIDENCE_THRESHOLD,
+}                                 from './openPreparationDeriver';
+import * as openStore             from './openPreparationStore';
 import * as store                 from './canonicalAnswerStore';
+import { OPEN_PREPARATION_TYPES } from '../questionTypeRegistry';
 import { withExamLock, updateHeartbeat } from './validationLock';
 import {
   shouldGiveUp,
@@ -112,7 +118,12 @@ export async function runStartupValidation(): Promise<void> {
 
   for (const record of candidates) {
     // countUnready respects retry windows and excludes terminal statuses
-    const unready = await store.countUnready(record.examId);
+    // Check both canonical-answer types (MCQ/TF) and open preparation types
+    const [unreadyCanon, unreadyOpen] = await Promise.all([
+      store.countUnready(record.examId),
+      openStore.countUnreadyOpen(record.examId),
+    ]);
+    const unready = unreadyCanon + unreadyOpen;
     if (unready === 0) continue;
 
     logger.info(
@@ -176,9 +187,13 @@ async function _runValidation(examId: string): Promise<void> {
   let permLowCount  = 0;
   let geminiCalls   = 0;
 
+  const totalOpenQuestions = questions.filter(q => OPEN_PREPARATION_TYPES.has(q.questionType)).length;
+  const totalAllPreparable = totalMcqQuestions + totalOpenQuestions;
+
   try {
+    // ── Loop 1: Canonical-answer types (MCQ / true_false / fill_in_blank) ────
     for (const question of questions) {
-      // Only MCQ / true_false need a canonical answer
+      // Only deterministic types need a canonical answer
       if (!requiresCanonicalAnswer(question.questionType)) {
         skippedCount++;
         continue;
@@ -255,9 +270,55 @@ async function _runValidation(examId: string): Promise<void> {
       }
 
       // Update progress on the job row
-      await updateProgress(jobId, readyCount, totalMcqQuestions).catch(() => undefined);
+      await updateProgress(jobId, readyCount, totalAllPreparable).catch(() => undefined);
 
       // Cooldown between Gemini calls
+      if (geminiCalls > 0) {
+        await sleep(INTER_QUESTION_DELAY_MS);
+      }
+    }
+
+    // ── Loop 2: Open-preparation types (short_answer / calculation / essay) ─
+    for (const question of questions) {
+      if (!OPEN_PREPARATION_TYPES.has(question.questionType)) continue;
+
+      const existing = await openStore.getByQuestionId(question.id);
+
+      // Skip terminal statuses
+      if (existing?.preparationStatus === 'READY') {
+        readyCount++;
+        skippedCount++;
+        continue;
+      }
+      if (
+        existing?.preparationStatus === 'INVALID' ||
+        existing?.preparationStatus === 'PERMANENT_LOW_EVIDENCE'
+      ) {
+        skippedCount++;
+        continue;
+      }
+
+      // Respect retry window
+      if (existing?.nextRetryAt && existing.nextRetryAt > new Date()) {
+        skippedCount++;
+        continue;
+      }
+
+      // DailyQuotaExhaustedError propagates up → pauses job
+      await processOpenQuestion(question, existing, geminiCalls);
+      geminiCalls++;
+
+      const updated = await openStore.getByQuestionId(question.id);
+      switch (updated?.preparationStatus) {
+        case 'READY':                  readyCount++;    break;
+        case 'INVALID':                invalidCount++;  break;
+        case 'LOW_EVIDENCE':           lowEvidCount++;  break;
+        case 'PERMANENT_LOW_EVIDENCE': permLowCount++;  break;
+        default:                       break;
+      }
+
+      await updateProgress(jobId, readyCount, totalAllPreparable).catch(() => undefined);
+
       if (geminiCalls > 0) {
         await sleep(INTER_QUESTION_DELAY_MS);
       }
@@ -524,6 +585,150 @@ async function processQuestion(
       severity: 'warn', durationMs: Date.now() - startedAt,
       payload: { confidence: derivation.confidence, finalStatus, newAttemptCount, giveUp },
     });
+  }
+}
+
+// ─── Open-question processor (short_answer / calculation / essay) ─────────────
+
+async function processOpenQuestion(
+  question:    PipelineQuestion,
+  existing:    openStore.OpenPreparation | null,
+  _geminiCall: number,
+): Promise<void> {
+  const { id: questionId } = question;
+  const currentAttemptCount = existing?.attemptCount ?? 0;
+
+  // ── Stage 1: Evidence retrieval ───────────────────────────────────────────
+  const evidence = retrieveEvidence(question);
+
+  if (evidence.retrievalStatus === 'NONE') {
+    const newAttemptCount = currentAttemptCount + 1;
+    const giveUp          = shouldGiveUp(newAttemptCount);
+    const nextRetryAt     = giveUp ? null : computeNextRetryAt(newAttemptCount);
+    const finalStatus     = giveUp ? 'PERMANENT_LOW_EVIDENCE' : 'LOW_EVIDENCE';
+
+    logger.warn(
+      { questionId, questionType: question.questionType, newAttemptCount, giveUp },
+      `validationPipeline(open): no evidence → ${finalStatus}`,
+    );
+
+    await openStore.upsert({
+      questionId,
+      examId:            question.examId,
+      questionType:      question.questionType,
+      preparationStatus: finalStatus as ValidationStatus,
+      package:           null,
+      confidence:        null,
+      evidenceChunkIds:  [],
+      evidencePages:     [],
+      reasoningSummary:  'No curriculum evidence found',
+      attemptCount:      newAttemptCount,
+      lastAttemptAt:     new Date(),
+      nextRetryAt,
+      retrievalVersion:  1,
+    });
+    return;
+  }
+
+  // Record VALIDATED state with evidence before calling Gemini
+  await openStore.upsert({
+    questionId,
+    examId:            question.examId,
+    questionType:      question.questionType,
+    preparationStatus: 'VALIDATED',
+    package:           null,
+    confidence:        null,
+    evidenceChunkIds:  evidence.chunkIds,
+    evidencePages:     evidence.pages,
+    reasoningSummary:  null,
+    attemptCount:      currentAttemptCount,
+    lastAttemptAt:     existing?.lastAttemptAt ?? null,
+    nextRetryAt:       existing?.nextRetryAt   ?? null,
+    retrievalVersion:  1,
+  });
+
+  // ── Stage 2: Open preparation derivation (Gemini) ─────────────────────────
+  let derivation;
+  try {
+    derivation = await deriveOpenPreparation(question, evidence.topChunks);
+  } catch (err) {
+    if (err instanceof DailyQuotaExhaustedError) throw err;  // propagate
+    logger.error({ err, questionId }, 'validationPipeline(open): derivation error');
+    derivation = null;
+  }
+
+  const newAttemptCount = currentAttemptCount + 1;
+
+  if (!derivation) {
+    const giveUp      = shouldGiveUp(newAttemptCount);
+    const nextRetryAt = giveUp ? null : computeNextRetryAt(newAttemptCount);
+    const finalStatus = giveUp ? 'PERMANENT_LOW_EVIDENCE' : 'LOW_EVIDENCE';
+
+    await openStore.upsert({
+      questionId,
+      examId:            question.examId,
+      questionType:      question.questionType,
+      preparationStatus: finalStatus as ValidationStatus,
+      package:           null,
+      confidence:        null,
+      evidenceChunkIds:  evidence.chunkIds,
+      evidencePages:     evidence.pages,
+      reasoningSummary:  'Gemini could not produce a parseable package',
+      attemptCount:      newAttemptCount,
+      lastAttemptAt:     new Date(),
+      nextRetryAt,
+      retrievalVersion:  1,
+    });
+    return;
+  }
+
+  // ── Stage 3: Confidence gate ──────────────────────────────────────────────
+  const meetsThreshold = derivation.confidence >= OPEN_PREP_CONFIDENCE_THRESHOLD;
+
+  if (meetsThreshold) {
+    await openStore.upsert({
+      questionId,
+      examId:            question.examId,
+      questionType:      question.questionType,
+      preparationStatus: 'READY',
+      package:           derivation.package,
+      confidence:        derivation.confidence,
+      evidenceChunkIds:  evidence.chunkIds,
+      evidencePages:     evidence.pages,
+      reasoningSummary:  derivation.reasoning,
+      attemptCount:      newAttemptCount,
+      lastAttemptAt:     new Date(),
+      nextRetryAt:       null,
+      retrievalVersion:  1,
+    });
+    logger.info(
+      { questionId, questionType: question.questionType, confidence: derivation.confidence },
+      'validationPipeline(open): question READY — package stored',
+    );
+  } else {
+    const giveUp      = shouldGiveUp(newAttemptCount);
+    const nextRetryAt = giveUp ? null : computeNextRetryAt(newAttemptCount);
+    const finalStatus = giveUp ? 'PERMANENT_LOW_EVIDENCE' : 'LOW_EVIDENCE';
+
+    await openStore.upsert({
+      questionId,
+      examId:            question.examId,
+      questionType:      question.questionType,
+      preparationStatus: finalStatus as ValidationStatus,
+      package:           null,
+      confidence:        derivation.confidence,
+      evidenceChunkIds:  evidence.chunkIds,
+      evidencePages:     evidence.pages,
+      reasoningSummary:  derivation.reasoning,
+      attemptCount:      newAttemptCount,
+      lastAttemptAt:     new Date(),
+      nextRetryAt,
+      retrievalVersion:  1,
+    });
+    logger.warn(
+      { questionId, confidence: derivation.confidence, threshold: OPEN_PREP_CONFIDENCE_THRESHOLD, finalStatus },
+      `validationPipeline(open): confidence below threshold → ${finalStatus}`,
+    );
   }
 }
 

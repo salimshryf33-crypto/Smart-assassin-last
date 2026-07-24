@@ -276,7 +276,9 @@ export async function listPendingJobs(limit = 50): Promise<PreparationJob[]> {
 export async function initPreparationQueue(): Promise<void> {
   const pool = getSharedPool();
 
-  // Find all exams with MCQ/TF questions that are not fully ready
+  // Find all exams that still have unready questions in EITHER preparation table:
+  //   - exam_canonical_answers: MCQ, true_false, fill_in_blank
+  //   - exam_open_preparations: short_answer, calculation, essay
   const { rows } = await pool.query<{ exam_id: string; has_active_job: boolean }>(
     `SELECT er.exam_id,
             EXISTS (
@@ -286,12 +288,24 @@ export async function initPreparationQueue(): Promise<void> {
      FROM public.exam_records er
      WHERE er.extraction_status = 'done'
        AND er.question_count > 0
-       AND EXISTS (
-         SELECT 1 FROM public.exam_questions eq
-         LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = eq.id
-         WHERE eq.exam_id = er.exam_id
-           AND eq.question_type IN ('mcq','true_false')
-           AND (ca.validation_status IS NULL OR ca.validation_status NOT IN ('READY','INVALID','PERMANENT_LOW_EVIDENCE'))
+       AND (
+         -- MCQ/TF still unready in canonical answers
+         EXISTS (
+           SELECT 1 FROM public.exam_questions eq
+           LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = eq.id
+           WHERE eq.exam_id = er.exam_id
+             AND eq.question_type IN ('mcq','true_false','fill_in_blank')
+             AND (ca.validation_status IS NULL OR ca.validation_status NOT IN ('READY','INVALID','PERMANENT_LOW_EVIDENCE'))
+         )
+         OR
+         -- Open-ended types still unready in open preparations
+         EXISTS (
+           SELECT 1 FROM public.exam_questions eq
+           LEFT JOIN public.exam_open_preparations op ON op.question_id = eq.id
+           WHERE eq.exam_id = er.exam_id
+             AND eq.question_type IN ('short_answer','essay','calculation')
+             AND (op.preparation_status IS NULL OR op.preparation_status NOT IN ('READY','INVALID','PERMANENT_LOW_EVIDENCE'))
+         )
        )`,
   );
 

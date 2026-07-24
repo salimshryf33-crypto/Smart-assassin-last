@@ -25,6 +25,7 @@ import {
   OPTION_REQUIRED_TYPES,
   CANONICAL_ANSWER_REQUIRED_TYPES,
   PREPARATION_REQUIRED_TYPES,
+  OPEN_PREPARATION_TYPES,
 } from './questionTypeRegistry.js';
 
 // ─── 1. No duplicates ─────────────────────────────────────────────────────────
@@ -73,14 +74,25 @@ test('registry: every canonical-answer-required type is a known type', () => {
   }
 });
 
-// ─── 5. requiresPreparation implies requiresCanonicalAnswer ───────────────────
+// ─── 5. requiresPreparation implies (requiresCanonicalAnswer OR requiresOpenPreparation) ──
 
-test('registry: requiresPreparation=true always implies requiresCanonicalAnswer=true', () => {
+test('registry: requiresPreparation=true implies requiresCanonicalAnswer=true OR requiresOpenPreparation=true', () => {
   for (const entry of QUESTION_TYPE_REGISTRY) {
     if (entry.requiresPreparation) {
       assert.ok(
-        entry.requiresCanonicalAnswer,
-        `"${entry.type}" has requiresPreparation=true but requiresCanonicalAnswer=false — inconsistent flags`,
+        entry.requiresCanonicalAnswer || entry.requiresOpenPreparation,
+        `"${entry.type}" has requiresPreparation=true but neither requiresCanonicalAnswer nor requiresOpenPreparation is true — at least one preparation store must be specified`,
+      );
+    }
+  }
+});
+
+test('registry: requiresOpenPreparation=true implies requiresCanonicalAnswer=false', () => {
+  for (const entry of QUESTION_TYPE_REGISTRY) {
+    if (entry.requiresOpenPreparation) {
+      assert.ok(
+        !entry.requiresCanonicalAnswer,
+        `"${entry.type}" has both requiresOpenPreparation=true and requiresCanonicalAnswer=true — a type can only use one preparation store`,
       );
     }
   }
@@ -160,7 +172,51 @@ test('registry: PREPARATION_REQUIRED_TYPES matches registry requiresPreparation=
   assert.deepEqual(PREPARATION_REQUIRED_TYPES, expected);
 });
 
-// ─── 8. Existing types not removed (regression guard) ─────────────────────────
+test('registry: OPEN_PREPARATION_TYPES matches registry requiresOpenPreparation=true entries', () => {
+  const expected = new Set(
+    QUESTION_TYPE_REGISTRY
+      .filter((t) => t.requiresOpenPreparation)
+      .map((t) => t.type),
+  );
+  assert.deepEqual(OPEN_PREPARATION_TYPES, expected);
+});
+
+// ─── 8. Open-prepared types are correctly classified ──────────────────────────
+
+test('registry: short_answer is in OPEN_PREPARATION_TYPES and PREPARATION_REQUIRED_TYPES', () => {
+  assert.ok(OPEN_PREPARATION_TYPES.has('short_answer'));
+  assert.ok(PREPARATION_REQUIRED_TYPES.has('short_answer'));
+});
+
+test('registry: calculation is in OPEN_PREPARATION_TYPES and PREPARATION_REQUIRED_TYPES', () => {
+  assert.ok(OPEN_PREPARATION_TYPES.has('calculation'));
+  assert.ok(PREPARATION_REQUIRED_TYPES.has('calculation'));
+});
+
+test('registry: essay is in OPEN_PREPARATION_TYPES and PREPARATION_REQUIRED_TYPES', () => {
+  assert.ok(OPEN_PREPARATION_TYPES.has('essay'));
+  assert.ok(PREPARATION_REQUIRED_TYPES.has('essay'));
+});
+
+test('registry: open-prepared types are NOT in CANONICAL_ANSWER_REQUIRED_TYPES', () => {
+  for (const type of OPEN_PREPARATION_TYPES) {
+    assert.ok(
+      !CANONICAL_ANSWER_REQUIRED_TYPES.has(type),
+      `Open-prepared type "${type}" must not be in CANONICAL_ANSWER_REQUIRED_TYPES`,
+    );
+  }
+});
+
+test('registry: MCQ/TF/fill_in_blank are NOT in OPEN_PREPARATION_TYPES', () => {
+  for (const type of ['mcq', 'true_false', 'fill_in_blank']) {
+    assert.ok(
+      !OPEN_PREPARATION_TYPES.has(type),
+      `"${type}" must not be in OPEN_PREPARATION_TYPES — it uses exam_canonical_answers`,
+    );
+  }
+});
+
+// ─── 9. Existing types not removed (regression guard) ─────────────────────────
 
 test('registry: all pre-existing types are still present', () => {
   const required = ['mcq', 'true_false', 'fill_in_blank', 'short_answer', 'essay', 'calculation'];
