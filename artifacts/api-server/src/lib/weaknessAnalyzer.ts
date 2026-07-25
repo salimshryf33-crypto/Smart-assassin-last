@@ -113,7 +113,7 @@ export async function getStudentWeakTopics(
 
   for (const snap of relevant) {
     const scores = (snap.topicScores ?? {}) as TopicScoreMap;
-    for (const [topic, ts] of Object.entries(scores)) {
+    for (const [topic, ts] of Object.entries(scores) as [string, { total: number; score: number; correct: number }][]) {
       if (ts.total < minTotal) continue;
       results.push({
         subject:       snap.subject,

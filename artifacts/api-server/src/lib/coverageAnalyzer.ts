@@ -144,10 +144,10 @@ export function analyzeCoverage(
       ? 'LOW_EXTRACTION_COVERAGE'
       : 'OK';
 
+  // Note: 'EMPTY_DOCUMENT' is handled by the early-return above (totalWords === 0).
+  // At this point flag is guaranteed to be 'OK' | 'LOW_EXTRACTION_COVERAGE'.
   const diagnosis =
-    flag === 'EMPTY_DOCUMENT'
-      ? 'Document appears empty or unreadable.'
-      : flag === 'LOW_EXTRACTION_COVERAGE'
+    flag === 'LOW_EXTRACTION_COVERAGE'
       ? `Low extraction coverage: got ${extractedCount} questions, expected ≥${expectedMinQuestions} ` +
         `from ${totalPatterns} patterns and ${totalWords} Arabic words. ` +
         (suspiciousChunkIndices.length > 0

@@ -14,13 +14,17 @@ import {
   type ExamQuestion,
   type InsertExamQuestion,
 } from '@workspace/db';
+
+// Drizzle SELECT returns jsonb columns as `unknown`; callers that spread an
+// ExamRecord into upsertExamRecord need the wider type accepted here.
+type UpsertExamRecordInput = Omit<InsertExamRecord, 'ocrDiagnostics'> & { ocrDiagnostics?: unknown };
 import { eq, and, or, sql } from 'drizzle-orm';
 
 // ─── Interface ────────────────────────────────────────────────────────────────
 
 export interface IExamQuestionStore {
   // ── ExamRecord ──────────────────────────────────────────────────────────────
-  upsertExamRecord(record: InsertExamRecord): Promise<void>;
+  upsertExamRecord(record: UpsertExamRecordInput): Promise<void>;
   getExamRecord(examId: string): Promise<ExamRecord | null>;
   listExamRecords(opts: { userId: string; isAdmin: boolean }): Promise<ExamRecord[]>;
   deleteExamRecord(examId: string): Promise<void>;
@@ -47,10 +51,10 @@ export interface IExamQuestionStore {
 class PostgresExamQuestionStore implements IExamQuestionStore {
   // ── ExamRecord ──────────────────────────────────────────────────────────────
 
-  async upsertExamRecord(record: InsertExamRecord): Promise<void> {
+  async upsertExamRecord(record: UpsertExamRecordInput): Promise<void> {
     await db
       .insert(examRecordsTable)
-      .values(record)
+      .values(record as InsertExamRecord)
       .onConflictDoUpdate({
         target: examRecordsTable.examId,
         set: {

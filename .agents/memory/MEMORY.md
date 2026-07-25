@@ -25,3 +25,4 @@
 - [Phase 3 Reliability Layer](phase3-reliability-layer.md) — advisory lock (pg_try_advisory_lock int,int NOT bigint,int); exponential retry (10min/1hr/24hr); PERMANENT_LOW_EVIDENCE at attempt 4; event-driven startup (Promise.all); retry scheduler 5min.
 - [Preparation-First Exam Pipeline](preparation-first-pipeline.md) — Phase 6: persistent PG job queue (exam_preparation_jobs), DLQ (exam_dlq), exam-level preparation_status, heartbeat stale recovery, grading gate blocks non-READY MCQ, 7 admin endpoints.
 - [Phase 2 Open Preparation Pipeline](phase2-open-preparation.md) — short_answer/calculation/essay prepared offline via Gemini; graded deterministically from stored package (zero Gemini at grading time); exam_open_preparations table (Phase 7 migration).
+- [Phase 3 Consolidation](phase3-consolidation.md) — Runtime Guarantee enforced; lib/db+api-zod tsc build fix; Drizzle jsonb UpsertExamRecordInput pattern; Express 5 type pitfalls.

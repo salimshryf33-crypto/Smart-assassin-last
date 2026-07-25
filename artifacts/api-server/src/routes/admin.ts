@@ -228,7 +228,7 @@ router.post('/roles/revoke', requireAuth, requireAdmin, async (req, res) => {
 // GET /api/admin/roles/:uid — list all roles for a user
 router.get('/roles/:uid', requireAuth, requireAdmin, async (req, res) => {
   try {
-    const roles = await getUserRoles(req.params.uid!);
+    const roles = await getUserRoles(req.params['uid'] as string);
     res.json({ uid: req.params.uid, roles });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -263,7 +263,7 @@ router.post('/rate-limits/reset', requireAuth, requireAdmin, async (req, res) =>
 // GET /api/admin/rate-limits/:uid — get bucket status for a user
 router.get('/rate-limits/:uid', requireAuth, requireAdmin, async (req, res) => {
   try {
-    const status = await getBucketStatus(req.params.uid!);
+    const status = await getBucketStatus(req.params['uid'] as string);
     res.json({ uid: req.params.uid, buckets: status });
   } catch (err) {
     res.status(500).json({ error: String(err) });

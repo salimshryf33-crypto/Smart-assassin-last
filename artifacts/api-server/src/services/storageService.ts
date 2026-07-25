@@ -49,7 +49,7 @@ function makeClient(): Storage {
       universe_domain: 'googleapis.com',
     },
     projectId: '',
-  } as Parameters<typeof Storage>[0]);
+  } as ConstructorParameters<typeof Storage>[0]);
 }
 
 // ─── Result type ───────────────────────────────────────────────────────────────

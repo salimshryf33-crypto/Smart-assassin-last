@@ -58,7 +58,8 @@ export async function verifyAppCheckToken(token: string): Promise<boolean> {
     const keys = await fetchJwks();
     const jwk  = keys.find((k) => k.kid === header.kid);
     if (!jwk) return false;
-    const publicKey = crypto.createPublicKey({ key: jwk as unknown as JsonWebKey, format: 'jwk' });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const publicKey = crypto.createPublicKey({ key: jwk as unknown as any, format: 'jwk' });
     const verifier  = crypto.createVerify('RSA-SHA256');
     verifier.update(`${hdr64}.${pay64}`);
     return verifier.verify(publicKey, Buffer.from(sig64, 'base64url'));

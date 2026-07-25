@@ -21,8 +21,9 @@ import {
   type AttemptGradeResult,
 } from './correctionEngine/index';
 import { gradeDeterministic, DETERMINISTIC_TYPES } from './correctionEngine/deterministicGrader';
-import { gradeWithCurriculum }   from './correctionEngine/curriculumGrader';
-import { EvidenceRetriever }     from './correctionEngine/evidenceRetriever';
+import { gradeWithOpenPackage }  from './correctionEngine/openGrader';
+import * as openPrepStore        from './examValidation/openPreparationStore';
+import { OPEN_PREPARATION_TYPES } from './questionTypeRegistry';
 import { examStore }             from './examStore';
 import type { ExamAnswer }       from '@workspace/db';
 
@@ -30,7 +31,7 @@ import type { ExamAnswer }       from '@workspace/db';
 
 export interface GradeResult {
   isCorrect:     boolean;
-  gradingMethod: 'exact' | 'ai' | 'skipped' | 'insufficient';
+  gradingMethod: 'exact' | 'ai' | 'skipped' | 'insufficient' | 'pending_preparation';
   aiFeedback:    string | null;
 }
 
@@ -65,27 +66,32 @@ export async function gradeAnswer(
     return { isCorrect: r.isCorrect, gradingMethod: r.gradingMethod, aiFeedback: r.aiFeedback };
   }
 
-  // For open-ended questions use a minimal evidence retrieval (no exam context)
-  const retriever  = new EvidenceRetriever();
-  const curriculum = {
-    strategy: 'temporary_by_subject' as const,
-    filters:  { country: q.country, grade: q.grade, subject: q.subject },
-  };
-  const input = {
-    questionId:    q.id,
-    question:      q.question,
-    questionType:  q.questionType,
-    correctAnswer: q.correctAnswer   ?? null,
-    options:       q.options         ?? null,
-    topic:         q.topic           ?? null,
-    chapter:       q.chapter         ?? null,
-    subject:       q.subject,
-    grade:         q.grade,
-    country:       q.country,
-    studentAnswer: studentAnswer,
-  };
-  const evidence = await retriever.retrieve(input, curriculum);
-  const r        = await gradeWithCurriculum(input, evidence);
+  // Runtime Guarantee: Gemini NEVER called at grading time.
+  // For open-prepared types (short_answer / calculation / essay) consume the
+  // stored preparation package deterministically — identical to the main engine.
+  if (OPEN_PREPARATION_TYPES.has(q.questionType)) {
+    const openPrep = await openPrepStore.getByQuestionId(q.id);
+    if (openPrep?.preparationStatus === 'READY' && openPrep.package) {
+      const input = {
+        questionId:    q.id,
+        question:      q.question,
+        questionType:  q.questionType,
+        correctAnswer: q.correctAnswer ?? null,
+        options:       q.options       ?? null,
+        topic:         q.topic         ?? null,
+        chapter:       q.chapter       ?? null,
+        subject:       q.subject,
+        grade:         q.grade,
+        country:       q.country,
+        studentAnswer,
+      };
+      const r = gradeWithOpenPackage(input, openPrep.package);
+      return { isCorrect: r.isCorrect, gradingMethod: r.gradingMethod, aiFeedback: r.aiFeedback };
+    }
+    // Preparation not yet ready — surface clear status to caller
+    return { isCorrect: false, gradingMethod: 'pending_preparation', aiFeedback: 'هذا السؤال في طور الإعداد' };
+  }
 
-  return { isCorrect: r.isCorrect, gradingMethod: r.gradingMethod, aiFeedback: r.aiFeedback };
+  // Unknown type — no preparation path available
+  return { isCorrect: false, gradingMethod: 'skipped', aiFeedback: null };
 }

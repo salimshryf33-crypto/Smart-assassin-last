@@ -116,7 +116,7 @@ router.get('/:examId', requireAuth, requireAdmin, async (req, res) => {
     const link = await getLinkByExam(examId);
 
     if (!link) {
-      return res.status(404).json({ error: 'No link found for this exam' });
+      res.status(404).json({ error: 'No link found for this exam' }); return;
     }
     res.json(link);
   } catch (err) {
@@ -149,7 +149,7 @@ router.post('/:examId/manual', requireAuth, requireAdmin, async (req, res) => {
     const approvedBy  = req.user!.uid;
 
     if (!docId?.trim()) {
-      return res.status(400).json({ error: 'docId is required' });
+      res.status(400).json({ error: 'docId is required' }); return;
     }
 
     const link = await manualLink(examId, docId.trim(), approvedBy);

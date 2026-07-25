@@ -46,7 +46,6 @@ import { logger }                 from '../logger';
 import { createCurriculumResolver } from './curriculumResolver';
 import { EvidenceRetriever }      from './evidenceRetriever';
 import { gradeDeterministic, DETERMINISTIC_TYPES } from './deterministicGrader';
-import { gradeWithCurriculum }    from './curriculumGrader';
 import { gradeWithOpenPackage }   from './openGrader';
 import * as openPrepStore         from '../examValidation/openPreparationStore';
 import { OPEN_PREPARATION_TYPES } from '../questionTypeRegistry';
@@ -128,9 +127,6 @@ export async function gradeAttemptWithCurriculum(
     },
     'correctionEngine: starting curriculum-authoritative correction'
   );
-
-  // ── Step 2: Per-attempt evidence cache ───────────────────────────────────
-  const retriever = new EvidenceRetriever();
 
   // ── Step 3: Grade each answer ─────────────────────────────────────────────
   let correctCount          = 0;
@@ -240,19 +236,29 @@ export async function gradeAttemptWithCurriculum(
         continue;
       }
     } else {
-      // ── Curriculum-grounded fallback (Stages 1–6 via Gemini) ───────────
-      // Reached only by question types not in the registry with requiresPreparation.
-      // Currently this path is unreachable for all known types — kept for safety.
-      const evidence = await retriever.retrieve(input, curriculum);
-      result         = await gradeWithCurriculum(input, evidence);
-
-      if (result.evidenceStatus === 'INSUFFICIENT_CURRICULUM_EVIDENCE') {
-        insufficientEvidenceCalls++;
-      } else if (result.evidenceStatus === 'SKIPPED') {
-        skippedCalls++;
-      } else {
-        aiCalls++;
-      }
+      // ── Unknown type — Runtime Guarantee: Gemini NEVER called at grading time ──
+      // All known types (mcq, true_false, fill_in_blank, short_answer,
+      // calculation, essay) are covered by DETERMINISTIC_TYPES and
+      // OPEN_PREPARATION_TYPES.  If a new type is added to the registry without
+      // a grading path, it lands here as a safe pending_preparation rather than
+      // triggering an unintended Gemini call.
+      logger.warn(
+        { questionId: question.id, questionType: question.questionType },
+        'correctionEngine: question type not handled by any grading path — marking pending_preparation',
+      );
+      await examSolverStore.updateAnswer(answer.id, {
+        isCorrect:     null,
+        gradingMethod: 'pending_preparation',
+        aiFeedback:    'نوع هذا السؤال غير معروف — سيُصحح عند اكتمال الإعداد',
+      });
+      graded.push({
+        ...answer,
+        isCorrect:     null,
+        gradingMethod: 'pending_preparation',
+        aiFeedback:    'نوع السؤال غير معروف',
+        feedback:      'نوع السؤال غير معروف',
+      });
+      continue;
     }
 
     // ── Accumulate weighted score ─────────────────────────────────────────
