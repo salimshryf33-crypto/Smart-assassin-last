@@ -10,7 +10,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:backup": "tsx --test src/lib/backupScheduler.test.ts",
     "test:registry": "tsx --test src/lib/questionTypeRegistry.test.ts",
-    "test:open-grader": "tsx --test src/lib/openGrader.test.ts"
+    "test:open-grader": "tsx --test src/lib/openGrader.test.ts",
+    "test:grading-no-ai": "tsx --test src/lib/correctionEngine/gradingNoAI.test.ts",
+    "test:all": "tsx --test src/lib/questionTypeRegistry.test.ts src/lib/openGrader.test.ts src/lib/correctionEngine/gradingNoAI.test.ts"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.21.0",

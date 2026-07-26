@@ -52,6 +52,7 @@ import { OPEN_PREPARATION_TYPES } from '../questionTypeRegistry';
 import { getSharedPool }          from '../dbPool';
 import type { CorrectionResult, QuestionCorrectionInput } from './types';
 import type { ExamAnswer }        from '@workspace/db';
+import { enterGradingContext, exitGradingContext } from '../gradingGuard.js';
 
 // ─── Grading Gate ─────────────────────────────────────────────────────────────
 // Checks whether a question's canonical answer is READY.
@@ -92,6 +93,11 @@ export interface AttemptGradeResult {
 export async function gradeAttemptWithCurriculum(
   attemptId: string
 ): Promise<AttemptGradeResult> {
+  // ── Runtime Contract: activate grading guard ──────────────────────────────
+  // Any AI/Gemini call made while this guard is active throws
+  // GradingRuntimeAIViolationError immediately (see gradingGuard.ts).
+  enterGradingContext(attemptId);
+  try {
   const answers = await examSolverStore.getAnswersByAttempt(attemptId);
 
   if (answers.length === 0) {
@@ -319,4 +325,9 @@ export async function gradeAttemptWithCurriculum(
   );
 
   return { totalQuestions: total, correctCount, scorePct: score, answers: graded };
+  } finally {
+    // ── Runtime Contract: deactivate grading guard ────────────────────────
+    // Clears the flag so preparation-time AI calls work normally after grading.
+    exitGradingContext();
+  }
 }

@@ -32,6 +32,7 @@ import { getCachedExtraction, setCachedExtraction, getExtractionCacheStats } fro
 import { saveQuestionsToFile } from './questionStorage';
 import { runValidationForExam } from './examValidation';
 import type { InsertExamQuestion } from '@workspace/db';
+import { assertNotInGradingContext } from './gradingGuard.js';
 
 // Lazy import to avoid circular dependency (curriculumLinker → examStore ← questionExtractor)
 async function fireCurriculumMatch(examId: string): Promise<void> {
@@ -80,6 +81,7 @@ function isDailyQuota(body: unknown): boolean {
 }
 
 async function callGemini(prompt: string, attempt = 0, unavailableAttempt = 0): Promise<string> {
+  assertNotInGradingContext('questionExtractor.callGemini');
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
 

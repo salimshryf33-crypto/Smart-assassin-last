@@ -16,6 +16,7 @@
 
 import { logger } from '../logger';
 import type { PipelineQuestion, EvidenceChunk, DerivationResult } from './types';
+import { assertNotInGradingContext } from '../gradingGuard.js';
 
 // ─── Quota / rate-limit error ─────────────────────────────────────────────────
 
@@ -97,6 +98,7 @@ async function callGemini(
   attempt:           number = 0,
   unavailableAttempt:number = 0,
 ): Promise<string> {
+  assertNotInGradingContext('canonicalAnswerDeriver.callGemini');
   const apiKey = process.env['GEMINI_API_KEY'];
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
 

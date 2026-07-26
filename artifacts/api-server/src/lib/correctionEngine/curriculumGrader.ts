@@ -27,6 +27,7 @@
 
 import { logger }             from '../logger';
 import { EvidenceRetriever }  from './evidenceRetriever';
+import { assertNotInGradingContext } from '../gradingGuard.js';
 import type {
   CorrectionPackage,
   CorrectionResult,
@@ -131,6 +132,7 @@ ${pkg.studentAnswer || '(لا توجد إجابة)'}
 // ─── Stage 4: Gemini call ─────────────────────────────────────────────────────
 
 async function callGemini(prompt: string): Promise<string> {
+  assertNotInGradingContext('curriculumGrader.callGemini');
   const apiKey = process.env['GEMINI_API_KEY'];
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
 

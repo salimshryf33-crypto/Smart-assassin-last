@@ -25,6 +25,7 @@
 import { logger } from '../logger';
 import type { PipelineQuestion, EvidenceChunk } from './types';
 import { DailyQuotaExhaustedError } from './canonicalAnswerDeriver';
+import { assertNotInGradingContext } from '../gradingGuard.js';
 
 export { DailyQuotaExhaustedError };
 
@@ -194,6 +195,7 @@ async function callGemini(
   attempt = 0,
   unavailableAttempt = 0,
 ): Promise<string> {
+  assertNotInGradingContext('openPreparationDeriver.callGemini');
   const apiKey = process.env['GEMINI_API_KEY'];
   if (!apiKey) throw new Error('GEMINI_API_KEY not configured');
 
