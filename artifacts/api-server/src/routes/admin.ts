@@ -24,6 +24,11 @@ import { audit, listAuditLog, type AuditAction } from '../lib/auditLog';
 import { getMigrationPool } from '../lib/dbMigrations';
 import { getSnapshot as getMetricsSnapshot } from '../services/metricsService';
 import { readIndex } from '../lib/curriculumStorage';
+import {
+  getAuditLog,
+  getGradingAuditLog,
+  getGradingAuditSummary,
+} from '../lib/observability/metricsQueries';
 
 const router = Router();
 
@@ -554,6 +559,63 @@ router.get('/cache-health', requireAuth, requireAdmin, async (_req, res) => {
     res.json(health);
   } catch (err) {
     logger.error({ err }, 'cache-health: error');
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ─── GET /api/admin/grading-audit ────────────────────────────────────────────
+// Returns grading_outcome events from public.validation_audit_log.
+// All 12 audit fields (strategy, source, version, confidence, classification …)
+// live in the JSONB payload column — no schema change required.
+//
+// Query params:
+//   examId              — filter to one exam
+//   questionId          — filter to one question
+//   attemptId           — filter to one attempt (matched inside JSONB payload)
+//   finalClassification — correct | partial | incorrect | skipped | pending_preparation
+//   limit               — max rows (default 100, max 500)
+//   summary=1           — return aggregate stats instead of raw rows (examId required)
+router.get('/grading-audit', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const q = req.query as Record<string, string | undefined>;
+
+    if (q['summary'] === '1' && q['examId']) {
+      const data = await getGradingAuditSummary(q['examId']);
+      res.json(data);
+      return;
+    }
+
+    const rows = await getGradingAuditLog({
+      examId:              q['examId'],
+      questionId:          q['questionId'],
+      attemptId:           q['attemptId'],
+      finalClassification: q['finalClassification'],
+      limit:               q['limit'] ? parseInt(q['limit'], 10) : undefined,
+    });
+    res.json({ count: rows.length, rows });
+  } catch (err) {
+    logger.error({ err }, 'admin/grading-audit: error');
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ─── GET /api/admin/validation-audit ─────────────────────────────────────────
+// Returns all validation pipeline events from public.validation_audit_log
+// (validation_started, validation_ready, grading_outcome, etc.).
+// Extends the existing getAuditLog() query which was previously not exposed.
+//
+// Query params: examId, questionId, limit
+router.get('/validation-audit', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const q = req.query as Record<string, string | undefined>;
+    const rows = await getAuditLog({
+      examId:     q['examId'],
+      questionId: q['questionId'],
+      limit:      q['limit'] ? parseInt(q['limit'], 10) : undefined,
+    });
+    res.json({ count: rows.length, rows });
+  } catch (err) {
+    logger.error({ err }, 'admin/validation-audit: error');
     res.status(500).json({ error: String(err) });
   }
 });

@@ -49,23 +49,15 @@ import { gradeDeterministic, DETERMINISTIC_TYPES } from './deterministicGrader';
 import { gradeWithOpenPackage }   from './openGrader';
 import * as openPrepStore         from '../examValidation/openPreparationStore';
 import { OPEN_PREPARATION_TYPES } from '../questionTypeRegistry';
-import { getSharedPool }          from '../dbPool';
 import type { CorrectionResult, QuestionCorrectionInput } from './types';
 import type { ExamAnswer }        from '@workspace/db';
 import { enterGradingContext, exitGradingContext } from '../gradingGuard.js';
-
-// ─── Grading Gate ─────────────────────────────────────────────────────────────
-// Checks whether a question's canonical answer is READY.
-// Used to exclude questions still in preparation from grading.
-
-async function getCanonicalStatus(questionId: string): Promise<string | null> {
-  const pool = getSharedPool();
-  const { rows } = await pool.query<{ validation_status: string }>(
-    `SELECT validation_status FROM public.exam_canonical_answers WHERE question_id = $1 LIMIT 1`,
-    [questionId],
-  );
-  return rows[0]?.validation_status ?? null;
-}
+import * as canonicalAnswerStore  from '../examValidation/canonicalAnswerStore.js';
+import {
+  logGradingOutcome,
+  GRADING_RULES_VERSION,
+  deriveFinalClassification,
+} from '../observability/gradingAuditLogger.js';
 
 export type { CorrectionResult };
 
@@ -134,6 +126,11 @@ export async function gradeAttemptWithCurriculum(
     'correctionEngine: starting curriculum-authoritative correction'
   );
 
+  // ── Exam identity (shared across all questions in this attempt) ───────────
+  // Captured once here so every per-question audit record carries the same
+  // examId without an extra DB call per question.
+  const examId = firstQ?.examId ?? '';
+
   // ── Step 3: Grade each answer ─────────────────────────────────────────────
   let correctCount          = 0;
   let weightedScoreSum      = 0; // sum of scoreRatios for weighted scorePct
@@ -167,6 +164,8 @@ export async function gradeAttemptWithCurriculum(
       graded.push({ ...answer, feedback: null });
       continue;
     }
+    // Wall-clock start for this question's grading duration (written to audit).
+    const questionStart = Date.now();
 
     const input: QuestionCorrectionInput = {
       questionId:    question.id,
@@ -188,10 +187,12 @@ export async function gradeAttemptWithCurriculum(
       // ── Grading Gate: only grade MCQ/TF if canonical answer is READY ──────
       // Preparation-First rule: no Gemini at grading time.
       // If canonical answer is not READY, mark as pending_preparation and skip.
-      const canonicalStatus = await getCanonicalStatus(question.id);
-      if (canonicalStatus !== 'READY') {
+      // Full canonical record — same DB query as the old getCanonicalStatus()
+      // helper but returns retrievalVersion + confidence for the audit event.
+      const canonical = await canonicalAnswerStore.getByQuestionId(question.id);
+      if (canonical?.validationStatus !== 'READY') {
         logger.debug(
-          { questionId: question.id, canonicalStatus },
+          { questionId: question.id, canonicalStatus: canonical?.validationStatus ?? null },
           'correctionEngine: question not READY — marking pending_preparation',
         );
         await examSolverStore.updateAnswer(answer.id, {
@@ -206,6 +207,22 @@ export async function gradeAttemptWithCurriculum(
           aiFeedback:    'هذا السؤال في طور الإعداد',
           feedback:      'هذا السؤال في طور الإعداد',
         });
+        // Audit: MCQ/TF/fill_in_blank deferred — canonical answer not READY yet
+        logGradingOutcome({
+          examId,        questionId:   question.id,   attemptId,
+          questionType:  question.questionType,
+          gradingStrategy:     'pending_preparation',
+          preparationSource:   'canonical_answers',
+          preparationVersion:  canonical?.retrievalVersion ?? null,
+          rulesVersion:        GRADING_RULES_VERSION,
+          confidence:          canonical?.confidence ?? null,
+          preparationStatus:   canonical?.validationStatus ?? null,
+          finalClassification: 'pending_preparation',
+          gradingMethod:       'pending_preparation',
+          scoreRatio:          0,
+          isCorrect:           null,
+          durationMs:          Date.now() - questionStart,
+        });
         // Do NOT count toward correctCount or weightedScoreSum
         continue;
       }
@@ -213,6 +230,22 @@ export async function gradeAttemptWithCurriculum(
       // ── Deterministic path (no Gemini, no network) ─────────────────────
       result = gradeDeterministic(input.studentAnswer, input.correctAnswer, input.questionType);
       deterministicCalls++;
+      // Audit: MCQ/TF/fill_in_blank graded deterministically from canonical store
+      logGradingOutcome({
+        examId,        questionId:   question.id,   attemptId,
+        questionType:  question.questionType,
+        gradingStrategy:     'deterministic',
+        preparationSource:   'canonical_answers',
+        preparationVersion:  canonical.retrievalVersion,
+        rulesVersion:        GRADING_RULES_VERSION,
+        confidence:          canonical.confidence,
+        preparationStatus:   canonical.validationStatus,
+        finalClassification: deriveFinalClassification(result.isCorrect, result.scoreRatio, result.gradingMethod),
+        gradingMethod:       result.gradingMethod,
+        scoreRatio:          result.scoreRatio,
+        isCorrect:           result.isCorrect,
+        durationMs:          Date.now() - questionStart,
+      });
     } else if (OPEN_PREPARATION_TYPES.has(question.questionType)) {
       // ── Open-prepared path (short_answer / calculation / essay) ────────
       // Phase 2: only grade if preparation package is READY.
@@ -222,6 +255,22 @@ export async function gradeAttemptWithCurriculum(
       if (openPrep?.preparationStatus === 'READY' && openPrep.package) {
         result = gradeWithOpenPackage(input, openPrep.package);
         deterministicCalls++;  // graded deterministically from stored package — no Gemini
+        // Audit: open-ended question graded from stored preparation package
+        logGradingOutcome({
+          examId,        questionId:   question.id,   attemptId,
+          questionType:  question.questionType,
+          gradingStrategy:     'open_package',
+          preparationSource:   'open_preparations',
+          preparationVersion:  openPrep.retrievalVersion,
+          rulesVersion:        GRADING_RULES_VERSION,
+          confidence:          openPrep.confidence,
+          preparationStatus:   openPrep.preparationStatus,
+          finalClassification: deriveFinalClassification(result.isCorrect, result.scoreRatio, result.gradingMethod),
+          gradingMethod:       result.gradingMethod,
+          scoreRatio:          result.scoreRatio,
+          isCorrect:           result.isCorrect,
+          durationMs:          Date.now() - questionStart,
+        });
       } else {
         logger.debug(
           { questionId: question.id, openPrepStatus: openPrep?.preparationStatus ?? 'none' },
@@ -238,6 +287,22 @@ export async function gradeAttemptWithCurriculum(
           gradingMethod: 'pending_preparation',
           aiFeedback:    'هذا السؤال في طور الإعداد',
           feedback:      'هذا السؤال في طور الإعداد',
+        });
+        // Audit: open question deferred — preparation package not READY
+        logGradingOutcome({
+          examId,        questionId:   question.id,   attemptId,
+          questionType:  question.questionType,
+          gradingStrategy:     'pending_preparation',
+          preparationSource:   'open_preparations',
+          preparationVersion:  openPrep?.retrievalVersion ?? null,
+          rulesVersion:        GRADING_RULES_VERSION,
+          confidence:          openPrep?.confidence ?? null,
+          preparationStatus:   openPrep?.preparationStatus ?? null,
+          finalClassification: 'pending_preparation',
+          gradingMethod:       'pending_preparation',
+          scoreRatio:          0,
+          isCorrect:           null,
+          durationMs:          Date.now() - questionStart,
         });
         continue;
       }
@@ -263,6 +328,22 @@ export async function gradeAttemptWithCurriculum(
         gradingMethod: 'pending_preparation',
         aiFeedback:    'نوع السؤال غير معروف',
         feedback:      'نوع السؤال غير معروف',
+      });
+      // Audit: no grading path is registered for this question type
+      logGradingOutcome({
+        examId,        questionId:   question.id,   attemptId,
+        questionType:  question.questionType,
+        gradingStrategy:     'unknown_type',
+        preparationSource:   null,
+        preparationVersion:  null,
+        rulesVersion:        GRADING_RULES_VERSION,
+        confidence:          null,
+        preparationStatus:   null,
+        finalClassification: 'pending_preparation',
+        gradingMethod:       'pending_preparation',
+        scoreRatio:          0,
+        isCorrect:           null,
+        durationMs:          Date.now() - questionStart,
       });
       continue;
     }
