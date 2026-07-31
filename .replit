@@ -42,3 +42,43 @@ VITE_FIREBASE_STORAGE_BUCKET = "sage-78209.firebasestorage.app"
 VITE_FIREBASE_MESSAGING_SENDER_ID = "1007529429917"
 VITE_FIREBASE_APP_ID = "1:1007529429917:web:281f998a6a694e0c58fd74"
 VITE_FIREBASE_MEASUREMENT_ID = "G-XKHQG5K531"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "API Server"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Smart Study"
+
+[[workflows.workflow]]
+name = "API Server"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "PORT=8080 pnpm --filter @workspace/api-server run dev"
+waitForPort = 8080
+
+[[workflows.workflow]]
+name = "Smart Study"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/smart-study run dev"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
