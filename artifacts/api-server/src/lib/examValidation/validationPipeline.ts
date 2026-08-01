@@ -278,6 +278,11 @@ async function _runValidation(examId: string): Promise<void> {
       }
     }
 
+    // ── Fix 3: Pre-register all open questions as PENDING before the loop ────
+    // Ensures quota-exhaustion mid-loop leaves visible PENDING records
+    // instead of orphans that are invisible to the retry scheduler.
+    await bulkSeedPendingOpen(examId, questions);
+
     // ── Loop 2: Open-preparation types (short_answer / calculation / essay) ─
     for (const question of questions) {
       if (!OPEN_PREPARATION_TYPES.has(question.questionType)) continue;
@@ -729,6 +734,68 @@ async function processOpenQuestion(
       { questionId, confidence: derivation.confidence, threshold: OPEN_PREP_CONFIDENCE_THRESHOLD, finalStatus },
       `validationPipeline(open): confidence below threshold → ${finalStatus}`,
     );
+  }
+}
+
+// ─── Fix 3: Bulk-seed PENDING records for open questions before the loop ──────
+
+/**
+ * Inserts a PENDING row in exam_open_preparations for every open-type question
+ * in this exam that has no existing record.  Single SQL round-trip, idempotent.
+ * Called at the start of Loop 2 so quota-exhaustion mid-loop leaves a visible
+ * PENDING record rather than a silent orphan.
+ */
+async function bulkSeedPendingOpen(examId: string, questions: PipelineQuestion[]): Promise<void> {
+  if (!questions.some(q => OPEN_PREPARATION_TYPES.has(q.questionType))) return;
+  const pool = getSharedPool();
+  await pool.query(
+    `INSERT INTO public.exam_open_preparations
+       (id, question_id, exam_id, question_type, preparation_status,
+        evidence_chunk_ids, evidence_pages, attempt_count, retrieval_version,
+        created_at, updated_at)
+     SELECT gen_random_uuid(), q.id, q.exam_id, q.question_type, 'PENDING',
+            '[]'::jsonb, '[]'::jsonb, 0, 1, now(), now()
+     FROM public.exam_questions q
+     WHERE q.exam_id = $1
+       AND q.question_type IN ('short_answer', 'essay', 'calculation')
+     ON CONFLICT (question_id) DO NOTHING`,
+    [examId],
+  );
+}
+
+// ─── Fix 4: Self-healing startup recovery ─────────────────────────────────────
+
+/**
+ * Scans for open-type questions that have no row in exam_open_preparations
+ * and seeds them as PENDING.  Called once at server startup — even if a future
+ * bug causes orphans to accumulate, the next restart repairs them automatically.
+ *
+ * Pattern: Self-Healing Recovery — used by large-scale production systems to
+ * prevent anomalous states from persisting across restarts.
+ */
+export async function healOrphanQuestions(): Promise<void> {
+  const pool = getSharedPool();
+  const { rowCount } = await pool.query(
+    `INSERT INTO public.exam_open_preparations
+       (id, question_id, exam_id, question_type, preparation_status,
+        evidence_chunk_ids, evidence_pages, attempt_count, retrieval_version,
+        created_at, updated_at)
+     SELECT gen_random_uuid(), q.id, q.exam_id, q.question_type, 'PENDING',
+            '[]'::jsonb, '[]'::jsonb, 0, 1, now(), now()
+     FROM public.exam_questions q
+     LEFT JOIN public.exam_open_preparations op ON op.question_id = q.id
+     WHERE op.question_id IS NULL
+       AND q.question_type IN ('short_answer', 'essay', 'calculation')
+     ON CONFLICT (question_id) DO NOTHING`,
+  );
+  const healed = rowCount ?? 0;
+  if (healed > 0) {
+    logger.warn(
+      { healed },
+      'validationPipeline: self-healing — seeded PENDING for orphan open questions',
+    );
+  } else {
+    logger.info('validationPipeline: self-healing check — no orphan open questions');
   }
 }
 

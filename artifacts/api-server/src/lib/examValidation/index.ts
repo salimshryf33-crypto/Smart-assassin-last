@@ -6,7 +6,7 @@
  * Import from here — not from individual module files.
  */
 
-export { runValidationForExam, runStartupValidation } from './validationPipeline';
+export { runValidationForExam, runStartupValidation, healOrphanQuestions } from './validationPipeline';
 export { getPublishReadiness, listByExamId, countUnready } from './canonicalAnswerStore';
 export { CONFIDENCE_THRESHOLD, DailyQuotaExhaustedError } from './canonicalAnswerDeriver';
 export { startRetryScheduler, stopRetryScheduler } from './retryScheduler';

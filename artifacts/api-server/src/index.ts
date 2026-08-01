@@ -9,7 +9,7 @@ import { startBackupScheduler } from "./lib/backupScheduler";
 import { restoreCurriculumFromDB } from "./lib/curriculumPersistence";
 import { scanUnlinkedExams } from "./lib/curriculumLinker";
 import { hasQuestionsSnapshot, loadQuestionsFromFile } from "./lib/questionStorage";
-import { runStartupValidation, startRetryScheduler, initPreparationQueue, syncAllPreparationStatuses } from "./lib/examValidation";
+import { runStartupValidation, startRetryScheduler, initPreparationQueue, syncAllPreparationStatuses, healOrphanQuestions } from "./lib/examValidation";
 import { startMetricsFlushTimer } from "./lib/observability/metricsCollector";
 
 const rawPort = process.env["PORT"];
@@ -99,6 +99,11 @@ app.listen(port, (err) => {
       // Backfill preparation_status from current canonical answer states
       await syncAllPreparationStatuses().catch((err: unknown) =>
         logger.error({ err }, 'startup: syncAllPreparationStatuses failed'),
+      );
+      // Fix 4: Self-healing — seed PENDING for any open questions with no record.
+      // Runs every startup; no-op when healthy; repairs orphans caused by any bug.
+      await healOrphanQuestions().catch((err: unknown) =>
+        logger.error({ err }, 'startup: healOrphanQuestions failed'),
       );
       await runStartupValidation();
       // Start the periodic retry/preparation scheduler after the initial scan.

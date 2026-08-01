@@ -137,21 +137,37 @@ async function runRetryTick(): Promise<void> {
 // ─── Eligible exam query ──────────────────────────────────────────────────────
 
 /**
- * Returns distinct exam IDs that have at least one question eligible for retry,
- * ordered by preparation job priority (oldest unfinished first).
+ * Returns distinct exam IDs that have at least one question eligible for retry.
  *
- * Uses the idx_eca_retry partial index — O(k) where k = eligible rows.
+ * Fix 2a: now includes open-preparation types (short_answer / essay / calculation)
+ * alongside canonical-answer types, so exams with only open orphans are not missed.
  */
 async function getExamsWithEligibleQuestions(): Promise<string[]> {
   const pool = getSharedPool();
   const { rows } = await pool.query<{ exam_id: string }>(
-    `SELECT DISTINCT q.exam_id
-     FROM public.exam_canonical_answers ca
-     INNER JOIN public.exam_questions q ON q.id = ca.question_id
-     WHERE ca.validation_status IN ('PENDING', 'VALIDATED', 'LOW_EVIDENCE')
-       AND ca.next_retry_at IS NOT NULL
-       AND ca.next_retry_at <= now()
-     ORDER BY q.exam_id
+    `SELECT DISTINCT exam_id
+     FROM (
+       -- Canonical types with an eligible retry window
+       SELECT q.exam_id
+       FROM public.exam_canonical_answers ca
+       INNER JOIN public.exam_questions q ON q.id = ca.question_id
+       WHERE ca.validation_status IN ('PENDING', 'VALIDATED', 'LOW_EVIDENCE')
+         AND ca.next_retry_at IS NOT NULL
+         AND ca.next_retry_at <= now()
+       UNION
+       -- Open types: orphans (no record yet) or non-terminal with eligible retry
+       SELECT q.exam_id
+       FROM public.exam_questions q
+       LEFT JOIN public.exam_open_preparations op ON op.question_id = q.id
+       WHERE q.question_type IN ('short_answer', 'essay', 'calculation')
+         AND (
+           op.question_id IS NULL
+           OR (
+             op.preparation_status IN ('PENDING', 'VALIDATED', 'LOW_EVIDENCE')
+             AND (op.next_retry_at IS NULL OR op.next_retry_at <= now())
+           )
+         )
+     ) AS combined
      LIMIT $1`,
     [BATCH_LIMIT],
   );
@@ -161,22 +177,36 @@ async function getExamsWithEligibleQuestions(): Promise<string[]> {
 /**
  * For every exam with unready questions that has no active preparation job,
  * enqueue it with priority 1 (backlog).
+ *
+ * Fix 2b: covers all six known question types (deterministic + open), not
+ * just mcq/true_false, so open-only exams are never left without a job.
  */
 async function ensureQueuedForEligibleExams(): Promise<void> {
   const pool = getSharedPool();
   const { rows } = await pool.query<{ exam_id: string }>(
-    `SELECT DISTINCT q.exam_id
-     FROM public.exam_questions q
-     LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = q.id
-     WHERE q.question_type IN ('mcq','true_false')
-       AND (
-         ca.validation_status IS NULL
-         OR ca.validation_status IN ('PENDING','VALIDATED','LOW_EVIDENCE')
-       )
-       AND NOT EXISTS (
-         SELECT 1 FROM public.exam_preparation_jobs epj
-         WHERE epj.exam_id = q.exam_id AND epj.status IN ('pending','running','paused')
-       )
+    `SELECT DISTINCT unready.exam_id
+     FROM (
+       -- Deterministic types: mcq / true_false / fill_in_blank without terminal status
+       SELECT q.exam_id
+       FROM public.exam_questions q
+       LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = q.id
+       WHERE q.question_type IN ('mcq', 'true_false', 'fill_in_blank')
+         AND (ca.validation_status IS NULL
+              OR ca.validation_status IN ('PENDING', 'VALIDATED', 'LOW_EVIDENCE'))
+       UNION
+       -- Open types: orphans (no record) or non-terminal
+       SELECT q.exam_id
+       FROM public.exam_questions q
+       LEFT JOIN public.exam_open_preparations op ON op.question_id = q.id
+       WHERE q.question_type IN ('short_answer', 'essay', 'calculation')
+         AND (op.question_id IS NULL
+              OR op.preparation_status IN ('PENDING', 'VALIDATED', 'LOW_EVIDENCE'))
+     ) AS unready
+     WHERE NOT EXISTS (
+       SELECT 1 FROM public.exam_preparation_jobs epj
+       WHERE epj.exam_id = unready.exam_id
+         AND epj.status IN ('pending', 'running', 'paused')
+     )
      LIMIT 50`,
   );
 
