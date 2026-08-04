@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Shield, Activity, Database, HardDrive, Clock, Brain,
@@ -6,14 +6,17 @@ import {
   Server, Cpu, MemoryStick, FileArchive, Eye, EyeOff,
   Search, FileText, BarChart2, Zap,
   Link2, ThumbsUp, ThumbsDown, RotateCcw, BookOpen,
+  Layers, ListChecks, Cpu as CpuIcon, Inbox, TrendingUp,
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import PageWrapper from '../components/layout/PageWrapper';
 import {
   fetchSystemHealth, fetchAuditLog, triggerBackup,
   fetchMetrics, fetchUsageSummary, fetchCacheMetrics,
+  fetchPrepOps,
   type SystemHealth, type AuditEntry,
   type MetricsSnapshot, type UsageSummary, type CacheMetrics,
+  type PrepOpsDashboard,
 } from '../utils/adminApi';
 import {
   fetchPendingLinks, fetchLinkStats, fetchAllLinks,
@@ -842,9 +845,340 @@ function CurriculumLinksSection() {
   );
 }
 
+// ─── Preparation Operations Section ──────────────────────────────────────────
+
+const PREP_STATUS_META: Record<string, { label: string; color: string }> = {
+  READY:                  { label: 'جاهز',              color: '#34d399' },
+  VALIDATED:              { label: 'مُتحقّق',            color: '#60a5fa' },
+  PENDING:                { label: 'انتظار',             color: '#94a3b8' },
+  PROCESSING:             { label: 'يعالج',              color: '#f59e0b' },
+  LOW_EVIDENCE:           { label: 'أدلة ضعيفة',        color: '#fb923c' },
+  PERMANENT_LOW_EVIDENCE: { label: 'أدلة ضعيفة دائمة', color: '#f87171' },
+  INVALID:                { label: 'غير صالح',           color: '#ef4444' },
+};
+
+const EVENT_LABELS: Record<string, string> = {
+  validation_started:          'بدأ التحقق',
+  validation_ready:            'سؤال جاهز ✓',
+  validation_derivation_failed:'فشل الاستنتاج',
+  validation_low_confidence:   'ثقة منخفضة',
+  grading_outcome:             'نتيجة تصحيح',
+  quota_exhausted:             'نفدت الحصة اليومية',
+  retry_started:               'بدأت إعادة المحاولة',
+  retry_completed:             'اكتملت إعادة المحاولة',
+  dlq_inserted:                'أُدرج في قائمة الأعطال',
+  exam_prepared:               'اكتمل تحضير الامتحان',
+  preparation_paused:          'التحضير متوقف مؤقتاً',
+  preparation_started:         'بدأ التحضير',
+  preparation_completed:       'اكتمل التحضير',
+};
+
+const PREP_STATUS_COLORS: Record<PrepOpsDashboard['healthStatus'], { bg: string; border: string; color: string; icon: typeof CheckCircle; label: string }> = {
+  healthy:         { bg: 'rgba(52,211,153,0.07)',  border: 'rgba(52,211,153,0.22)',  color: '#34d399', icon: CheckCircle,  label: '🟢 النظام سليم' },
+  quota_wait:      { bg: 'rgba(251,191,36,0.07)',  border: 'rgba(251,191,36,0.22)',  color: '#fbbf24', icon: AlertCircle,  label: '🟡 انتظار حصة Gemini' },
+  active_recovery: { bg: 'rgba(251,146,60,0.07)',  border: 'rgba(251,146,60,0.22)',  color: '#fb923c', icon: RotateCcw,    label: '🟠 استرداد نشط' },
+  stalled:         { bg: 'rgba(248,113,113,0.07)', border: 'rgba(248,113,113,0.22)', color: '#f87171', icon: XCircle,      label: '🔴 التحضير متوقف' },
+};
+
+function PrepHealthCard({ status }: { status: PrepOpsDashboard['healthStatus'] }) {
+  const cfg = PREP_STATUS_COLORS[status];
+  const Icon = cfg.icon;
+  return (
+    <motion.div initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }}
+      className="flex items-center gap-3 rounded-2xl p-4 mb-3"
+      style={{ background: cfg.bg, border: `1px solid ${cfg.border}` }}
+    >
+      <Icon size={22} style={{ color: cfg.color }} className="flex-shrink-0" />
+      <div dir="rtl">
+        <p className="text-base font-bold" style={{ color: cfg.color }}>{cfg.label}</p>
+        <p className="text-[10px] text-slate-500 mt-0.5">حالة نظام التحضير في الوقت الفعلي</p>
+      </div>
+    </motion.div>
+  );
+}
+
+function PrepOpsSection({ data, lastRefresh }: { data: PrepOpsDashboard; lastRefresh: Date }) {
+  const { globalSummary, preparationStatus, queueStatus, geminiStatus, runningJobs, examTable, orphanCount, recentEvents } = data;
+
+  return (
+    <div className="space-y-3">
+
+      {/* ── Health Card ───────────────────────────────────────────────── */}
+      <PrepHealthCard status={data.healthStatus} />
+
+      {/* ── Auto-refresh indicator ────────────────────────────────────── */}
+      <div className="flex items-center justify-end gap-1.5 -mt-1 mb-1">
+        <div className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+        <span className="text-[9px] text-slate-600">تحديث تلقائي كل 10 ثوان • آخر تحديث: {lastRefresh.toLocaleTimeString('ar-EG')}</span>
+      </div>
+
+      {/* ── Global Summary ────────────────────────────────────────────── */}
+      <GlassPanel>
+        <SectionTitle icon={Layers} title="الملخص العام" color="#00c6ff" />
+        <div className="grid grid-cols-3 gap-2" dir="rtl">
+          {[
+            { label: 'كتب المناهج', value: globalSummary.totalBooks,     color: '#00c6ff' },
+            { label: 'الامتحانات',   value: globalSummary.totalExams,     color: '#a78bfa' },
+            { label: 'الأسئلة',      value: globalSummary.totalQuestions, color: '#f59e0b' },
+          ].map(({ label, value, color }) => (
+            <div key={label} className="flex flex-col items-center rounded-xl py-3"
+              style={{ background: `${color}09`, border: `1px solid ${color}22` }}
+            >
+              <span className="text-xl font-black" style={{ color }}>{value.toLocaleString('ar')}</span>
+              <span className="text-[9px] text-slate-500 mt-1">{label}</span>
+            </div>
+          ))}
+        </div>
+      </GlassPanel>
+
+      {/* ── Preparation Status ────────────────────────────────────────── */}
+      <GlassPanel>
+        <SectionTitle icon={ListChecks} title="حالة التحضير" color="#34d399" />
+        <div className="space-y-2" dir="rtl">
+          {Object.entries(PREP_STATUS_META).map(([key, meta]) => {
+            const count = preparationStatus.counts[key] ?? 0;
+            const pct   = preparationStatus.percentages[key] ?? 0;
+            return (
+              <div key={key}>
+                <div className="flex items-center justify-between mb-0.5">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] font-semibold" style={{ color: meta.color }}>{meta.label}</span>
+                    <span className="text-[10px] text-slate-500">({pct}%)</span>
+                  </div>
+                  <span className="text-xs font-bold text-white">{count.toLocaleString('ar')}</span>
+                </div>
+                <MetricBar value={pct} max={100} color={meta.color} />
+              </div>
+            );
+          })}
+          <div className="pt-1 mt-1 border-t border-white/[0.05] flex items-center justify-between" dir="rtl">
+            <span className="text-[10px] text-slate-500">الإجمالي المُحضَّر</span>
+            <span className="text-xs font-bold text-white">{preparationStatus.total.toLocaleString('ar')}</span>
+          </div>
+        </div>
+      </GlassPanel>
+
+      {/* ── Queue Status ──────────────────────────────────────────────── */}
+      <GlassPanel>
+        <SectionTitle icon={Inbox} title="حالة قائمة الانتظار" color="#a78bfa" />
+        <div className="grid grid-cols-4 gap-1.5" dir="rtl">
+          {[
+            { label: 'يعمل',    value: queueStatus.active,  color: '#34d399' },
+            { label: 'انتظار',  value: queueStatus.waiting, color: '#94a3b8' },
+            { label: 'موقوف',   value: queueStatus.paused,  color: '#f59e0b' },
+            { label: 'إعادة',   value: queueStatus.retry,   color: '#fb923c' },
+            { label: 'مكتمل',   value: queueStatus.done,    color: '#60a5fa' },
+            { label: 'فشل',     value: queueStatus.failed,  color: '#f87171' },
+            { label: 'DLQ',     value: queueStatus.dlq,     color: queueStatus.dlq > 0 ? '#ef4444' : '#64748b' },
+          ].map(({ label, value, color }) => (
+            <div key={label} className="flex flex-col items-center rounded-xl py-2.5 col-span-1"
+              style={{ background: `${color}09`, border: `1px solid ${value > 0 && label === 'DLQ' ? '#ef444440' : `${color}20`}` }}
+            >
+              <span className="text-sm font-black" style={{ color }}>{value}</span>
+              <span className="text-[9px] text-slate-500 mt-0.5">{label}</span>
+            </div>
+          ))}
+        </div>
+      </GlassPanel>
+
+      {/* ── Gemini Status ─────────────────────────────────────────────── */}
+      <GlassPanel>
+        <SectionTitle icon={Brain} title="حالة Gemini" color="#a78bfa" />
+        <div className="space-y-1" dir="rtl">
+          <KpiRow label="المزوّد"           value={<span className="text-xs font-bold text-white">{geminiStatus.provider}</span>} />
+          <KpiRow label="طلبات اليوم"       value={
+            <span className="text-lg font-black" style={{ color: '#a78bfa' }}>
+              {geminiStatus.callsToday.toLocaleString('ar')}
+            </span>
+          } />
+          <KpiRow label="أخطاء الحصة"       value={
+            <span style={{ color: geminiStatus.quotaErrors > 0 ? '#f87171' : '#34d399' }}>
+              {geminiStatus.quotaErrors}
+            </span>
+          } />
+          <KpiRow label="آخر خطأ حصة"       value={geminiStatus.lastQuotaError ? formatTS(geminiStatus.lastQuotaError) : <span className="text-slate-500">—</span>} />
+          <KpiRow label="النشاط الحالي"     value={
+            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold"
+              style={{
+                background: geminiStatus.isActive ? 'rgba(52,211,153,0.12)' : 'rgba(148,163,184,0.08)',
+                border: `1px solid ${geminiStatus.isActive ? 'rgba(52,211,153,0.3)' : 'rgba(148,163,184,0.15)'}`,
+                color: geminiStatus.isActive ? '#34d399' : '#94a3b8',
+              }}
+            >
+              {geminiStatus.isActive ? <><div className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />يُحضّر</> : 'خامل'}
+            </span>
+          } />
+        </div>
+      </GlassPanel>
+
+      {/* ── Running Jobs ──────────────────────────────────────────────── */}
+      <GlassPanel>
+        <SectionTitle icon={CpuIcon} title={`المهام الجارية (${runningJobs.length})`} color="#f59e0b" />
+        {runningJobs.length === 0 ? (
+          <div className="flex flex-col items-center gap-2 py-6" dir="rtl">
+            <CheckCircle size={20} className="text-emerald-400" />
+            <p className="text-xs text-slate-500">لا توجد مهام نشطة</p>
+          </div>
+        ) : (
+          <div className="space-y-2.5">
+            {runningJobs.map(job => (
+              <div key={job.jobId} className="rounded-xl p-2.5"
+                style={{ background: 'rgba(245,158,11,0.05)', border: '1px solid rgba(245,158,11,0.15)' }}
+              >
+                <div className="flex items-start justify-between gap-2 mb-2" dir="rtl">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold text-white truncate">{job.examTitle}</p>
+                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                      <span className="text-[9px] rounded-full px-1.5 py-px font-medium"
+                        style={{ background: 'rgba(245,158,11,0.12)', color: '#f59e0b' }}
+                      >{job.status}</span>
+                      {job.workerId && <span className="text-[9px] text-slate-600 font-mono truncate max-w-[80px]">{job.workerId.slice(0, 12)}…</span>}
+                    </div>
+                  </div>
+                  <span className="text-sm font-black flex-shrink-0" style={{ color: job.progressPct >= 80 ? '#34d399' : '#f59e0b' }}>
+                    {job.progressPct}%
+                  </span>
+                </div>
+                {/* Progress bar */}
+                <div className="h-1.5 w-full rounded-full bg-white/[0.06] overflow-hidden mb-1.5">
+                  <motion.div className="h-full rounded-full"
+                    style={{ background: job.progressPct >= 80 ? '#34d399' : '#f59e0b' }}
+                    initial={{ width: 0 }} animate={{ width: `${job.progressPct}%` }}
+                    transition={{ duration: 0.6, ease: 'easeOut' }}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-[9px] text-slate-600" dir="rtl">
+                  <span>{job.readyQuestions} / {job.totalQuestions} سؤال</span>
+                  {job.heartbeat && <span>نبضة: {timeAgo(job.heartbeat)}</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </GlassPanel>
+
+      {/* ── Orphan Monitor ────────────────────────────────────────────── */}
+      <div className="rounded-2xl p-3"
+        style={{
+          background:  orphanCount > 0 ? 'rgba(239,68,68,0.07)'  : 'rgba(52,211,153,0.05)',
+          border: `1px solid ${orphanCount > 0 ? 'rgba(239,68,68,0.25)' : 'rgba(52,211,153,0.15)'}`,
+        }}
+      >
+        <div className="flex items-center justify-between" dir="rtl">
+          <div className="flex items-center gap-2">
+            {orphanCount > 0
+              ? <AlertCircle size={16} className="text-red-400 flex-shrink-0" />
+              : <CheckCircle size={16} className="text-emerald-400 flex-shrink-0" />}
+            <div>
+              <p className="text-xs font-semibold" style={{ color: orphanCount > 0 ? '#ef4444' : '#34d399' }}>
+                {orphanCount > 0 ? `تحذير: ${orphanCount} سؤال يتيم` : 'لا توجد أسئلة يتيمة'}
+              </p>
+              <p className="text-[10px] text-slate-500">أسئلة MCQ بدون إجابة قانونية</p>
+            </div>
+          </div>
+          <span className="text-2xl font-black" style={{ color: orphanCount > 0 ? '#ef4444' : '#34d399' }}>
+            {orphanCount}
+          </span>
+        </div>
+      </div>
+
+      {/* ── Exam Preparation Table ────────────────────────────────────── */}
+      <GlassPanel>
+        <SectionTitle icon={TrendingUp} title="جدول تحضير الامتحانات (مرتب تصاعدياً)" color="#60a5fa" />
+        <div className="overflow-x-auto -mx-1">
+          <table className="w-full text-[10px]" dir="rtl">
+            <thead>
+              <tr className="text-slate-500 border-b border-white/[0.06]">
+                <th className="text-right pb-2 pr-1 font-medium min-w-[100px]">الامتحان</th>
+                <th className="text-center pb-2 px-1 font-medium">أسئلة</th>
+                <th className="text-center pb-2 px-1 font-medium" style={{ color: '#34d399' }}>READY</th>
+                <th className="text-center pb-2 px-1 font-medium" style={{ color: '#60a5fa' }}>VALID</th>
+                <th className="text-center pb-2 px-1 font-medium" style={{ color: '#fb923c' }}>LOW</th>
+                <th className="text-center pb-2 px-1 font-medium" style={{ color: '#f87171' }}>PERM</th>
+                <th className="text-center pb-2 px-1 font-medium">%</th>
+                <th className="text-center pb-2 px-1 font-medium min-w-[60px]">الحالة</th>
+              </tr>
+            </thead>
+            <tbody>
+              {examTable.map(row => {
+                const pctColor = row.completionPct >= 80 ? '#34d399' : row.completionPct >= 40 ? '#f59e0b' : '#f87171';
+                return (
+                  <tr key={row.examId} className="border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors">
+                    <td className="py-2 pr-1 text-right">
+                      <p className="text-white font-medium leading-tight truncate max-w-[110px]">{row.title}</p>
+                      <p className="text-slate-600 text-[9px]">{row.totalQuestions} سؤال</p>
+                    </td>
+                    <td className="text-center py-2 px-1 text-slate-400">{row.mcqQuestions}</td>
+                    <td className="text-center py-2 px-1 font-bold" style={{ color: '#34d399' }}>{row.ready}</td>
+                    <td className="text-center py-2 px-1 font-bold" style={{ color: '#60a5fa' }}>{row.validated}</td>
+                    <td className="text-center py-2 px-1 font-bold" style={{ color: '#fb923c' }}>{row.lowEvidence}</td>
+                    <td className="text-center py-2 px-1 font-bold" style={{ color: '#f87171' }}>{row.permanentLow}</td>
+                    <td className="text-center py-2 px-1">
+                      <span className="font-black text-sm" style={{ color: pctColor }}>{row.completionPct}%</span>
+                    </td>
+                    <td className="text-center py-2 px-1">
+                      <span className="rounded-full px-1.5 py-px text-[9px] font-medium"
+                        style={{
+                          background: row.preparationStatus === 'READY' ? 'rgba(52,211,153,0.12)' :
+                                      row.preparationStatus === 'paused' ? 'rgba(245,158,11,0.12)' :
+                                      'rgba(148,163,184,0.08)',
+                          color: row.preparationStatus === 'READY' ? '#34d399' :
+                                 row.preparationStatus === 'paused' ? '#f59e0b' : '#94a3b8',
+                        }}
+                      >
+                        {row.preparationStatus === 'READY' ? 'جاهز' :
+                         row.preparationStatus === 'paused' ? 'موقوف' :
+                         row.preparationStatus === 'processing' ? 'يعمل' :
+                         row.preparationStatus ?? '—'}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </GlassPanel>
+
+      {/* ── Recent Preparation Events ─────────────────────────────────── */}
+      <GlassPanel>
+        <SectionTitle icon={Activity} title="أحدث أحداث التحضير" color="#94a3b8" />
+        {recentEvents.length === 0 ? (
+          <p className="text-center text-xs text-slate-500 py-4" dir="rtl">لا توجد أحداث بعد</p>
+        ) : (
+          <div className="space-y-1.5 max-h-80 overflow-y-auto pr-0.5">
+            {recentEvents.map(ev => {
+              const isError = ev.severity === 'error' || ev.event.includes('fail') || ev.event.includes('error');
+              const isSuccess = ev.event.includes('ready') || ev.event.includes('completed');
+              const evColor = isError ? '#f87171' : isSuccess ? '#34d399' : '#94a3b8';
+              return (
+                <div key={ev.id} className="flex items-start gap-2 rounded-xl p-2"
+                  style={{ background: `${evColor}06`, border: `1px solid ${evColor}15` }}
+                >
+                  <div className="h-1.5 w-1.5 rounded-full mt-1.5 flex-shrink-0" style={{ background: evColor }} />
+                  <div className="flex-1 min-w-0" dir="rtl">
+                    <div className="flex items-center justify-between gap-1">
+                      <p className="text-[11px] font-medium truncate" style={{ color: evColor }}>
+                        {EVENT_LABELS[ev.event] ?? ev.event}
+                      </p>
+                      <span className="text-[9px] text-slate-600 flex-shrink-0">{timeAgo(ev.createdAt)}</span>
+                    </div>
+                    {ev.examId && <p className="text-[9px] text-slate-600 font-mono truncate mt-0.5">{ev.examId.slice(0, 16)}…</p>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </GlassPanel>
+
+    </div>
+  );
+}
+
 // ─── Tabs ─────────────────────────────────────────────────────────────────────
 
-type Tab = 'health' | 'metrics' | 'backup' | 'audit' | 'links';
+type Tab = 'health' | 'metrics' | 'backup' | 'audit' | 'links' | 'prep';
 
 const TABS: { id: Tab; label: string; icon: typeof Shield }[] = [
   { id: 'health',  label: 'الصحة',    icon: Activity  },
@@ -852,6 +1186,7 @@ const TABS: { id: Tab; label: string; icon: typeof Shield }[] = [
   { id: 'backup',  label: 'النسخ',    icon: HardDrive  },
   { id: 'audit',   label: 'التدقيق',  icon: Eye        },
   { id: 'links',   label: 'الربط',    icon: Link2      },
+  { id: 'prep',    label: 'التحضير',  icon: ListChecks },
 ];
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
@@ -865,12 +1200,45 @@ export default function AdminDashboard() {
   const [metrics,      setMetrics]      = useState<MetricsSnapshot | null>(null);
   const [usage,        setUsage]        = useState<UsageSummary | null>(null);
   const [cache,        setCache]        = useState<CacheMetrics | null>(null);
+  const [prepOps,      setPrepOps]      = useState<PrepOpsDashboard | null>(null);
+  const [prepLastRefresh, setPrepLastRefresh] = useState<Date>(new Date());
 
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [triggering, setTriggering] = useState(false);
   const [backupMsg,  setBackupMsg]  = useState<string | null>(null);
+
+  const prepIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const loadPrepOps = useCallback(async () => {
+    try {
+      const data = await fetchPrepOps();
+      setPrepOps(data);
+      setPrepLastRefresh(new Date());
+    } catch {
+      // prep ops errors are non-fatal — don't replace whole page error
+    }
+  }, []);
+
+  // Auto-refresh prep tab every 10 s while it is active
+  useEffect(() => {
+    if (activeTab === 'prep') {
+      loadPrepOps();
+      prepIntervalRef.current = setInterval(loadPrepOps, 10_000);
+    } else {
+      if (prepIntervalRef.current) {
+        clearInterval(prepIntervalRef.current);
+        prepIntervalRef.current = null;
+      }
+    }
+    return () => {
+      if (prepIntervalRef.current) {
+        clearInterval(prepIntervalRef.current);
+        prepIntervalRef.current = null;
+      }
+    };
+  }, [activeTab, loadPrepOps]);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -1039,6 +1407,23 @@ export default function AdminDashboard() {
                 {activeTab === 'links' && (
                   <motion.div key="links" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
                     <CurriculumLinksSection />
+                  </motion.div>
+                )}
+                {activeTab === 'prep' && (
+                  <motion.div key="prep" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
+                    {prepOps ? (
+                      <PrepOpsSection data={prepOps} lastRefresh={prepLastRefresh} />
+                    ) : (
+                      <div className="flex flex-col items-center gap-3 py-16">
+                        <div className="flex gap-1.5">
+                          {[0,1,2].map(i => (
+                            <div key={i} className="h-1.5 w-1.5 rounded-full bg-[#34d399] animate-pulse"
+                              style={{ animationDelay: `${i * 0.2}s` }} />
+                          ))}
+                        </div>
+                        <p className="text-xs text-slate-500" dir="rtl">جارٍ تحميل بيانات التحضير…</p>
+                      </div>
+                    )}
                   </motion.div>
                 )}
               </AnimatePresence>

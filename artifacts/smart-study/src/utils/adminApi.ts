@@ -169,3 +169,88 @@ export async function fetchCacheMetrics(): Promise<CacheMetrics> {
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
+
+// ─── Preparation Operations Dashboard ────────────────────────────────────────
+
+export interface PrepOpsRunningJob {
+  jobId:          string;
+  examId:         string;
+  examTitle:      string;
+  status:         string;
+  totalQuestions: number;
+  readyQuestions: number;
+  progressPct:    number;
+  startedAt:      string | null;
+  heartbeat:      string | null;
+  workerId:       string | null;
+  currentStage:   string;
+}
+
+export interface PrepOpsExamRow {
+  examId:            string;
+  title:             string;
+  totalQuestions:    number;
+  mcqQuestions:      number;
+  ready:             number;
+  validated:         number;
+  lowEvidence:       number;
+  permanentLow:      number;
+  pending:           number;
+  processing:        number;
+  invalid:           number;
+  completionPct:     number;
+  preparationStatus: string;
+  lastUpdated:       string | null;
+}
+
+export interface PrepOpsEvent {
+  id:         string;
+  event:      string;
+  examId:     string | null;
+  questionId: string | null;
+  severity:   string;
+  createdAt:  string;
+  payload:    Record<string, unknown>;
+}
+
+export interface PrepOpsDashboard {
+  generatedAt: string;
+  globalSummary: {
+    totalBooks:     number;
+    totalExams:     number;
+    totalQuestions: number;
+  };
+  preparationStatus: {
+    counts:      Record<string, number>;
+    total:       number;
+    percentages: Record<string, number>;
+  };
+  queueStatus: {
+    active:  number;
+    waiting: number;
+    paused:  number;
+    retry:   number;
+    done:    number;
+    failed:  number;
+    dlq:     number;
+  };
+  geminiStatus: {
+    provider:       string;
+    callsToday:     number;
+    quotaErrors:    number;
+    lastActivity:   string | null;
+    lastQuotaError: string | null;
+    isActive:       boolean;
+  };
+  runningJobs:  PrepOpsRunningJob[];
+  examTable:    PrepOpsExamRow[];
+  orphanCount:  number;
+  recentEvents: PrepOpsEvent[];
+  healthStatus: 'healthy' | 'quota_wait' | 'active_recovery' | 'stalled';
+}
+
+export async function fetchPrepOps(): Promise<PrepOpsDashboard> {
+  const res = await fetch('/api/admin/prep-ops', { headers: await authHeaders() });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}

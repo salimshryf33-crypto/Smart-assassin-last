@@ -620,6 +620,225 @@ router.get('/validation-audit', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
+// ─── GET /api/admin/prep-ops ──────────────────────────────────────────────────
+// Preparation Operations Dashboard — read-only snapshot of the entire
+// preparation pipeline. Never triggers preparation or modifies any state.
+router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const db      = getMigrationPool();
+    const metrics = getMetricsSnapshot();
+
+    const [
+      globalRow,
+      mcqStatusRows,
+      openStatusRows,
+      jobStatusRows,
+      dlqRow,
+      runningJobRows,
+      examTableRows,
+      orphanRow,
+      recentEventsRows,
+      lastQuotaRow,
+    ] = await Promise.all([
+      // 1. Global counts
+      db.query<{ total_books: string; total_exams: string; total_questions: string }>(`
+        SELECT
+          (SELECT COUNT(*) FROM public.curriculum_documents WHERE doc_type='book' OR doc_type IS NULL)::int AS total_books,
+          (SELECT COUNT(*) FROM public.exam_records)::int                                                   AS total_exams,
+          (SELECT COUNT(*) FROM public.exam_questions)::int                                                 AS total_questions
+      `),
+      // 2. MCQ canonical answer status distribution
+      db.query<{ status: string; count: string }>(`
+        SELECT validation_status AS status, COUNT(*)::int AS count
+        FROM public.exam_canonical_answers GROUP BY validation_status
+      `),
+      // 3. Open question preparation status distribution
+      db.query<{ status: string; count: string }>(`
+        SELECT preparation_status AS status, COUNT(*)::int AS count
+        FROM public.exam_open_preparations GROUP BY preparation_status
+      `),
+      // 4. Job queue status
+      db.query<{ status: string; count: string }>(`
+        SELECT status, COUNT(*)::int AS count
+        FROM public.exam_preparation_jobs GROUP BY status
+      `),
+      // 5. Unresolved DLQ entries
+      db.query<{ count: number }>(`
+        SELECT COUNT(*)::int AS count FROM public.exam_dlq WHERE resolved_at IS NULL
+      `),
+      // 6. Active / pending / retry jobs with exam title
+      db.query<{
+        id: string; exam_id: string; title: string | null; status: string;
+        total_questions: number | null; ready_questions: number | null;
+        started_at: Date | null; heartbeat: Date | null; worker_id: string | null;
+      }>(`
+        SELECT j.id, j.exam_id, r.title, j.status,
+               j.total_questions, j.ready_questions,
+               j.started_at, j.heartbeat, j.worker_id
+        FROM public.exam_preparation_jobs j
+        LEFT JOIN public.exam_records r ON r.exam_id = j.exam_id
+        WHERE j.status IN ('processing','pending','retry','paused')
+        ORDER BY j.updated_at DESC LIMIT 30
+      `),
+      // 7. Per-exam preparation breakdown (MCQ only → canonical_answers)
+      db.query<{
+        exam_id: string; title: string; question_count: number | null;
+        preparation_status: string | null; updated_at: Date | null;
+        mcq_total: string; ready: string; validated: string;
+        low_evidence: string; permanent_low: string;
+        pending: string; processing: string; invalid: string;
+      }>(`
+        SELECT
+          r.exam_id, r.title, r.question_count,
+          r.preparation_status, r.updated_at,
+          COUNT(q.id)::int                                                                            AS mcq_total,
+          SUM(CASE WHEN ca.validation_status = 'READY'               THEN 1 ELSE 0 END)::int         AS ready,
+          SUM(CASE WHEN ca.validation_status = 'VALIDATED'           THEN 1 ELSE 0 END)::int         AS validated,
+          SUM(CASE WHEN ca.validation_status = 'LOW_EVIDENCE'        THEN 1 ELSE 0 END)::int         AS low_evidence,
+          SUM(CASE WHEN ca.validation_status = 'PERMANENT_LOW_EVIDENCE' THEN 1 ELSE 0 END)::int      AS permanent_low,
+          SUM(CASE WHEN ca.validation_status = 'PENDING'             THEN 1 ELSE 0 END)::int         AS pending,
+          SUM(CASE WHEN ca.validation_status = 'PROCESSING'          THEN 1 ELSE 0 END)::int         AS processing,
+          SUM(CASE WHEN ca.validation_status = 'INVALID'             THEN 1 ELSE 0 END)::int         AS invalid
+        FROM public.exam_records r
+        LEFT JOIN public.exam_questions  q  ON q.exam_id        = r.exam_id AND q.question_type = 'mcq'
+        LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = q.id
+        GROUP BY r.exam_id, r.title, r.question_count, r.preparation_status, r.updated_at
+      `),
+      // 8. MCQ questions with no canonical answer (orphans)
+      db.query<{ count: number }>(`
+        SELECT COUNT(*)::int AS count
+        FROM public.exam_questions
+        WHERE question_type = 'mcq'
+          AND NOT EXISTS (
+            SELECT 1 FROM public.exam_canonical_answers ca WHERE ca.question_id = exam_questions.id
+          )
+      `),
+      // 9. Recent validation pipeline events
+      db.query<{
+        id: string; event: string; exam_id: string | null;
+        question_id: string | null; severity: string; created_at: Date; payload: unknown;
+      }>(`
+        SELECT id, event, exam_id, question_id, severity, created_at, payload
+        FROM public.validation_audit_log
+        ORDER BY created_at DESC LIMIT 25
+      `),
+      // 10. Last quota-related event
+      db.query<{ created_at: Date }>(`
+        SELECT created_at FROM public.validation_audit_log
+        WHERE event ILIKE '%quota%'
+           OR payload::text ILIKE '%QuotaExhausted%'
+           OR payload::text ILIKE '%RESOURCE_EXHAUSTED%'
+        ORDER BY created_at DESC LIMIT 1
+      `),
+    ]);
+
+    // ── Merge status counts (MCQ + open questions) ────────────────────────────
+    const STATUS_KEYS = ['READY','VALIDATED','PENDING','PROCESSING','LOW_EVIDENCE','PERMANENT_LOW_EVIDENCE','INVALID'] as const;
+    const statusCounts: Record<string, number> = Object.fromEntries(STATUS_KEYS.map(k => [k, 0]));
+    for (const row of mcqStatusRows.rows)  statusCounts[row.status]             = (statusCounts[row.status]  ?? 0) + Number(row.count);
+    for (const row of openStatusRows.rows) statusCounts[row.status?.toUpperCase() ?? 'PENDING'] = (statusCounts[row.status?.toUpperCase() ?? 'PENDING'] ?? 0) + Number(row.count);
+    const totalPrepared = Object.values(statusCounts).reduce((s, n) => s + n, 0);
+    const statusPct: Record<string, number> = {};
+    for (const [k, v] of Object.entries(statusCounts)) statusPct[k] = totalPrepared === 0 ? 0 : Math.round((v / totalPrepared) * 100);
+
+    // ── Queue status map ──────────────────────────────────────────────────────
+    const qMap: Record<string, number> = {};
+    for (const row of jobStatusRows.rows) qMap[row.status] = Number(row.count);
+
+    // ── Running jobs ──────────────────────────────────────────────────────────
+    const runningJobs = runningJobRows.rows.map(j => ({
+      jobId:          j.id,
+      examId:         j.exam_id,
+      examTitle:      j.title ?? j.exam_id,
+      status:         j.status,
+      totalQuestions: j.total_questions ?? 0,
+      readyQuestions: j.ready_questions ?? 0,
+      progressPct:    (j.total_questions ?? 0) === 0 ? 0 : Math.round(((j.ready_questions ?? 0) / (j.total_questions ?? 1)) * 100),
+      startedAt:      j.started_at?.toISOString()  ?? null,
+      heartbeat:      j.heartbeat?.toISOString()   ?? null,
+      workerId:       j.worker_id ?? null,
+      currentStage:   j.status,
+    }));
+
+    // ── Exam table (sorted by lowest completion %) ────────────────────────────
+    const examTable = examTableRows.rows.map(r => {
+      const mcqTotal       = Number(r.mcq_total)    || 0;
+      const readyValidated = Number(r.ready)         + Number(r.validated);
+      const completionPct  = mcqTotal === 0 ? 0 : Math.round((readyValidated / mcqTotal) * 100);
+      return {
+        examId:            r.exam_id,
+        title:             r.title,
+        totalQuestions:    r.question_count ?? mcqTotal,
+        mcqQuestions:      mcqTotal,
+        ready:             Number(r.ready)         || 0,
+        validated:         Number(r.validated)     || 0,
+        lowEvidence:       Number(r.low_evidence)  || 0,
+        permanentLow:      Number(r.permanent_low) || 0,
+        pending:           Number(r.pending)       || 0,
+        processing:        Number(r.processing)    || 0,
+        invalid:           Number(r.invalid)       || 0,
+        completionPct,
+        preparationStatus: r.preparation_status ?? 'unknown',
+        lastUpdated:       r.updated_at?.toISOString() ?? null,
+      };
+    }).sort((a, b) => a.completionPct - b.completionPct);
+
+    // ── Health status ─────────────────────────────────────────────────────────
+    const stalledJob    = runningJobRows.rows.some(j => j.heartbeat && (Date.now() - new Date(j.heartbeat).getTime()) > 30 * 60 * 1000);
+    const hasRetry      = (qMap['retry']      ?? 0) > 0;
+    const recentQuotaMs = lastQuotaRow.rows[0]?.created_at ? Date.now() - new Date(lastQuotaRow.rows[0].created_at).getTime() : Infinity;
+    const recentQuota   = recentQuotaMs < 24 * 60 * 60 * 1000;
+
+    let healthStatus: 'healthy' | 'quota_wait' | 'active_recovery' | 'stalled' = 'healthy';
+    if (stalledJob)         healthStatus = 'stalled';
+    else if (hasRetry)      healthStatus = 'active_recovery';
+    else if (recentQuota)   healthStatus = 'quota_wait';
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      globalSummary: {
+        totalBooks:     globalRow.rows[0]?.total_books     ?? 0,
+        totalExams:     globalRow.rows[0]?.total_exams     ?? 0,
+        totalQuestions: globalRow.rows[0]?.total_questions ?? 0,
+      },
+      preparationStatus: { counts: statusCounts, total: totalPrepared, percentages: statusPct },
+      queueStatus: {
+        active:  qMap['processing'] ?? 0,
+        waiting: qMap['pending']    ?? 0,
+        paused:  qMap['paused']     ?? 0,
+        retry:   qMap['retry']      ?? 0,
+        done:    qMap['completed']  ?? 0,
+        failed:  qMap['failed']     ?? 0,
+        dlq:     dlqRow.rows[0]?.count ?? 0,
+      },
+      geminiStatus: {
+        provider:       'Google Gemini',
+        callsToday:     metrics.gemini.callsToday,
+        quotaErrors:    metrics.gemini.quotaErrors,
+        lastActivity:   metrics.generatedAt,
+        lastQuotaError: lastQuotaRow.rows[0]?.created_at?.toISOString() ?? null,
+        isActive:       runningJobs.some(j => j.status === 'processing'),
+      },
+      runningJobs,
+      examTable,
+      orphanCount:   orphanRow.rows[0]?.count ?? 0,
+      recentEvents:  recentEventsRows.rows.map(r => ({
+        id:         r.id,
+        event:      r.event,
+        examId:     r.exam_id,
+        questionId: r.question_id,
+        severity:   r.severity,
+        createdAt:  r.created_at?.toISOString(),
+        payload:    (r.payload as Record<string, unknown>) ?? {},
+      })),
+      healthStatus,
+    });
+  } catch (err) {
+    logger.error({ err }, 'prep-ops: error');
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // ─── POST /api/admin/cache/flush ─────────────────────────────────────────────
 // Flush entire cache. Admin only.
 router.post('/cache/flush', requireAuth, requireAdmin, async (req, res) => {
