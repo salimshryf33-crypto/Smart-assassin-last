@@ -27,3 +27,4 @@
 - [Phase 2 Open Preparation Pipeline](phase2-open-preparation.md) — short_answer/calculation/essay prepared offline via Gemini; graded deterministically from stored package (zero Gemini at grading time); exam_open_preparations table (Phase 7 migration).
 - [Phase 3 Consolidation](phase3-consolidation.md) — Runtime Guarantee enforced; lib/db+api-zod tsc build fix; Drizzle jsonb UpsertExamRecordInput pattern; Express 5 type pitfalls.
 - [Grading Audit Pipeline](grading-audit-pipeline.md) — 'grading_outcome' events into existing validation_audit_log; GRADING_RULES_VERSION='3.0.0'; 2 new admin endpoints; no schema changes.
+- [Sequential Preparation Scheduler](sequential-scheduler.md) — Phase 4B; one exam at a time to READY before advancing; priority→readyPct→age ordering; chains within a tick for capacity reuse; no schema changes.

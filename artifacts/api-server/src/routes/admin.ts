@@ -639,6 +639,7 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
       orphanRow,
       recentEventsRows,
       lastQuotaRow,
+      schedulerQueueRows,
     ] = await Promise.all([
       // 1. Global counts
       db.query<{ total_books: string; total_exams: string; total_questions: string }>(`
@@ -730,6 +731,29 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
            OR payload::text ILIKE '%RESOURCE_EXHAUSTED%'
         ORDER BY created_at DESC LIMIT 1
       `),
+      // 11. Sequential scheduler queue — ordered by (running first, priority, readyPct DESC, age)
+      db.query<{
+        id: string; exam_id: string; title: string | null; status: string;
+        priority: number; total_questions: number | null; ready_questions: number;
+        created_at: Date; started_at: Date | null; heartbeat: Date | null;
+      }>(`
+        SELECT j.id, j.exam_id, r.title, j.status, j.priority,
+               j.total_questions, j.ready_questions, j.created_at,
+               j.started_at, j.heartbeat
+        FROM public.exam_preparation_jobs j
+        LEFT JOIN public.exam_records r ON r.exam_id = j.exam_id
+        WHERE j.status IN ('running','pending','paused')
+        ORDER BY
+          CASE WHEN j.status = 'running' THEN 0 ELSE 1 END ASC,
+          j.priority ASC,
+          CASE
+            WHEN j.total_questions IS NOT NULL AND j.total_questions > 0
+            THEN j.ready_questions::float / j.total_questions
+            ELSE 0
+          END DESC,
+          j.created_at ASC
+        LIMIT 20
+      `),
     ]);
 
     // ── Merge status counts (MCQ + open questions) ────────────────────────────
@@ -794,6 +818,67 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
     else if (hasRetry)      healthStatus = 'active_recovery';
     else if (recentQuota)   healthStatus = 'quota_wait';
 
+    // ── Sequential Scheduler state ────────────────────────────────────────────
+    const sqRows = schedulerQueueRows.rows;
+    const sqActive = sqRows[0] ?? null;
+    const sqActiveReadyPct = sqActive
+      ? ((sqActive.total_questions ?? 0) > 0
+          ? Math.round((sqActive.ready_questions / (sqActive.total_questions ?? 1)) * 100)
+          : 0)
+      : 0;
+    const sqActiveRemaining = sqActive
+      ? Math.max(0, (sqActive.total_questions ?? 0) - sqActive.ready_questions)
+      : 0;
+
+    const sqIsRunning  = sqActive?.status === 'running';
+    const sqIsQuotaPause = !sqIsRunning && recentQuota;
+    const sqSchedulerStatus = sqActive
+      ? (sqIsRunning ? 'running' : (sqIsQuotaPause ? 'quota_paused' : 'idle'))
+      : 'idle';
+
+    const schedulerState = {
+      mode:           'sequential' as const,
+      status:         sqSchedulerStatus as 'running' | 'idle' | 'quota_paused',
+      activeExam:     sqActive ? {
+        jobId:              sqActive.id,
+        examId:             sqActive.exam_id,
+        examTitle:          sqActive.title ?? sqActive.exam_id,
+        status:             sqActive.status,
+        priority:           sqActive.priority,
+        readyQuestions:     sqActive.ready_questions,
+        totalQuestions:     sqActive.total_questions ?? 0,
+        progressPct:        sqActiveReadyPct,
+        remainingQuestions: sqActiveRemaining,
+        startedAt:          sqActive.started_at?.toISOString() ?? null,
+        heartbeat:          sqActive.heartbeat?.toISOString()  ?? null,
+      } : null,
+      queueOrder: sqRows.map((j, idx) => {
+        const total   = j.total_questions ?? 0;
+        const readPct = total > 0 ? Math.round((j.ready_questions / total) * 100) : 0;
+        return {
+          position:           idx + 1,
+          jobId:              j.id,
+          examId:             j.exam_id,
+          examTitle:          j.title ?? j.exam_id,
+          status:             j.status,
+          priority:           j.priority,
+          readyQuestions:     j.ready_questions,
+          totalQuestions:     total,
+          progressPct:        readPct,
+          remainingQuestions: Math.max(0, total - j.ready_questions),
+        };
+      }),
+      nextExamPreview: sqRows[1]
+        ? {
+            examId:     sqRows[1].exam_id,
+            examTitle:  sqRows[1].title ?? sqRows[1].exam_id,
+            progressPct: (sqRows[1].total_questions ?? 0) > 0
+              ? Math.round((sqRows[1].ready_questions / (sqRows[1].total_questions ?? 1)) * 100)
+              : 0,
+          }
+        : null,
+    };
+
     res.json({
       generatedAt: new Date().toISOString(),
       globalSummary: {
@@ -803,7 +888,7 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
       },
       preparationStatus: { counts: statusCounts, total: totalPrepared, percentages: statusPct },
       queueStatus: {
-        active:  qMap['processing'] ?? 0,
+        active:  qMap['running']    ?? 0,
         waiting: qMap['pending']    ?? 0,
         paused:  qMap['paused']     ?? 0,
         retry:   qMap['retry']      ?? 0,
@@ -817,7 +902,7 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
         quotaErrors:    metrics.gemini.quotaErrors,
         lastActivity:   metrics.generatedAt,
         lastQuotaError: lastQuotaRow.rows[0]?.created_at?.toISOString() ?? null,
-        isActive:       runningJobs.some(j => j.status === 'processing'),
+        isActive:       sqSchedulerStatus === 'running',
       },
       runningJobs,
       examTable,
@@ -832,6 +917,7 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
         payload:    (r.payload as Record<string, unknown>) ?? {},
       })),
       healthStatus,
+      scheduler:     schedulerState,
     });
   } catch (err) {
     logger.error({ err }, 'prep-ops: error');

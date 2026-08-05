@@ -267,6 +267,84 @@ export async function listPendingJobs(limit = 50): Promise<PreparationJob[]> {
   return rows.map(rowToJob);
 }
 
+// ─── Sequential Scheduler helpers ────────────────────────────────────────────
+
+/**
+ * Returns the single best exam for the sequential scheduler to process next.
+ *
+ * Ordering rules (sequential strategy — finish exams, not spread capacity):
+ *   1. Running jobs first  — never abandon mid-exam
+ *   2. Priority ASC        — lowest number = highest urgency
+ *   3. Ready % DESC        — most-complete exam first (finish it fastest)
+ *   4. Created-at ASC      — oldest first as tiebreaker
+ */
+export async function getNextExamForSequentialScheduler(): Promise<PreparationJob | null> {
+  const pool = getSharedPool();
+  const { rows } = await pool.query<DbRow>(
+    `SELECT * FROM public.exam_preparation_jobs
+     WHERE status IN ('running','pending','paused')
+     ORDER BY
+       CASE WHEN status = 'running' THEN 0 ELSE 1 END ASC,
+       priority ASC,
+       CASE
+         WHEN total_questions IS NOT NULL AND total_questions > 0
+         THEN ready_questions::float / total_questions
+         ELSE 0
+       END DESC,
+       created_at ASC
+     LIMIT 1`,
+  );
+  return rows[0] ? rowToJob(rows[0]) : null;
+}
+
+export interface QueueOrderEntry {
+  job:      PreparationJob;
+  examTitle: string | null;
+  readyPct: number;
+  remainingQuestions: number;
+  position: number;
+}
+
+/**
+ * Returns the full ordered queue for dashboard display.
+ * Same ordering as getNextExamForSequentialScheduler.
+ */
+export async function getOrderedQueueSnapshot(limit = 20): Promise<QueueOrderEntry[]> {
+  const pool = getSharedPool();
+  const { rows } = await pool.query<DbRow & { exam_title: string | null }>(
+    `SELECT j.*, r.title AS exam_title
+     FROM public.exam_preparation_jobs j
+     LEFT JOIN public.exam_records r ON r.exam_id = j.exam_id
+     WHERE j.status IN ('running','pending','paused')
+     ORDER BY
+       CASE WHEN j.status = 'running' THEN 0 ELSE 1 END ASC,
+       j.priority ASC,
+       CASE
+         WHEN j.total_questions IS NOT NULL AND j.total_questions > 0
+         THEN j.ready_questions::float / j.total_questions
+         ELSE 0
+       END DESC,
+       j.created_at ASC
+     LIMIT $1`,
+    [limit],
+  );
+
+  return rows.map((row, idx) => {
+    const job       = rowToJob(row);
+    const total     = row.total_questions ?? 0;
+    const ready     = row.ready_questions  ?? 0;
+    const readyPct  = total > 0 ? Math.round((ready / total) * 100) : 0;
+    const remaining = total > 0 ? Math.max(0, total - ready) : 0;
+    return {
+      job,
+      examTitle:          row.exam_title,
+      readyPct,
+      remainingQuestions: remaining,
+      position:           idx + 1,
+    };
+  });
+}
+
 // ─── Initialise queue from existing exams ────────────────────────────────────
 
 /**

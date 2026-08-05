@@ -7,6 +7,7 @@ import {
   Search, FileText, BarChart2, Zap,
   Link2, ThumbsUp, ThumbsDown, RotateCcw, BookOpen,
   Layers, ListChecks, Cpu as CpuIcon, Inbox, TrendingUp,
+  ArrowRight, GitCommitVertical, Zap as ZapIcon,
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import PageWrapper from '../components/layout/PageWrapper';
@@ -17,6 +18,7 @@ import {
   type SystemHealth, type AuditEntry,
   type MetricsSnapshot, type UsageSummary, type CacheMetrics,
   type PrepOpsDashboard,
+  type PrepOpsSchedulerState,
 } from '../utils/adminApi';
 import {
   fetchPendingLinks, fetchLinkStats, fetchAllLinks,
@@ -880,6 +882,169 @@ const PREP_STATUS_COLORS: Record<PrepOpsDashboard['healthStatus'], { bg: string;
   stalled:         { bg: 'rgba(248,113,113,0.07)', border: 'rgba(248,113,113,0.22)', color: '#f87171', icon: XCircle,      label: '🔴 التحضير متوقف' },
 };
 
+// ─── Scheduler State Panel ────────────────────────────────────────────────────
+
+const SCHED_STATUS_CFG = {
+  running:      { color: '#34d399', bg: 'rgba(52,211,153,0.08)',  border: 'rgba(52,211,153,0.22)',  label: 'يُحضّر الآن', dot: true  },
+  idle:         { color: '#94a3b8', bg: 'rgba(148,163,184,0.05)', border: 'rgba(148,163,184,0.12)', label: 'خامل',        dot: false },
+  quota_paused: { color: '#fbbf24', bg: 'rgba(251,191,36,0.07)',  border: 'rgba(251,191,36,0.20)',  label: 'انتظار حصة', dot: false },
+};
+
+function SchedulerStatePanel({ scheduler }: { scheduler: PrepOpsSchedulerState }) {
+  const cfg = SCHED_STATUS_CFG[scheduler.status];
+  const { activeExam, queueOrder, nextExamPreview } = scheduler;
+
+  return (
+    <GlassPanel>
+      {/* Header row */}
+      <div className="flex items-center justify-between mb-3" dir="rtl">
+        <div className="flex items-center gap-2">
+          <GitCommitVertical size={15} className="text-[#a78bfa]" />
+          <span className="text-xs font-bold text-white">المجدول التسلسلي</span>
+          {/* Mode badge */}
+          <span className="text-[9px] rounded-full px-2 py-px font-bold"
+            style={{ background: 'rgba(167,139,250,0.12)', color: '#a78bfa', border: '1px solid rgba(167,139,250,0.22)' }}
+          >
+            تسلسلي
+          </span>
+        </div>
+        {/* Status pill */}
+        <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold"
+          style={{ background: cfg.bg, border: `1px solid ${cfg.border}`, color: cfg.color }}
+        >
+          {cfg.dot && <div className="h-1.5 w-1.5 rounded-full animate-pulse" style={{ background: cfg.color }} />}
+          {cfg.label}
+        </span>
+      </div>
+
+      {/* Active exam */}
+      {activeExam ? (
+        <div className="rounded-xl p-3 mb-3"
+          style={{ background: 'rgba(52,211,153,0.06)', border: '1px solid rgba(52,211,153,0.18)' }}
+        >
+          <div className="flex items-start justify-between gap-2 mb-2" dir="rtl">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5 mb-0.5">
+                <ZapIcon size={11} className="text-emerald-400 flex-shrink-0" />
+                <p className="text-[11px] font-bold text-emerald-400">نشط الآن</p>
+                <span className="text-[9px] rounded-full px-1.5 py-px"
+                  style={{ background: 'rgba(167,139,250,0.12)', color: '#a78bfa', border: '1px solid rgba(167,139,250,0.2)' }}
+                >
+                  أولوية {activeExam.priority}
+                </span>
+              </div>
+              <p className="text-xs font-semibold text-white truncate">{activeExam.examTitle}</p>
+            </div>
+            <span className="text-xl font-black flex-shrink-0" style={{ color: activeExam.progressPct >= 80 ? '#34d399' : '#f59e0b' }}>
+              {activeExam.progressPct}%
+            </span>
+          </div>
+
+          {/* Progress bar */}
+          <div className="h-2 w-full rounded-full bg-white/[0.06] overflow-hidden mb-2">
+            <motion.div className="h-full rounded-full"
+              style={{ background: activeExam.progressPct >= 80 ? '#34d399' : activeExam.progressPct >= 40 ? '#f59e0b' : '#f87171' }}
+              initial={{ width: 0 }}
+              animate={{ width: `${activeExam.progressPct}%` }}
+              transition={{ duration: 0.7, ease: 'easeOut' }}
+            />
+          </div>
+
+          <div className="grid grid-cols-3 gap-2 text-center" dir="rtl">
+            <div>
+              <p className="text-xs font-black text-white">{activeExam.readyQuestions}</p>
+              <p className="text-[9px] text-slate-500">مكتمل</p>
+            </div>
+            <div>
+              <p className="text-xs font-black" style={{ color: activeExam.remainingQuestions > 0 ? '#f59e0b' : '#34d399' }}>
+                {activeExam.remainingQuestions}
+              </p>
+              <p className="text-[9px] text-slate-500">متبقي</p>
+            </div>
+            <div>
+              <p className="text-xs font-black text-white">{activeExam.totalQuestions}</p>
+              <p className="text-[9px] text-slate-500">الإجمالي</p>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center justify-center gap-2 rounded-xl py-5 mb-3"
+          style={{ background: 'rgba(148,163,184,0.04)', border: '1px solid rgba(148,163,184,0.1)' }}
+          dir="rtl"
+        >
+          <CheckCircle size={15} className="text-slate-500" />
+          <p className="text-xs text-slate-500">لا يوجد امتحان نشط حالياً</p>
+        </div>
+      )}
+
+      {/* Queue order */}
+      {queueOrder.length > 1 && (
+        <div className="space-y-1.5">
+          <p className="text-[10px] font-semibold text-slate-500 mb-1.5" dir="rtl">ترتيب قائمة الانتظار</p>
+          {queueOrder.slice(0, 5).map((entry, idx) => {
+            const isActive  = entry.status === 'running';
+            const pctColor  = entry.progressPct >= 80 ? '#34d399' : entry.progressPct >= 40 ? '#f59e0b' : '#94a3b8';
+            return (
+              <div key={entry.jobId}
+                className="flex items-center gap-2 rounded-lg px-2.5 py-2"
+                style={{
+                  background: isActive ? 'rgba(52,211,153,0.07)' : 'rgba(255,255,255,0.025)',
+                  border: `1px solid ${isActive ? 'rgba(52,211,153,0.2)' : 'rgba(255,255,255,0.06)'}`,
+                }}
+              >
+                {/* Position badge */}
+                <span className="text-[10px] font-black w-5 text-center flex-shrink-0"
+                  style={{ color: isActive ? '#34d399' : '#64748b' }}>
+                  {idx === 0 && isActive ? '▶' : `${entry.position}`}
+                </span>
+
+                {/* Title + mini bar */}
+                <div className="flex-1 min-w-0" dir="rtl">
+                  <p className="text-[11px] font-medium truncate"
+                    style={{ color: isActive ? '#fff' : '#94a3b8' }}>
+                    {entry.examTitle}
+                  </p>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <div className="flex-1 h-1 rounded-full bg-white/[0.06] overflow-hidden">
+                      <div className="h-full rounded-full" style={{ width: `${entry.progressPct}%`, background: pctColor }} />
+                    </div>
+                    <span className="text-[9px] font-bold flex-shrink-0" style={{ color: pctColor }}>
+                      {entry.progressPct}%
+                    </span>
+                  </div>
+                </div>
+
+                {/* Remaining */}
+                <div className="text-right flex-shrink-0" dir="rtl">
+                  <p className="text-[10px] font-bold" style={{ color: entry.remainingQuestions > 0 ? '#f59e0b' : '#34d399' }}>
+                    {entry.remainingQuestions}
+                  </p>
+                  <p className="text-[8px] text-slate-600">متبقي</p>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Next exam preview */}
+      {nextExamPreview && (
+        <div className="flex items-center gap-2 mt-2.5 rounded-lg px-2.5 py-2"
+          style={{ background: 'rgba(96,165,250,0.05)', border: '1px solid rgba(96,165,250,0.15)' }}
+          dir="rtl"
+        >
+          <ArrowRight size={12} className="text-blue-400 flex-shrink-0 rotate-180" />
+          <div className="flex-1 min-w-0">
+            <p className="text-[10px] text-slate-500">التالي في الانتظار</p>
+            <p className="text-[11px] font-semibold text-slate-300 truncate">{nextExamPreview.examTitle}</p>
+          </div>
+          <span className="text-[10px] font-bold text-blue-400 flex-shrink-0">{nextExamPreview.progressPct}%</span>
+        </div>
+      )}
+    </GlassPanel>
+  );
+}
+
 function PrepHealthCard({ status }: { status: PrepOpsDashboard['healthStatus'] }) {
   const cfg = PREP_STATUS_COLORS[status];
   const Icon = cfg.icon;
@@ -905,6 +1070,9 @@ function PrepOpsSection({ data, lastRefresh }: { data: PrepOpsDashboard; lastRef
 
       {/* ── Health Card ───────────────────────────────────────────────── */}
       <PrepHealthCard status={data.healthStatus} />
+
+      {/* ── Sequential Scheduler State ───────────────────────────────── */}
+      {data.scheduler && <SchedulerStatePanel scheduler={data.scheduler} />}
 
       {/* ── Auto-refresh indicator ────────────────────────────────────── */}
       <div className="flex items-center justify-end gap-1.5 -mt-1 mb-1">

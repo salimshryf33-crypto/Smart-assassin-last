@@ -1,19 +1,33 @@
 /**
  * examValidation/retryScheduler.ts
  *
- * Global preparation scheduler — finds eligible exams and drives the
- * validation pipeline to completion.
+ * Adaptive Sequential Scheduler — Phase 4B
  *
- * Phase 6 evolution (Preparation-First):
- *   - Priority ordering: oldest unfinished first (ORDER BY priority, created_at)
- *   - Throttling: configurable MAX_CONCURRENT_EXAMS per tick
- *   - Stale-job recovery: resets crashed workers before each tick
- *   - DLQ: PERMANENT_LOW_EVIDENCE questions inserted into exam_dlq
- *   - Preparation status: synced after each exam completes
- *   - Queue integration: claims/completes preparation jobs from exam_preparation_jobs
+ * Strategy: Sequential Exam Completion
+ *   ONE exam is prepared at a time until it reaches 100% READY.
+ *   Only then does the scheduler move to the next exam.
+ *   This maximises completed exams and minimises partial preparation.
+ *
+ * Ordering (within the same tick):
+ *   1. Running jobs first  — never abandon mid-exam
+ *   2. Priority ASC        — manual priority takes precedence
+ *   3. Ready % DESC        — most-complete exam next (finish fastest)
+ *   4. Created-at ASC      — oldest as tiebreaker
+ *
+ * Capacity behaviour:
+ *   - Provider-agnostic: no hardcoded quota values
+ *   - If AI capacity is available → chains to the next exam automatically
+ *   - If quota is exhausted → pauses cleanly; resumes on next tick
+ *   - If an exam's remaining questions are all in retry windows → advances to
+ *     the next eligible exam without wasting a tick waiting
+ *
+ * Resume safety:
+ *   - `runValidationForExam` is idempotent: it skips READY/terminal questions
+ *   - Job rows persist progress (ready_questions / total_questions)
+ *   - Stale-job recovery resets crashed workers so they can be claimed again
  *
  * Original behaviour preserved:
- *   - Stops on DailyQuotaExhaustedError (quota resets UTC midnight)
+ *   - Stops cleanly on DailyQuotaExhaustedError
  *   - In-process guard prevents tick overlap
  *   - startRetryScheduler() is idempotent
  *   - 5-minute interval
@@ -27,12 +41,14 @@ import {
   recoverStaleJobs,
   enqueueExam,
   getQueueOverview,
-} from './preparationQueue';
+  getJobByExamId,
+  getNextExamForSequentialScheduler,
+}                                           from './preparationQueue';
 import { syncPreparationStatus }            from './examPreparationStatus';
 
-const SCHEDULER_INTERVAL_MS  = 5 * 60 * 1_000;   // 5 minutes
-const MAX_CONCURRENT_EXAMS   = 10;                 // max exams processed per tick (throttle)
-const BATCH_LIMIT            = 100;                // max distinct exams fetched from DB
+const SCHEDULER_INTERVAL_MS = 5 * 60 * 1_000;   // 5 minutes
+const MAX_EXAMS_PER_TICK    = 50;                 // safety cap — prevents infinite loop if
+                                                  // many exams each have 0 eligible questions
 
 let schedulerHandle: ReturnType<typeof setInterval> | null = null;
 let running                                                  = false;
@@ -40,15 +56,15 @@ let running                                                  = false;
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * Start the global preparation / retry scheduler.
+ * Start the sequential preparation scheduler.
  * Idempotent — calling more than once has no effect.
  */
 export function startRetryScheduler(): void {
   if (schedulerHandle !== null) return;
 
   logger.info(
-    { intervalMs: SCHEDULER_INTERVAL_MS, maxConcurrentExams: MAX_CONCURRENT_EXAMS },
-    'retryScheduler: started',
+    { intervalMs: SCHEDULER_INTERVAL_MS, strategy: 'sequential' },
+    'retryScheduler: started (sequential mode)',
   );
 
   schedulerHandle = setInterval(() => {
@@ -86,48 +102,92 @@ async function runRetryTick(): Promise<void> {
       logger.info({ recovered }, 'retryScheduler: recovered stale preparation jobs');
     }
 
-    // ── 2. Ensure any eligible exam has a preparation job ────────────────────
+    // ── 2. Ensure every eligible exam has a preparation job ──────────────────
     await ensureQueuedForEligibleExams();
 
-    // ── 3. Fetch eligible exams ordered by priority ───────────────────────────
-    const examIds = await getExamsWithEligibleQuestions();
-    if (examIds.length === 0) {
-      logger.debug('retryScheduler: tick — no eligible exams');
+    const overview = await getQueueOverview();
+    if (overview.pending === 0 && overview.running === 0 && overview.paused === 0) {
+      logger.debug('retryScheduler: tick — queue empty, nothing to do');
       return;
     }
 
-    const overview = await getQueueOverview();
     logger.info(
-      { examCount: examIds.length, queue: overview },
-      'retryScheduler: tick — processing eligible exams',
+      { queue: overview, strategy: 'sequential' },
+      'retryScheduler: tick — sequential processing',
     );
 
-    // ── 4. Throttled processing ───────────────────────────────────────────────
-    const batch = examIds.slice(0, MAX_CONCURRENT_EXAMS);
+    // ── 3. Sequential chaining loop ───────────────────────────────────────────
+    // Process ONE exam at a time.  When it completes, automatically chain to
+    // the next exam so available AI capacity is never left unused.
+    let examsProcessed = 0;
 
-    for (const examId of batch) {
+    while (examsProcessed < MAX_EXAMS_PER_TICK) {
+      // Pick the single best next exam (running > priority > readyPct > age)
+      const nextJob = await getNextExamForSequentialScheduler();
+      if (!nextJob) {
+        logger.debug('retryScheduler: sequential — queue drained');
+        break;
+      }
+
+      logger.info(
+        {
+          examId:         nextJob.examId,
+          status:         nextJob.status,
+          priority:       nextJob.priority,
+          readyQuestions: nextJob.readyQuestions,
+          totalQuestions: nextJob.totalQuestions,
+        },
+        'retryScheduler: sequential — processing exam',
+      );
+
       try {
-        await runValidationForExam(examId);
-        // Sync exam-level preparation_status after each exam
-        await syncPreparationStatus(examId).catch((err: unknown) =>
-          logger.error({ err, examId }, 'retryScheduler: syncPreparationStatus failed'),
-        );
+        await runValidationForExam(nextJob.examId);
       } catch (err) {
         if (err instanceof DailyQuotaExhaustedError) {
           logger.warn(
-            { examId },
-            'retryScheduler: daily Gemini quota exhausted — pausing until UTC midnight reset',
+            { examId: nextJob.examId },
+            'retryScheduler: AI quota exhausted — pausing scheduler until capacity resets',
           );
-          return;   // stop the whole tick; other exams would fail too
+          return;   // stop the entire tick; other exams would fail too
         }
-        logger.error({ err, examId }, 'retryScheduler: validation failed for exam');
-        // continue to next exam — one failure must not block others
+        logger.error(
+          { err, examId: nextJob.examId },
+          'retryScheduler: validation failed for exam',
+        );
+        // Count as processed so we don't loop forever on a broken exam
+        examsProcessed++;
+        continue;
       }
+
+      // Sync exam-level preparation_status
+      await syncPreparationStatus(nextJob.examId).catch((err: unknown) =>
+        logger.error({ err, examId: nextJob.examId }, 'retryScheduler: syncPreparationStatus failed'),
+      );
+
+      examsProcessed++;
+
+      // Check whether the exam actually completed or is still in a wait state
+      const updatedJob = await getJobByExamId(nextJob.examId);
+      if (!updatedJob || updatedJob.status !== 'completed') {
+        // Exam paused (quota mid-exam) or made no progress (retry windows not yet due)
+        // Either way, stop this tick — the next tick will resume.
+        logger.debug(
+          { examId: nextJob.examId, jobStatus: updatedJob?.status },
+          'retryScheduler: exam did not complete — stopping tick',
+        );
+        break;
+      }
+
+      // Exam completed — chain to next exam and consume remaining capacity
+      logger.info(
+        { examId: nextJob.examId, examsProcessed },
+        'retryScheduler: exam completed — chaining to next exam',
+      );
     }
 
     logger.info(
-      { processed: batch.length, total: examIds.length },
-      'retryScheduler: tick complete',
+      { examsProcessed },
+      'retryScheduler: sequential tick complete',
     );
   } finally {
     running = false;
@@ -137,49 +197,8 @@ async function runRetryTick(): Promise<void> {
 // ─── Eligible exam query ──────────────────────────────────────────────────────
 
 /**
- * Returns distinct exam IDs that have at least one question eligible for retry.
- *
- * Fix 2a: now includes open-preparation types (short_answer / essay / calculation)
- * alongside canonical-answer types, so exams with only open orphans are not missed.
- */
-async function getExamsWithEligibleQuestions(): Promise<string[]> {
-  const pool = getSharedPool();
-  const { rows } = await pool.query<{ exam_id: string }>(
-    `SELECT DISTINCT exam_id
-     FROM (
-       -- Canonical types with an eligible retry window
-       SELECT q.exam_id
-       FROM public.exam_canonical_answers ca
-       INNER JOIN public.exam_questions q ON q.id = ca.question_id
-       WHERE ca.validation_status IN ('PENDING', 'VALIDATED', 'LOW_EVIDENCE')
-         AND ca.next_retry_at IS NOT NULL
-         AND ca.next_retry_at <= now()
-       UNION
-       -- Open types: orphans (no record yet) or non-terminal with eligible retry
-       SELECT q.exam_id
-       FROM public.exam_questions q
-       LEFT JOIN public.exam_open_preparations op ON op.question_id = q.id
-       WHERE q.question_type IN ('short_answer', 'essay', 'calculation')
-         AND (
-           op.question_id IS NULL
-           OR (
-             op.preparation_status IN ('PENDING', 'VALIDATED', 'LOW_EVIDENCE')
-             AND (op.next_retry_at IS NULL OR op.next_retry_at <= now())
-           )
-         )
-     ) AS combined
-     LIMIT $1`,
-    [BATCH_LIMIT],
-  );
-  return rows.map((r) => r.exam_id);
-}
-
-/**
  * For every exam with unready questions that has no active preparation job,
- * enqueue it with priority 1 (backlog).
- *
- * Fix 2b: covers all six known question types (deterministic + open), not
- * just mcq/true_false, so open-only exams are never left without a job.
+ * enqueue it.  Covers all six known question types (deterministic + open).
  */
 async function ensureQueuedForEligibleExams(): Promise<void> {
   const pool = getSharedPool();

@@ -213,6 +213,43 @@ export interface PrepOpsEvent {
   payload:    Record<string, unknown>;
 }
 
+// ─── Scheduler state types ────────────────────────────────────────────────────
+
+export interface PrepOpsSchedulerActiveExam {
+  jobId:              string;
+  examId:             string;
+  examTitle:          string;
+  status:             string;
+  priority:           number;
+  readyQuestions:     number;
+  totalQuestions:     number;
+  progressPct:        number;
+  remainingQuestions: number;
+  startedAt:          string | null;
+  heartbeat:          string | null;
+}
+
+export interface PrepOpsQueueOrderEntry {
+  position:           number;
+  jobId:              string;
+  examId:             string;
+  examTitle:          string;
+  status:             string;
+  priority:           number;
+  readyQuestions:     number;
+  totalQuestions:     number;
+  progressPct:        number;
+  remainingQuestions: number;
+}
+
+export interface PrepOpsSchedulerState {
+  mode:           'sequential';
+  status:         'running' | 'idle' | 'quota_paused';
+  activeExam:     PrepOpsSchedulerActiveExam | null;
+  queueOrder:     PrepOpsQueueOrderEntry[];
+  nextExamPreview: { examId: string; examTitle: string; progressPct: number } | null;
+}
+
 export interface PrepOpsDashboard {
   generatedAt: string;
   globalSummary: {
@@ -247,6 +284,7 @@ export interface PrepOpsDashboard {
   orphanCount:  number;
   recentEvents: PrepOpsEvent[];
   healthStatus: 'healthy' | 'quota_wait' | 'active_recovery' | 'stalled';
+  scheduler?:   PrepOpsSchedulerState;
 }
 
 export async function fetchPrepOps(): Promise<PrepOpsDashboard> {
