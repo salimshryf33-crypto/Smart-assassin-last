@@ -859,6 +859,22 @@ const PREP_STATUS_META: Record<string, { label: string; color: string }> = {
   INVALID:                { label: 'غير صالح',           color: '#ef4444' },
 };
 
+const PREP_STATUS_LABELS: Record<string, string> = {
+  READY:                  'جاهز',
+  VALIDATED:              'مُتحقّق',
+  PENDING:                'انتظار',
+  PROCESSING:             'يعالج',
+  LOW_EVIDENCE:           'أدلة ضعيفة',
+  PERMANENT_LOW_EVIDENCE: 'أدلة ضعيفة دائمة',
+  INVALID:                'غير صالح',
+  preparing:              'قيد التحضير',
+  ready:                  'جاهز',
+  completed:              'مكتمل',
+  paused:                 'موقوف مؤقتاً',
+  pending:                'في الانتظار',
+  running:                'يعمل الآن',
+};
+
 const EVENT_LABELS: Record<string, string> = {
   validation_started:          'بدأ التحقق',
   validation_ready:            'سؤال جاهز ✓',
@@ -1258,7 +1274,7 @@ function PrepOpsSection({ data, lastRefresh }: { data: PrepOpsDashboard; lastRef
             <thead>
               <tr className="text-slate-500 border-b border-white/[0.06]">
                 <th className="text-right pb-2 pr-1 font-medium min-w-[100px]">الامتحان</th>
-                <th className="text-center pb-2 px-1 font-medium">أسئلة</th>
+                <th className="text-center pb-2 px-1 font-medium">المجموع</th>
                 <th className="text-center pb-2 px-1 font-medium" style={{ color: '#34d399' }}>READY</th>
                 <th className="text-center pb-2 px-1 font-medium" style={{ color: '#60a5fa' }}>VALID</th>
                 <th className="text-center pb-2 px-1 font-medium" style={{ color: '#fb923c' }}>LOW</th>
@@ -1276,29 +1292,34 @@ function PrepOpsSection({ data, lastRefresh }: { data: PrepOpsDashboard; lastRef
                       <p className="text-white font-medium leading-tight truncate max-w-[110px]">{row.title}</p>
                       <p className="text-slate-600 text-[9px]">{row.totalQuestions} سؤال</p>
                     </td>
-                    <td className="text-center py-2 px-1 text-slate-400">{row.mcqQuestions}</td>
+                    <td className="text-center py-2 px-1 text-slate-400">{row.totalQuestions}</td>
                     <td className="text-center py-2 px-1 font-bold" style={{ color: '#34d399' }}>{row.ready}</td>
                     <td className="text-center py-2 px-1 font-bold" style={{ color: '#60a5fa' }}>{row.validated}</td>
                     <td className="text-center py-2 px-1 font-bold" style={{ color: '#fb923c' }}>{row.lowEvidence}</td>
                     <td className="text-center py-2 px-1 font-bold" style={{ color: '#f87171' }}>{row.permanentLow}</td>
                     <td className="text-center py-2 px-1">
                       <span className="font-black text-sm" style={{ color: pctColor }}>{row.completionPct}%</span>
+                      <span className="block text-[8px] text-slate-600">{row.ready}/{row.totalQuestions} جاهز</span>
                     </td>
                     <td className="text-center py-2 px-1">
+                      {(() => {
+                        const status = row.queueStatus ?? row.preparationStatus;
+                        const label = PREP_STATUS_LABELS[status] ?? status;
+                        const isPaused = row.queueStatus === 'paused';
+                        const isRunning = row.queueStatus === 'running';
+                        const isReady = !row.queueStatus && ['READY', 'ready', 'completed'].includes(row.preparationStatus);
+                        const color = isPaused ? '#f59e0b' : isRunning ? '#34d399' : isReady ? '#34d399' : '#94a3b8';
+                        return (
                       <span className="rounded-full px-1.5 py-px text-[9px] font-medium"
                         style={{
-                          background: row.preparationStatus === 'READY' ? 'rgba(52,211,153,0.12)' :
-                                      row.preparationStatus === 'paused' ? 'rgba(245,158,11,0.12)' :
-                                      'rgba(148,163,184,0.08)',
-                          color: row.preparationStatus === 'READY' ? '#34d399' :
-                                 row.preparationStatus === 'paused' ? '#f59e0b' : '#94a3b8',
+                          background: `${color}1f`,
+                          color,
                         }}
                       >
-                        {row.preparationStatus === 'READY' ? 'جاهز' :
-                         row.preparationStatus === 'paused' ? 'موقوف' :
-                         row.preparationStatus === 'processing' ? 'يعمل' :
-                         row.preparationStatus ?? '—'}
+                        {label || '—'}
                       </span>
+                        );
+                      })()}
                     </td>
                   </tr>
                 );

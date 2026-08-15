@@ -674,36 +674,80 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
         started_at: Date | null; heartbeat: Date | null; worker_id: string | null;
       }>(`
         SELECT j.id, j.exam_id, r.title, j.status,
-               j.total_questions, j.ready_questions,
+               COALESCE(pc.total_questions, 0)::int AS total_questions,
+               COALESCE(pc.ready_questions, 0)::int AS ready_questions,
                j.started_at, j.heartbeat, j.worker_id
-        FROM public.exam_preparation_jobs j
+        FROM (
+          SELECT DISTINCT ON (exam_id) *
+          FROM public.exam_preparation_jobs
+          WHERE status = 'running'
+          ORDER BY exam_id, updated_at DESC
+        ) j
         LEFT JOIN public.exam_records r ON r.exam_id = j.exam_id
-        WHERE j.status IN ('processing','pending','retry','paused')
+        LEFT JOIN LATERAL (
+          SELECT
+            COUNT(*)::int AS total_questions,
+            COUNT(*) FILTER (WHERE prep_status = 'READY')::int AS ready_questions
+          FROM (
+            SELECT q.id,
+                   COALESCE(ca.validation_status, UPPER(op.preparation_status), 'PENDING') AS prep_status
+            FROM public.exam_questions q
+            LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = q.id
+            LEFT JOIN public.exam_open_preparations op ON op.question_id = q.id
+            WHERE q.exam_id = j.exam_id
+              AND q.question_type IN ('mcq','true_false','fill_in_blank','short_answer','calculation','essay')
+          ) actual
+        ) pc ON TRUE
         ORDER BY j.updated_at DESC LIMIT 30
       `),
       // 7. Per-exam preparation breakdown (MCQ only → canonical_answers)
       db.query<{
         exam_id: string; title: string; question_count: number | null;
-        preparation_status: string | null; updated_at: Date | null;
-        mcq_total: string; ready: string; validated: string;
+        preparation_status: string | null; queue_status: string | null; updated_at: Date | null;
+        total_preparable: string; ready: string; validated: string;
         low_evidence: string; permanent_low: string;
         pending: string; processing: string; invalid: string;
       }>(`
         SELECT
           r.exam_id, r.title, r.question_count,
-          r.preparation_status, r.updated_at,
-          COUNT(q.id)::int                                                                            AS mcq_total,
-          SUM(CASE WHEN ca.validation_status = 'READY'               THEN 1 ELSE 0 END)::int         AS ready,
-          SUM(CASE WHEN ca.validation_status = 'VALIDATED'           THEN 1 ELSE 0 END)::int         AS validated,
-          SUM(CASE WHEN ca.validation_status = 'LOW_EVIDENCE'        THEN 1 ELSE 0 END)::int         AS low_evidence,
-          SUM(CASE WHEN ca.validation_status = 'PERMANENT_LOW_EVIDENCE' THEN 1 ELSE 0 END)::int      AS permanent_low,
-          SUM(CASE WHEN ca.validation_status = 'PENDING'             THEN 1 ELSE 0 END)::int         AS pending,
-          SUM(CASE WHEN ca.validation_status = 'PROCESSING'          THEN 1 ELSE 0 END)::int         AS processing,
-          SUM(CASE WHEN ca.validation_status = 'INVALID'             THEN 1 ELSE 0 END)::int         AS invalid
+          r.preparation_status, qj.status AS queue_status, r.updated_at,
+          COALESCE(pc.total_preparable, 0)::int AS total_preparable,
+          COALESCE(pc.ready, 0)::int AS ready,
+          COALESCE(pc.validated, 0)::int AS validated,
+          COALESCE(pc.low_evidence, 0)::int AS low_evidence,
+          COALESCE(pc.permanent_low, 0)::int AS permanent_low,
+          COALESCE(pc.pending, 0)::int AS pending,
+          COALESCE(pc.processing, 0)::int AS processing,
+          COALESCE(pc.invalid, 0)::int AS invalid
         FROM public.exam_records r
-        LEFT JOIN public.exam_questions  q  ON q.exam_id        = r.exam_id AND q.question_type = 'mcq'
-        LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = q.id
-        GROUP BY r.exam_id, r.title, r.question_count, r.preparation_status, r.updated_at
+        LEFT JOIN LATERAL (
+          SELECT
+            COUNT(*)::int AS total_preparable,
+            COUNT(*) FILTER (WHERE prep_status = 'READY')::int AS ready,
+            COUNT(*) FILTER (WHERE prep_status = 'VALIDATED')::int AS validated,
+            COUNT(*) FILTER (WHERE prep_status = 'LOW_EVIDENCE')::int AS low_evidence,
+            COUNT(*) FILTER (WHERE prep_status = 'PERMANENT_LOW_EVIDENCE')::int AS permanent_low,
+            COUNT(*) FILTER (WHERE prep_status = 'PENDING')::int AS pending,
+            COUNT(*) FILTER (WHERE prep_status IN ('PROCESSING','GENERATING'))::int AS processing,
+            COUNT(*) FILTER (WHERE prep_status = 'INVALID')::int AS invalid
+          FROM (
+            SELECT q.id,
+                   COALESCE(ca.validation_status, UPPER(op.preparation_status), 'PENDING') AS prep_status
+            FROM public.exam_questions q
+            LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = q.id
+            LEFT JOIN public.exam_open_preparations op ON op.question_id = q.id
+            WHERE q.exam_id = r.exam_id
+              AND q.question_type IN ('mcq','true_false','fill_in_blank','short_answer','calculation','essay')
+          ) actual
+        ) pc ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT status
+          FROM public.exam_preparation_jobs
+          WHERE exam_id = r.exam_id
+            AND status IN ('running','pending','paused')
+          ORDER BY updated_at DESC
+          LIMIT 1
+        ) qj ON TRUE
       `),
       // 8. MCQ questions with no canonical answer (orphans)
       db.query<{ count: number }>(`
@@ -725,11 +769,18 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
       `),
       // 10. Last quota-related event
       db.query<{ created_at: Date }>(`
-        SELECT created_at FROM public.validation_audit_log
-        WHERE event ILIKE '%quota%'
-           OR payload::text ILIKE '%QuotaExhausted%'
-           OR payload::text ILIKE '%RESOURCE_EXHAUSTED%'
-        ORDER BY created_at DESC LIMIT 1
+        SELECT MAX(created_at) AS created_at
+        FROM (
+          SELECT created_at
+          FROM public.validation_audit_log
+          WHERE event ILIKE '%quota%'
+             OR payload::text ILIKE '%QuotaExhausted%'
+             OR payload::text ILIKE '%RESOURCE_EXHAUSTED%'
+          UNION ALL
+          SELECT updated_at AS created_at
+          FROM public.exam_preparation_jobs
+          WHERE last_error ILIKE '%quota%'
+        ) quota_events
       `),
       // 11. Sequential scheduler queue — ordered by (running first, priority, readyPct DESC, age)
       db.query<{
@@ -738,17 +789,39 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
         created_at: Date; started_at: Date | null; heartbeat: Date | null;
       }>(`
         SELECT j.id, j.exam_id, r.title, j.status, j.priority,
-               j.total_questions, j.ready_questions, j.created_at,
-               j.started_at, j.heartbeat
-        FROM public.exam_preparation_jobs j
+               COALESCE(pc.total_questions, 0)::int AS total_questions,
+               COALESCE(pc.ready_questions, 0)::int AS ready_questions,
+               j.created_at, j.started_at, j.heartbeat
+        FROM (
+          SELECT DISTINCT ON (exam_id) *
+          FROM public.exam_preparation_jobs
+          WHERE status IN ('running','pending','paused')
+          ORDER BY
+            exam_id,
+            CASE WHEN status = 'running' THEN 0 ELSE 1 END ASC,
+            updated_at DESC
+        ) j
         LEFT JOIN public.exam_records r ON r.exam_id = j.exam_id
-        WHERE j.status IN ('running','pending','paused')
+        LEFT JOIN LATERAL (
+          SELECT
+            COUNT(*)::int AS total_questions,
+            COUNT(*) FILTER (WHERE prep_status = 'READY')::int AS ready_questions
+          FROM (
+            SELECT q.id,
+                   COALESCE(ca.validation_status, UPPER(op.preparation_status), 'PENDING') AS prep_status
+            FROM public.exam_questions q
+            LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = q.id
+            LEFT JOIN public.exam_open_preparations op ON op.question_id = q.id
+            WHERE q.exam_id = j.exam_id
+              AND q.question_type IN ('mcq','true_false','fill_in_blank','short_answer','calculation','essay')
+          ) actual
+        ) pc ON TRUE
         ORDER BY
           CASE WHEN j.status = 'running' THEN 0 ELSE 1 END ASC,
           j.priority ASC,
           CASE
-            WHEN j.total_questions IS NOT NULL AND j.total_questions > 0
-            THEN j.ready_questions::float / j.total_questions
+            WHEN pc.total_questions > 0
+            THEN pc.ready_questions::float / pc.total_questions
             ELSE 0
           END DESC,
           j.created_at ASC
@@ -759,8 +832,20 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
     // ── Merge status counts (MCQ + open questions) ────────────────────────────
     const STATUS_KEYS = ['READY','VALIDATED','PENDING','PROCESSING','LOW_EVIDENCE','PERMANENT_LOW_EVIDENCE','INVALID'] as const;
     const statusCounts: Record<string, number> = Object.fromEntries(STATUS_KEYS.map(k => [k, 0]));
-    for (const row of mcqStatusRows.rows)  statusCounts[row.status]             = (statusCounts[row.status]  ?? 0) + Number(row.count);
-    for (const row of openStatusRows.rows) statusCounts[row.status?.toUpperCase() ?? 'PENDING'] = (statusCounts[row.status?.toUpperCase() ?? 'PENDING'] ?? 0) + Number(row.count);
+    const normalizePreparationStatus = (status: string | null | undefined): string => {
+      const normalized = status?.toUpperCase();
+      if (!normalized || normalized === 'PENDING') return 'PENDING';
+      if (normalized === 'GENERATING') return 'PROCESSING';
+      return STATUS_KEYS.includes(normalized as typeof STATUS_KEYS[number]) ? normalized : 'PENDING';
+    };
+    for (const row of mcqStatusRows.rows) {
+      const status = normalizePreparationStatus(row.status);
+      statusCounts[status] += Number(row.count);
+    }
+    for (const row of openStatusRows.rows) {
+      const status = normalizePreparationStatus(row.status);
+      statusCounts[status] += Number(row.count);
+    }
     const totalPrepared = Object.values(statusCounts).reduce((s, n) => s + n, 0);
     const statusPct: Record<string, number> = {};
     for (const [k, v] of Object.entries(statusCounts)) statusPct[k] = totalPrepared === 0 ? 0 : Math.round((v / totalPrepared) * 100);
@@ -786,15 +871,14 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
 
     // ── Exam table (sorted by lowest completion %) ────────────────────────────
     const examTable = examTableRows.rows.map(r => {
-      const mcqTotal       = Number(r.mcq_total)    || 0;
-      const readyValidated = Number(r.ready)         + Number(r.validated);
-      const completionPct  = mcqTotal === 0 ? 0 : Math.round((readyValidated / mcqTotal) * 100);
+      const totalQuestions = Number(r.total_preparable) || 0;
+      const readyQuestions = Number(r.ready) || 0;
+      const completionPct  = totalQuestions === 0 ? 0 : Math.round((readyQuestions / totalQuestions) * 100);
       return {
         examId:            r.exam_id,
         title:             r.title,
-        totalQuestions:    r.question_count ?? mcqTotal,
-        mcqQuestions:      mcqTotal,
-        ready:             Number(r.ready)         || 0,
+        totalQuestions,
+        ready:             readyQuestions,
         validated:         Number(r.validated)     || 0,
         lowEvidence:       Number(r.low_evidence)  || 0,
         permanentLow:      Number(r.permanent_low) || 0,
@@ -803,6 +887,7 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
         invalid:           Number(r.invalid)       || 0,
         completionPct,
         preparationStatus: r.preparation_status ?? 'unknown',
+        queueStatus:       r.queue_status,
         lastUpdated:       r.updated_at?.toISOString() ?? null,
       };
     }).sort((a, b) => a.completionPct - b.completionPct);

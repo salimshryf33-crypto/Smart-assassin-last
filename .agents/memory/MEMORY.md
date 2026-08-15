@@ -28,5 +28,6 @@
 - [Phase 3 Consolidation](phase3-consolidation.md) — Runtime Guarantee enforced; lib/db+api-zod tsc build fix; Drizzle jsonb UpsertExamRecordInput pattern; Express 5 type pitfalls.
 - [Grading Audit Pipeline](grading-audit-pipeline.md) — 'grading_outcome' events into existing validation_audit_log; GRADING_RULES_VERSION='3.0.0'; 2 new admin endpoints; no schema changes.
 - [Sequential Preparation Scheduler](sequential-scheduler.md) — Phase 4B; one exam at a time to READY before advancing; priority→readyPct→age ordering; chains within a tick for capacity reuse; no schema changes.
+- [Preparation Dashboard Truth](preparation-dashboard-truth.md) — dashboard progress must use current per-question statuses across all preparable types; job counters are display metadata only.
 - [Workspace Dependency Recovery](workspace-dependency-recovery.md) — use frozen workspace install when declared package links are missing; restart stale Vite/API processes after node_modules changes.
 - [Imported Sage Continuation](imported-sage-continuation.md) — this is an already-developed Sage codebase imported from GitHub; preserve existing changes and extend incrementally.

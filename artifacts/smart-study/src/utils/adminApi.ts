@@ -190,7 +190,6 @@ export interface PrepOpsExamRow {
   examId:            string;
   title:             string;
   totalQuestions:    number;
-  mcqQuestions:      number;
   ready:             number;
   validated:         number;
   lowEvidence:       number;
@@ -200,6 +199,7 @@ export interface PrepOpsExamRow {
   invalid:           number;
   completionPct:     number;
   preparationStatus: string;
+  queueStatus:       string | null;
   lastUpdated:       string | null;
 }
 
