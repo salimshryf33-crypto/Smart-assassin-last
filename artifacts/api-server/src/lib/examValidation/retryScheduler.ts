@@ -17,13 +17,13 @@
  * Capacity behaviour:
  *   - Provider-agnostic: no hardcoded quota values
  *   - If AI capacity is available → chains to the next exam automatically
- *   - If quota is exhausted → pauses cleanly; resumes on next tick
+ *   - If quota is exhausted → pauses cleanly; schedules a post-reset resume
  *   - If an exam's remaining questions are all in retry windows → advances to
  *     the next eligible exam without wasting a tick waiting
  *
  * Resume safety:
  *   - `runValidationForExam` is idempotent: it skips READY/terminal questions
- *   - Job rows persist progress (ready_questions / total_questions)
+ *   - Question status rows are the source of truth for resume ordering
  *   - Stale-job recovery resets crashed workers so they can be claimed again
  *
  * Original behaviour preserved:
@@ -49,8 +49,11 @@ import { syncPreparationStatus }            from './examPreparationStatus';
 const SCHEDULER_INTERVAL_MS = 5 * 60 * 1_000;   // 5 minutes
 const MAX_EXAMS_PER_TICK    = 50;                 // safety cap — prevents infinite loop if
                                                   // many exams each have 0 eligible questions
+const QUOTA_RESUME_GRACE_MS = 5_000;              // let the provider reset settle
 
 let schedulerHandle: ReturnType<typeof setInterval> | null = null;
+let quotaResumeHandle: ReturnType<typeof setTimeout> | null = null;
+let quotaPausedUntil = 0;
 let running                                                  = false;
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -72,6 +75,10 @@ export function startRetryScheduler(): void {
       logger.error({ err }, 'retryScheduler: tick error'),
     );
   }, SCHEDULER_INTERVAL_MS);
+
+  restoreQuotaPauseStateAndKick().catch((err) =>
+    logger.error({ err }, 'retryScheduler: initial resume check failed'),
+  );
 }
 
 /**
@@ -84,6 +91,11 @@ export function stopRetryScheduler(): void {
     schedulerHandle = null;
     logger.info('retryScheduler: stopped');
   }
+  if (quotaResumeHandle !== null) {
+    clearTimeout(quotaResumeHandle);
+    quotaResumeHandle = null;
+  }
+  quotaPausedUntil = 0;
 }
 
 // ─── Internal tick ────────────────────────────────────────────────────────────
@@ -92,6 +104,17 @@ async function runRetryTick(): Promise<void> {
   if (running) {
     logger.debug('retryScheduler: previous tick still running — skipping');
     return;
+  }
+  if (quotaPausedUntil > Date.now()) {
+    logger.debug(
+      { resumeAt: new Date(quotaPausedUntil).toISOString() },
+      'retryScheduler: waiting for Gemini daily quota reset',
+    );
+    return;
+  }
+  if (quotaPausedUntil !== 0) {
+    quotaPausedUntil = 0;
+    quotaResumeHandle = null;
   }
   running = true;
 
@@ -144,9 +167,13 @@ async function runRetryTick(): Promise<void> {
         await runValidationForExam(nextJob.examId);
       } catch (err) {
         if (err instanceof DailyQuotaExhaustedError) {
+          scheduleQuotaResume();
           logger.warn(
-            { examId: nextJob.examId },
-            'retryScheduler: AI quota exhausted — pausing scheduler until capacity resets',
+            {
+              examId: nextJob.examId,
+              resumeAt: new Date(quotaPausedUntil).toISOString(),
+            },
+            'retryScheduler: AI quota exhausted — scheduled automatic resume after UTC reset',
           );
           return;   // stop the entire tick; other exams would fail too
         }
@@ -194,6 +221,65 @@ async function runRetryTick(): Promise<void> {
   }
 }
 
+/**
+ * Gemini's daily free-tier quota resets at the next UTC midnight. A timer
+ * makes resumption deterministic instead of relying only on the five-minute
+ * polling interval or a process restart. The interval remains as a safety
+ * net if the process is sleeping at the exact reset time.
+ */
+function scheduleQuotaResume(): void {
+  const now = new Date();
+  const nextReset = new Date(now);
+  nextReset.setUTCHours(24, 0, 0, 0);
+  const resumeAt = nextReset.getTime() + QUOTA_RESUME_GRACE_MS;
+
+  quotaPausedUntil = resumeAt;
+  if (quotaResumeHandle !== null) clearTimeout(quotaResumeHandle);
+
+  quotaResumeHandle = setTimeout(() => {
+    quotaResumeHandle = null;
+    quotaPausedUntil = 0;
+    logger.info(
+      { resumeAt: new Date(resumeAt).toISOString() },
+      'retryScheduler: daily quota reset window reached — resuming preparation',
+    );
+    runRetryTick().catch((err) =>
+      logger.error({ err }, 'retryScheduler: automatic post-quota resume failed'),
+    );
+  }, Math.max(1_000, resumeAt - Date.now()));
+}
+
+/**
+ * Restore the in-memory quota guard after a process restart. The pause reason
+ * is persisted on the job, so a restart must not lose the knowledge that the
+ * current UTC day's quota is already exhausted.
+ */
+async function restoreQuotaPauseStateAndKick(): Promise<void> {
+  const pool = getSharedPool();
+  const { rows } = await pool.query<{ last_quota_pause: Date | null }>(`
+    SELECT MAX(updated_at) AS last_quota_pause
+    FROM public.exam_preparation_jobs
+    WHERE status = 'paused'
+      AND last_error ILIKE '%quota%'
+  `);
+
+  const lastQuotaPause = rows[0]?.last_quota_pause;
+  const startOfUtcDay = new Date();
+  startOfUtcDay.setUTCHours(0, 0, 0, 0);
+
+  if (lastQuotaPause && new Date(lastQuotaPause).getTime() >= startOfUtcDay.getTime()) {
+    scheduleQuotaResume();
+    logger.info(
+      { lastQuotaPause: new Date(lastQuotaPause).toISOString(), resumeAt: new Date(quotaPausedUntil).toISOString() },
+      'retryScheduler: restored current-day quota pause',
+    );
+    return;
+  }
+
+  // No current-day quota pause remains; do not wait five minutes to resume.
+  await runRetryTick();
+}
+
 // ─── Eligible exam query ──────────────────────────────────────────────────────
 
 /**
@@ -210,16 +296,16 @@ async function ensureQueuedForEligibleExams(): Promise<void> {
        FROM public.exam_questions q
        LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = q.id
        WHERE q.question_type IN ('mcq', 'true_false', 'fill_in_blank')
-         AND (ca.validation_status IS NULL
-              OR ca.validation_status IN ('PENDING', 'VALIDATED', 'LOW_EVIDENCE'))
+          AND (ca.validation_status IS NULL
+               OR ca.validation_status IN ('PENDING', 'PROCESSING', 'GENERATING', 'VALIDATED', 'LOW_EVIDENCE'))
        UNION
        -- Open types: orphans (no record) or non-terminal
        SELECT q.exam_id
        FROM public.exam_questions q
        LEFT JOIN public.exam_open_preparations op ON op.question_id = q.id
        WHERE q.question_type IN ('short_answer', 'essay', 'calculation')
-         AND (op.question_id IS NULL
-              OR op.preparation_status IN ('PENDING', 'VALIDATED', 'LOW_EVIDENCE'))
+          AND (op.question_id IS NULL
+               OR op.preparation_status IN ('PENDING', 'PROCESSING', 'GENERATING', 'VALIDATED', 'LOW_EVIDENCE'))
      ) AS unready
      WHERE NOT EXISTS (
        SELECT 1 FROM public.exam_preparation_jobs epj

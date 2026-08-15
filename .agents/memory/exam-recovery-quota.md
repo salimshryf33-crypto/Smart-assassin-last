@@ -38,3 +38,9 @@ On startup, `syncAndRecoverExams` checks JSON first — if snapshot exists, rest
 ## recover-exams endpoint fix
 
 `POST /api/admin/recover-exams` now `break`s the loop on `DailyQuotaExhaustedError` instead of continuing to attempt all pending exams after quota runs out. Delay between exams is 45s.
+
+## Automatic preparation resume
+
+Daily quota pauses are persisted on the preparation job and restored by the retry scheduler after process restarts. The scheduler schedules a resume for 00:00:05 UTC, then reselects the exam using current question statuses and continues idempotently.
+
+**Why:** A five-minute polling loop alone could delay or lose the in-memory pause state across restarts, while historical job counters can misrepresent the actual resume point.

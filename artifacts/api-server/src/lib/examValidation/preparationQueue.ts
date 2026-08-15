@@ -280,21 +280,45 @@ export async function listPendingJobs(limit = 50): Promise<PreparationJob[]> {
  */
 export async function getNextExamForSequentialScheduler(): Promise<PreparationJob | null> {
   const pool = getSharedPool();
-  const { rows } = await pool.query<DbRow>(
-    `SELECT * FROM public.exam_preparation_jobs
+  const { rows } = await pool.query<DbRow & {
+    actual_total_questions: number;
+    actual_ready_questions: number;
+  }>(
+    `SELECT j.*,
+            COALESCE(actual.total_questions, 0)::int AS actual_total_questions,
+            COALESCE(actual.ready_questions, 0)::int AS actual_ready_questions
+     FROM public.exam_preparation_jobs j
+     LEFT JOIN LATERAL (
+       SELECT
+         COUNT(*)::int AS total_questions,
+         COUNT(*) FILTER (WHERE prep_status = 'READY')::int AS ready_questions
+       FROM (
+         SELECT q.id,
+                COALESCE(ca.validation_status, UPPER(op.preparation_status), 'PENDING') AS prep_status
+         FROM public.exam_questions q
+         LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = q.id
+         LEFT JOIN public.exam_open_preparations op ON op.question_id = q.id
+         WHERE q.exam_id = j.exam_id
+           AND q.question_type IN ('mcq','true_false','fill_in_blank','short_answer','calculation','essay')
+       ) current_status
+     ) actual ON TRUE
      WHERE status IN ('running','pending','paused')
      ORDER BY
        CASE WHEN status = 'running' THEN 0 ELSE 1 END ASC,
        priority ASC,
        CASE
-         WHEN total_questions IS NOT NULL AND total_questions > 0
-         THEN ready_questions::float / total_questions
+          WHEN actual.total_questions > 0
+          THEN actual.ready_questions::float / actual.total_questions
          ELSE 0
        END DESC,
        created_at ASC
      LIMIT 1`,
   );
-  return rows[0] ? rowToJob(rows[0]) : null;
+  if (!rows[0]) return null;
+  const job = rowToJob(rows[0]);
+  job.totalQuestions = rows[0].actual_total_questions;
+  job.readyQuestions = rows[0].actual_ready_questions;
+  return job;
 }
 
 export interface QueueOrderEntry {
@@ -311,17 +335,37 @@ export interface QueueOrderEntry {
  */
 export async function getOrderedQueueSnapshot(limit = 20): Promise<QueueOrderEntry[]> {
   const pool = getSharedPool();
-  const { rows } = await pool.query<DbRow & { exam_title: string | null }>(
-    `SELECT j.*, r.title AS exam_title
+  const { rows } = await pool.query<DbRow & {
+    exam_title: string | null;
+    actual_total_questions: number;
+    actual_ready_questions: number;
+  }>(
+    `SELECT j.*, r.title AS exam_title,
+            COALESCE(actual.total_questions, 0)::int AS actual_total_questions,
+            COALESCE(actual.ready_questions, 0)::int AS actual_ready_questions
      FROM public.exam_preparation_jobs j
      LEFT JOIN public.exam_records r ON r.exam_id = j.exam_id
+     LEFT JOIN LATERAL (
+       SELECT
+         COUNT(*)::int AS total_questions,
+         COUNT(*) FILTER (WHERE prep_status = 'READY')::int AS ready_questions
+       FROM (
+         SELECT q.id,
+                COALESCE(ca.validation_status, UPPER(op.preparation_status), 'PENDING') AS prep_status
+         FROM public.exam_questions q
+         LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = q.id
+         LEFT JOIN public.exam_open_preparations op ON op.question_id = q.id
+         WHERE q.exam_id = j.exam_id
+           AND q.question_type IN ('mcq','true_false','fill_in_blank','short_answer','calculation','essay')
+       ) current_status
+     ) actual ON TRUE
      WHERE j.status IN ('running','pending','paused')
      ORDER BY
        CASE WHEN j.status = 'running' THEN 0 ELSE 1 END ASC,
        j.priority ASC,
        CASE
-         WHEN j.total_questions IS NOT NULL AND j.total_questions > 0
-         THEN j.ready_questions::float / j.total_questions
+          WHEN actual.total_questions > 0
+          THEN actual.ready_questions::float / actual.total_questions
          ELSE 0
        END DESC,
        j.created_at ASC
@@ -331,8 +375,10 @@ export async function getOrderedQueueSnapshot(limit = 20): Promise<QueueOrderEnt
 
   return rows.map((row, idx) => {
     const job       = rowToJob(row);
-    const total     = row.total_questions ?? 0;
-    const ready     = row.ready_questions  ?? 0;
+    const total     = row.actual_total_questions ?? 0;
+    const ready     = row.actual_ready_questions  ?? 0;
+    job.totalQuestions = total;
+    job.readyQuestions = ready;
     const readyPct  = total > 0 ? Math.round((ready / total) * 100) : 0;
     const remaining = total > 0 ? Math.max(0, total - ready) : 0;
     return {
