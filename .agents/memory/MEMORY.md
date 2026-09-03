@@ -28,3 +28,4 @@
 - [Phase 3 Consolidation](phase3-consolidation.md) — Runtime Guarantee enforced; lib/db+api-zod tsc build fix; Drizzle jsonb UpsertExamRecordInput pattern; Express 5 type pitfalls.
 - [Grading Audit Pipeline](grading-audit-pipeline.md) — 'grading_outcome' events into existing validation_audit_log; GRADING_RULES_VERSION='3.0.0'; 2 new admin endpoints; no schema changes.
 - [Sequential Preparation Scheduler](sequential-scheduler.md) — Phase 4B; one exam at a time to READY before advancing; priority→readyPct→age ordering; chains within a tick for capacity reuse; no schema changes.
+- [Admin API Preview Routing](api-preview-routing.md) — admin-only clients use /api/admin paths because proxied previews may return SPA 404s for new non-admin API paths.

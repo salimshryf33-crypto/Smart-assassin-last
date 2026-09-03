@@ -21,5 +21,8 @@ router.use('/exams', examGeneratorRouter);
 router.use('/exams', examChatRouter);
 // Phase 2: Curriculum Linking admin API
 router.use('/curriculum-links', curriculumLinksRouter);
+// Keep admin API paths consistent for proxied/restricted preview environments.
+// The original public path remains supported for backwards compatibility.
+router.use('/admin/curriculum-links', curriculumLinksRouter);
 
 export default router;

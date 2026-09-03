@@ -21,6 +21,10 @@ async function authHeaders(): Promise<HeadersInit> {
   }
 }
 
+// Curriculum linking is an admin-only API. Keep it under the admin prefix so
+// Replit's proxied preview routes it to the API server instead of the SPA.
+const LINKS_API = '/api/admin/curriculum-links';
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type LinkStatus = 'pending_review' | 'approved' | 'rejected' | 'no_match';
@@ -82,13 +86,13 @@ export interface CandidatesResult {
 // ─── API calls ────────────────────────────────────────────────────────────────
 
 export async function fetchLinkStats(): Promise<LinkStats> {
-  const res = await fetch('/api/curriculum-links/stats', { headers: await authHeaders() });
+  const res = await fetch(`${LINKS_API}/stats`, { headers: await authHeaders() });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
 
 export async function fetchPendingLinks(): Promise<CurriculumLink[]> {
-  const res = await fetch('/api/curriculum-links/pending', { headers: await authHeaders() });
+  const res = await fetch(`${LINKS_API}/pending`, { headers: await authHeaders() });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const data = await res.json();
   return data.links ?? [];
@@ -97,20 +101,20 @@ export async function fetchPendingLinks(): Promise<CurriculumLink[]> {
 export async function fetchAllLinks(status?: LinkStatus, limit = 100): Promise<CurriculumLink[]> {
   const qs = new URLSearchParams({ limit: String(limit) });
   if (status) qs.set('status', status);
-  const res = await fetch(`/api/curriculum-links?${qs}`, { headers: await authHeaders() });
+  const res = await fetch(`${LINKS_API}?${qs}`, { headers: await authHeaders() });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const data = await res.json();
   return data.links ?? [];
 }
 
 export async function fetchCandidates(examId: string): Promise<CandidatesResult> {
-  const res = await fetch(`/api/curriculum-links/candidates/${examId}`, { headers: await authHeaders() });
+  const res = await fetch(`${LINKS_API}/candidates/${examId}`, { headers: await authHeaders() });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
 
 export async function approveCurriculumLink(examId: string, docId?: string): Promise<CurriculumLink> {
-  const res = await fetch(`/api/curriculum-links/${examId}/approve`, {
+  const res = await fetch(`${LINKS_API}/${examId}/approve`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body:    JSON.stringify(docId ? { docId } : {}),
@@ -121,7 +125,7 @@ export async function approveCurriculumLink(examId: string, docId?: string): Pro
 }
 
 export async function rejectCurriculumLink(examId: string): Promise<void> {
-  const res = await fetch(`/api/curriculum-links/${examId}/reject`, {
+  const res = await fetch(`${LINKS_API}/${examId}/reject`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body:    '{}',
@@ -130,7 +134,7 @@ export async function rejectCurriculumLink(examId: string): Promise<void> {
 }
 
 export async function rematchCurriculumLink(examId: string): Promise<void> {
-  const res = await fetch(`/api/curriculum-links/${examId}/rematch`, {
+  const res = await fetch(`${LINKS_API}/${examId}/rematch`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body:    '{}',
@@ -140,7 +144,7 @@ export async function rematchCurriculumLink(examId: string): Promise<void> {
 
 /** Re-run matching on ALL no_match / unlinked exams (admin recovery action). */
 export async function rematchAllNoMatch(): Promise<void> {
-  const res = await fetch('/api/curriculum-links/rematch-all', {
+  const res = await fetch(`${LINKS_API}/rematch-all`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body:    '{}',
@@ -149,7 +153,7 @@ export async function rematchAllNoMatch(): Promise<void> {
 }
 
 export async function manualCurriculumLink(examId: string, docId: string): Promise<CurriculumLink> {
-  const res = await fetch(`/api/curriculum-links/${examId}/manual`, {
+  const res = await fetch(`${LINKS_API}/${examId}/manual`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body:    JSON.stringify({ docId }),

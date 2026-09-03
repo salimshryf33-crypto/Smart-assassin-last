@@ -828,8 +828,16 @@ function CurriculumLinksSection() {
       ) : links.length === 0 ? (
         <div className="flex flex-col items-center gap-2 py-12" dir="rtl">
           <CheckCircle size={28} className="text-emerald-400" />
-          <p className="text-sm font-semibold text-emerald-400">لا توجد عناصر بانتظار المراجعة</p>
-          <p className="text-[10px] text-slate-500">جميع الامتحانات مربوطة بمناهجها</p>
+          <p className="text-sm font-semibold text-emerald-400">
+            {filter === 'pending_review' ? 'لا توجد عناصر بانتظار المراجعة'
+              : filter === 'approved' ? 'لا توجد روابط معتمدة'
+              : 'لا توجد روابط محفوظة'}
+          </p>
+          <p className="text-[10px] text-slate-500">
+            {filter === 'pending_review' && stats?.pending === 0
+              ? 'حالة الربط محفوظة فعلياً في قاعدة البيانات'
+              : 'جرّب تغيير الفلتر لعرض الحالات الأخرى'}
+          </p>
         </div>
       ) : (
         <div className="space-y-2.5">
