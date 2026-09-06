@@ -184,6 +184,7 @@ export interface PrepOpsRunningJob {
   heartbeat:      string | null;
   workerId:       string | null;
   currentStage:   string;
+  progressState:   'ready' | 'calculating';
 }
 
 export interface PrepOpsExamRow {
@@ -244,7 +245,8 @@ export interface PrepOpsQueueOrderEntry {
 
 export interface PrepOpsSchedulerState {
   mode:           'sequential';
-  status:         'running' | 'idle' | 'quota_paused';
+  status:         'running' | 'idle' | 'quota_paused' | 'process_down' | 'no_active_jobs';
+  reason?:        string;
   activeExam:     PrepOpsSchedulerActiveExam | null;
   queueOrder:     PrepOpsQueueOrderEntry[];
   nextExamPreview: { examId: string; examTitle: string; progressPct: number } | null;
@@ -283,7 +285,7 @@ export interface PrepOpsDashboard {
   examTable:    PrepOpsExamRow[];
   orphanCount:  number;
   recentEvents: PrepOpsEvent[];
-  healthStatus: 'healthy' | 'quota_wait' | 'active_recovery' | 'stalled';
+  healthStatus: 'healthy' | 'quota_wait' | 'active_recovery' | 'stalled' | 'process_down' | 'no_active_jobs';
   scheduler?:   PrepOpsSchedulerState;
 }
 

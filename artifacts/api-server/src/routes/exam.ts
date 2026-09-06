@@ -552,7 +552,23 @@ router.get('/admin/preparation/:examId', requireAuth, requireAdmin, async (req, 
       getPreparationSummary(examId),
       getJobByExamId(examId),
     ]);
-    res.json(ok({ summary, job }));
+    // The live summary is the only progress source. Keep the job payload
+    // operational-only so stale/null counters cannot be treated as progress.
+    res.json(ok({
+      summary,
+      job: job ? {
+        id:          job.id,
+        status:      job.status,
+        priority:    job.priority,
+        stopReason:  job.lastError,
+        workerId:    job.workerId,
+        heartbeat:   job.heartbeat?.toISOString() ?? null,
+        startedAt:   job.startedAt?.toISOString() ?? null,
+        completedAt: job.completedAt?.toISOString() ?? null,
+        createdAt:   job.createdAt.toISOString(),
+        updatedAt:   job.updatedAt.toISOString(),
+      } : null,
+    }));
   } catch (err) {
     res.status(500).json(fail('PREP_STATUS_FAILED', err instanceof Error ? err.message : String(err)));
   }

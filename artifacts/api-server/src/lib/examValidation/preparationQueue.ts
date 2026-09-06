@@ -18,6 +18,8 @@
 import { getSharedPool } from '../dbPool';
 import { logger }        from '../logger';
 import { v4 as uuidv4 } from 'uuid';
+import { getLivePreparationProgress } from './livePreparationProgress';
+import { disambiguateExamTitles } from './examDisplay';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -153,6 +155,28 @@ export async function updateProgress(
   );
 }
 
+/**
+ * Claim a specific pending/paused job before validation starts.
+ *
+ * This is deliberately separate from the queue ordering logic: the scheduler
+ * selects by live progress, then the selected job is re-claimed here.
+ */
+export async function claimJob(jobId: string, workerId: string): Promise<boolean> {
+  const pool = getSharedPool();
+  const { rowCount } = await pool.query(
+    `UPDATE public.exam_preparation_jobs
+     SET status = 'running',
+         worker_id = $2,
+         heartbeat = NOW(),
+         started_at = COALESCE(started_at, NOW()),
+         updated_at = NOW()
+     WHERE id = $1
+       AND status IN ('pending','paused')`,
+    [jobId, workerId],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
 // ─── Complete / Fail / Pause ──────────────────────────────────────────────────
 
 export async function completeJob(jobId: string, readyQuestions: number): Promise<void> {
@@ -283,18 +307,31 @@ export async function getNextExamForSequentialScheduler(): Promise<PreparationJo
   const { rows } = await pool.query<DbRow>(
     `SELECT * FROM public.exam_preparation_jobs
      WHERE status IN ('running','pending','paused')
-     ORDER BY
-       CASE WHEN status = 'running' THEN 0 ELSE 1 END ASC,
-       priority ASC,
-       CASE
-         WHEN total_questions IS NOT NULL AND total_questions > 0
-         THEN ready_questions::float / total_questions
-         ELSE 0
-       END DESC,
-       created_at ASC
-     LIMIT 1`,
+     ORDER BY CASE WHEN status = 'running' THEN 0 ELSE 1 END ASC, priority ASC, created_at ASC`,
   );
-  return rows[0] ? rowToJob(rows[0]) : null;
+  if (!rows[0]) return null;
+
+  const candidates = await Promise.all(rows.map(async (row) => ({
+    row,
+    progress: await getLivePreparationProgress(row.exam_id),
+  })));
+  candidates.sort((a, b) => {
+    const runningDiff = Number(b.row.status === 'running') - Number(a.row.status === 'running');
+    if (runningDiff !== 0) return runningDiff;
+    if (a.row.priority !== b.row.priority) return a.row.priority - b.row.priority;
+    if (a.progress.progressPct !== b.progress.progressPct) {
+      return b.progress.progressPct - a.progress.progressPct;
+    }
+    return new Date(a.row.created_at).getTime() - new Date(b.row.created_at).getTime();
+  });
+
+  const selected = candidates[0];
+  const job = rowToJob(selected.row);
+  // Internal scheduler context uses live values; persisted job counters remain
+  // operational snapshots and are never used to calculate display progress.
+  job.totalQuestions = selected.progress.totalQuestions;
+  job.readyQuestions = selected.progress.readyQuestions;
+  return job;
 }
 
 export interface QueueOrderEntry {
@@ -313,36 +350,47 @@ export async function getOrderedQueueSnapshot(limit = 20): Promise<QueueOrderEnt
   const pool = getSharedPool();
   const { rows } = await pool.query<DbRow & { exam_title: string | null }>(
     `SELECT j.*, r.title AS exam_title
+            ,r.created_at AS exam_created_at
      FROM public.exam_preparation_jobs j
      LEFT JOIN public.exam_records r ON r.exam_id = j.exam_id
      WHERE j.status IN ('running','pending','paused')
-     ORDER BY
-       CASE WHEN j.status = 'running' THEN 0 ELSE 1 END ASC,
-       j.priority ASC,
-       CASE
-         WHEN j.total_questions IS NOT NULL AND j.total_questions > 0
-         THEN j.ready_questions::float / j.total_questions
-         ELSE 0
-       END DESC,
-       j.created_at ASC
-     LIMIT $1`,
-    [limit],
+     ORDER BY CASE WHEN j.status = 'running' THEN 0 ELSE 1 END ASC, j.priority ASC, j.created_at ASC`,
   );
 
-  return rows.map((row, idx) => {
+  const titles = disambiguateExamTitles(rows.map((row) => ({
+    examId: row.exam_id,
+    title: row.exam_title,
+    createdAt: row.exam_created_at,
+  })));
+  const entries = await Promise.all(rows.map(async (row) => {
     const job       = rowToJob(row);
-    const total     = row.total_questions ?? 0;
-    const ready     = row.ready_questions  ?? 0;
-    const readyPct  = total > 0 ? Math.round((ready / total) * 100) : 0;
-    const remaining = total > 0 ? Math.max(0, total - ready) : 0;
+    const progress  = await getLivePreparationProgress(row.exam_id);
+    job.totalQuestions = progress.totalQuestions;
+    job.readyQuestions = progress.readyQuestions;
     return {
       job,
-      examTitle:          row.exam_title,
-      readyPct,
-      remainingQuestions: remaining,
-      position:           idx + 1,
+      examTitle:          titles.get(row.exam_id) ?? row.exam_title,
+      readyPct:           progress.progressPct,
+      remainingQuestions: progress.remainingQuestions,
+      createdAt:          new Date(row.created_at).getTime(),
     };
+  }));
+
+  entries.sort((a, b) => {
+    const runningDiff = Number(b.job.status === 'running') - Number(a.job.status === 'running');
+    if (runningDiff !== 0) return runningDiff;
+    if (a.job.priority !== b.job.priority) return a.job.priority - b.job.priority;
+    if (a.readyPct !== b.readyPct) return b.readyPct - a.readyPct;
+    return a.createdAt - b.createdAt;
   });
+
+  return entries.slice(0, limit).map((entry, index) => ({
+    job: entry.job,
+    examTitle: entry.examTitle,
+    readyPct: entry.readyPct,
+    remainingQuestions: entry.remainingQuestions,
+    position: index + 1,
+  }));
 }
 
 // ─── Initialise queue from existing exams ────────────────────────────────────

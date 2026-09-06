@@ -58,8 +58,10 @@ import {
   pauseJob,
   getJobByExamId,
   updateProgress,
+  claimJob,
   HEARTBEAT_INTERVAL_MS,
 }                                 from './preparationQueue';
+import { getLivePreparationProgress } from './livePreparationProgress';
 import type {
   PipelineQuestion,
   ValidationStatus,
@@ -162,6 +164,7 @@ async function _runValidation(examId: string): Promise<void> {
   if (!job || !['pending','running','paused'].includes(job.status)) {
     job = await enqueueExam(examId, 5);
   }
+  await claimJob(job.id, `prep-${process.pid}`);
   const jobId = job.id;
 
   // ── Heartbeat: update every HEARTBEAT_INTERVAL_MS while pipeline runs ─────
@@ -330,11 +333,17 @@ async function _runValidation(examId: string): Promise<void> {
     }
 
     // ── Mark job complete ─────────────────────────────────────────────────
-    await completeJob(jobId, readyCount);
+    const finalProgress = await getLivePreparationProgress(examId);
+    await updateProgress(jobId, finalProgress.readyQuestions, finalProgress.totalQuestions).catch(() => undefined);
+    await completeJob(jobId, finalProgress.readyQuestions);
 
   } catch (err) {
     // On quota exhaustion: pause the job so scheduler can resume tomorrow
     if (err instanceof DailyQuotaExhaustedError) {
+      const partialProgress = await getLivePreparationProgress(examId).catch(() => null);
+      if (partialProgress) {
+        await updateProgress(jobId, partialProgress.readyQuestions, partialProgress.totalQuestions).catch(() => undefined);
+      }
       await pauseJob(jobId, 'DailyQuotaExhausted').catch(() => undefined);
     }
     throw err;

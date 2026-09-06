@@ -29,6 +29,13 @@ import {
   getGradingAuditLog,
   getGradingAuditSummary,
 } from '../lib/observability/metricsQueries';
+import {
+  getLivePreparationProgress,
+  getLivePreparationProgressForExams,
+  getOrderedQueueSnapshot,
+  getRetrySchedulerHealth,
+  disambiguateExamTitles,
+} from '../lib/examValidation';
 
 const router = Router();
 
@@ -667,43 +674,33 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
       db.query<{ count: number }>(`
         SELECT COUNT(*)::int AS count FROM public.exam_dlq WHERE resolved_at IS NULL
       `),
-      // 6. Active / pending / retry jobs with exam title
+      // 6. Active / pending / retry jobs with exam title. Progress is joined
+      // below from the live per-question source, never from job counters.
       db.query<{
         id: string; exam_id: string; title: string | null; status: string;
-        total_questions: number | null; ready_questions: number | null;
+        created_at: Date | null;
         started_at: Date | null; heartbeat: Date | null; worker_id: string | null;
       }>(`
         SELECT j.id, j.exam_id, r.title, j.status,
-               j.total_questions, j.ready_questions,
+               r.created_at,
                j.started_at, j.heartbeat, j.worker_id
         FROM public.exam_preparation_jobs j
         LEFT JOIN public.exam_records r ON r.exam_id = j.exam_id
-        WHERE j.status IN ('processing','pending','retry','paused')
+        WHERE j.status IN ('running','processing','pending','retry','paused')
         ORDER BY j.updated_at DESC LIMIT 30
       `),
-      // 7. Per-exam preparation breakdown (MCQ only → canonical_answers)
+      // 7. Per-exam metadata. The live question breakdown is calculated by
+      // getLivePreparationProgress below so every displayed percentage shares
+      // one implementation.
       db.query<{
         exam_id: string; title: string; question_count: number | null;
-        preparation_status: string | null; updated_at: Date | null;
-        mcq_total: string; ready: string; validated: string;
-        low_evidence: string; permanent_low: string;
-        pending: string; processing: string; invalid: string;
+        preparation_status: string | null; updated_at: Date | null; created_at: Date | null;
       }>(`
         SELECT
-          r.exam_id, r.title, r.question_count,
-          r.preparation_status, r.updated_at,
-          COUNT(q.id)::int                                                                            AS mcq_total,
-          SUM(CASE WHEN ca.validation_status = 'READY'               THEN 1 ELSE 0 END)::int         AS ready,
-          SUM(CASE WHEN ca.validation_status = 'VALIDATED'           THEN 1 ELSE 0 END)::int         AS validated,
-          SUM(CASE WHEN ca.validation_status = 'LOW_EVIDENCE'        THEN 1 ELSE 0 END)::int         AS low_evidence,
-          SUM(CASE WHEN ca.validation_status = 'PERMANENT_LOW_EVIDENCE' THEN 1 ELSE 0 END)::int      AS permanent_low,
-          SUM(CASE WHEN ca.validation_status = 'PENDING'             THEN 1 ELSE 0 END)::int         AS pending,
-          SUM(CASE WHEN ca.validation_status = 'PROCESSING'          THEN 1 ELSE 0 END)::int         AS processing,
-          SUM(CASE WHEN ca.validation_status = 'INVALID'             THEN 1 ELSE 0 END)::int         AS invalid
+          r.exam_id, r.title, r.question_count, r.preparation_status,
+          r.updated_at, r.created_at
         FROM public.exam_records r
-        LEFT JOIN public.exam_questions  q  ON q.exam_id        = r.exam_id AND q.question_type = 'mcq'
-        LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = q.id
-        GROUP BY r.exam_id, r.title, r.question_count, r.preparation_status, r.updated_at
+        ORDER BY r.created_at ASC
       `),
       // 8. MCQ questions with no canonical answer (orphans)
       db.query<{ count: number }>(`
@@ -731,29 +728,6 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
            OR payload::text ILIKE '%RESOURCE_EXHAUSTED%'
         ORDER BY created_at DESC LIMIT 1
       `),
-      // 11. Sequential scheduler queue — ordered by (running first, priority, readyPct DESC, age)
-      db.query<{
-        id: string; exam_id: string; title: string | null; status: string;
-        priority: number; total_questions: number | null; ready_questions: number;
-        created_at: Date; started_at: Date | null; heartbeat: Date | null;
-      }>(`
-        SELECT j.id, j.exam_id, r.title, j.status, j.priority,
-               j.total_questions, j.ready_questions, j.created_at,
-               j.started_at, j.heartbeat
-        FROM public.exam_preparation_jobs j
-        LEFT JOIN public.exam_records r ON r.exam_id = j.exam_id
-        WHERE j.status IN ('running','pending','paused')
-        ORDER BY
-          CASE WHEN j.status = 'running' THEN 0 ELSE 1 END ASC,
-          j.priority ASC,
-          CASE
-            WHEN j.total_questions IS NOT NULL AND j.total_questions > 0
-            THEN j.ready_questions::float / j.total_questions
-            ELSE 0
-          END DESC,
-          j.created_at ASC
-        LIMIT 20
-      `),
     ]);
 
     // ── Merge status counts (MCQ + open questions) ────────────────────────────
@@ -769,39 +743,59 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
     const qMap: Record<string, number> = {};
     for (const row of jobStatusRows.rows) qMap[row.status] = Number(row.count);
 
+    const liveProgress = await getLivePreparationProgressForExams(
+      examTableRows.rows.map((row) => row.exam_id),
+    );
+    const displayTitles = disambiguateExamTitles([
+      ...examTableRows.rows.map((row) => ({
+        examId: row.exam_id,
+        title: row.title,
+        createdAt: row.created_at,
+      })),
+      ...runningJobRows.rows.map((row) => ({
+        examId: row.exam_id,
+        title: row.title,
+        createdAt: row.created_at,
+      })),
+    ]);
+
     // ── Running jobs ──────────────────────────────────────────────────────────
-    const runningJobs = runningJobRows.rows.map(j => ({
-      jobId:          j.id,
-      examId:         j.exam_id,
-      examTitle:      j.title ?? j.exam_id,
-      status:         j.status,
-      totalQuestions: j.total_questions ?? 0,
-      readyQuestions: j.ready_questions ?? 0,
-      progressPct:    (j.total_questions ?? 0) === 0 ? 0 : Math.round(((j.ready_questions ?? 0) / (j.total_questions ?? 1)) * 100),
-      startedAt:      j.started_at?.toISOString()  ?? null,
-      heartbeat:      j.heartbeat?.toISOString()   ?? null,
-      workerId:       j.worker_id ?? null,
-      currentStage:   j.status,
+    const runningJobs = await Promise.all(runningJobRows.rows.map(async (j) => {
+      const progress = liveProgress.get(j.exam_id) ?? await getLivePreparationProgress(j.exam_id);
+      return {
+        jobId:          j.id,
+        examId:         j.exam_id,
+        examTitle:      displayTitles.get(j.exam_id) ?? j.title ?? j.exam_id,
+        status:         j.status,
+        totalQuestions: progress.totalQuestions,
+        readyQuestions: progress.readyQuestions,
+        progressPct:    progress.progressPct,
+        progressState:  progress.totalQuestions === 0 ? 'calculating' as const : 'ready' as const,
+        startedAt:      j.started_at?.toISOString()  ?? null,
+        heartbeat:      j.heartbeat?.toISOString()   ?? null,
+        workerId:       j.worker_id ?? null,
+        currentStage:   j.status,
+      };
     }));
 
-    // ── Exam table (sorted by lowest completion %) ────────────────────────────
-    const examTable = examTableRows.rows.map(r => {
-      const mcqTotal       = Number(r.mcq_total)    || 0;
-      const readyValidated = Number(r.ready)         + Number(r.validated);
-      const completionPct  = mcqTotal === 0 ? 0 : Math.round((readyValidated / mcqTotal) * 100);
+    // ── Exam table (sorted by lowest live completion %) ───────────────────────
+    const examTable = examTableRows.rows.map((r) => {
+      const progress = liveProgress.get(r.exam_id)!;
+      const counts = progress.statusCounts;
       return {
         examId:            r.exam_id,
-        title:             r.title,
-        totalQuestions:    r.question_count ?? mcqTotal,
-        mcqQuestions:      mcqTotal,
-        ready:             Number(r.ready)         || 0,
-        validated:         Number(r.validated)     || 0,
-        lowEvidence:       Number(r.low_evidence)  || 0,
-        permanentLow:      Number(r.permanent_low) || 0,
-        pending:           Number(r.pending)       || 0,
-        processing:        Number(r.processing)    || 0,
-        invalid:           Number(r.invalid)       || 0,
-        completionPct,
+        title:             displayTitles.get(r.exam_id) ?? r.title,
+        totalQuestions:    progress.totalQuestions,
+        // Kept for API compatibility; this now means all preparable questions.
+        mcqQuestions:      progress.totalQuestions,
+        ready:             counts.READY ?? 0,
+        validated:         counts.VALIDATED ?? 0,
+        lowEvidence:       counts.LOW_EVIDENCE ?? 0,
+        permanentLow:      counts.PERMANENT_LOW_EVIDENCE ?? 0,
+        pending:           counts.PENDING ?? 0,
+        processing:        counts.PROCESSING ?? 0,
+        invalid:           counts.INVALID ?? 0,
+        completionPct:     progress.progressPct,
         preparationStatus: r.preparation_status ?? 'unknown',
         lastUpdated:       r.updated_at?.toISOString() ?? null,
       };
@@ -819,62 +813,74 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
     else if (recentQuota)   healthStatus = 'quota_wait';
 
     // ── Sequential Scheduler state ────────────────────────────────────────────
-    const sqRows = schedulerQueueRows.rows;
-    const sqActive = sqRows[0] ?? null;
-    const sqActiveReadyPct = sqActive
-      ? ((sqActive.total_questions ?? 0) > 0
-          ? Math.round((sqActive.ready_questions / (sqActive.total_questions ?? 1)) * 100)
-          : 0)
-      : 0;
-    const sqActiveRemaining = sqActive
-      ? Math.max(0, (sqActive.total_questions ?? 0) - sqActive.ready_questions)
-      : 0;
-
-    const sqIsRunning  = sqActive?.status === 'running';
-    const sqIsQuotaPause = !sqIsRunning && recentQuota;
-    const sqSchedulerStatus = sqActive
-      ? (sqIsRunning ? 'running' : (sqIsQuotaPause ? 'quota_paused' : 'idle'))
-      : 'idle';
+    const queueEntries = await getOrderedQueueSnapshot(20);
+    const sqActive = queueEntries[0] ?? null;
+    const schedulerHealth = getRetrySchedulerHealth();
+    const hasActiveJobs = (qMap['running'] ?? 0) + (qMap['pending'] ?? 0) + (qMap['paused'] ?? 0) > 0;
+    const sqIsQuotaPause = Boolean(sqActive && sqActive.job.status === 'paused' && recentQuota);
+    const sqSchedulerStatus = !schedulerHealth.processRunning
+      ? 'process_down'
+      : !hasActiveJobs
+        ? 'no_active_jobs'
+        : sqActive?.job.status === 'running'
+          ? 'running'
+          : sqIsQuotaPause
+            ? 'quota_paused'
+            : 'idle';
+    const healthStatus = !schedulerHealth.processRunning
+      ? 'process_down'
+      : stalledJob
+        ? 'stalled'
+        : sqIsQuotaPause
+          ? 'quota_wait'
+          : !hasActiveJobs
+            ? 'no_active_jobs'
+            : hasRetry
+              ? 'active_recovery'
+              : 'healthy';
 
     const schedulerState = {
       mode:           'sequential' as const,
-      status:         sqSchedulerStatus as 'running' | 'idle' | 'quota_paused',
+      status:         sqSchedulerStatus as 'running' | 'idle' | 'quota_paused' | 'process_down' | 'no_active_jobs',
+      reason:         !schedulerHealth.processRunning
+        ? 'process not running'
+        : sqIsQuotaPause
+          ? 'paused — quota exhausted'
+          : !hasActiveJobs
+            ? 'no active jobs'
+            : undefined,
       activeExam:     sqActive ? {
-        jobId:              sqActive.id,
-        examId:             sqActive.exam_id,
-        examTitle:          sqActive.title ?? sqActive.exam_id,
-        status:             sqActive.status,
-        priority:           sqActive.priority,
-        readyQuestions:     sqActive.ready_questions,
-        totalQuestions:     sqActive.total_questions ?? 0,
-        progressPct:        sqActiveReadyPct,
-        remainingQuestions: sqActiveRemaining,
-        startedAt:          sqActive.started_at?.toISOString() ?? null,
-        heartbeat:          sqActive.heartbeat?.toISOString()  ?? null,
+        jobId:              sqActive.job.id,
+        examId:             sqActive.job.examId,
+        examTitle:          sqActive.examTitle ?? sqActive.job.examId,
+        status:             sqActive.job.status,
+        priority:           sqActive.job.priority,
+        readyQuestions:     sqActive.job.readyQuestions,
+        totalQuestions:     sqActive.job.totalQuestions ?? 0,
+        progressPct:        sqActive.readyPct,
+        remainingQuestions: sqActive.remainingQuestions,
+        startedAt:          sqActive.job.startedAt?.toISOString() ?? null,
+        heartbeat:          sqActive.job.heartbeat?.toISOString()  ?? null,
       } : null,
-      queueOrder: sqRows.map((j, idx) => {
-        const total   = j.total_questions ?? 0;
-        const readPct = total > 0 ? Math.round((j.ready_questions / total) * 100) : 0;
+      queueOrder: queueEntries.map((entry) => {
         return {
-          position:           idx + 1,
-          jobId:              j.id,
-          examId:             j.exam_id,
-          examTitle:          j.title ?? j.exam_id,
-          status:             j.status,
-          priority:           j.priority,
-          readyQuestions:     j.ready_questions,
-          totalQuestions:     total,
-          progressPct:        readPct,
-          remainingQuestions: Math.max(0, total - j.ready_questions),
+          position:           entry.position,
+          jobId:              entry.job.id,
+          examId:             entry.job.examId,
+          examTitle:          entry.examTitle ?? entry.job.examId,
+          status:             entry.job.status,
+          priority:           entry.job.priority,
+          readyQuestions:     entry.job.readyQuestions,
+          totalQuestions:     entry.job.totalQuestions ?? 0,
+          progressPct:        entry.readyPct,
+          remainingQuestions: entry.remainingQuestions,
         };
       }),
-      nextExamPreview: sqRows[1]
+      nextExamPreview: queueEntries[1]
         ? {
-            examId:     sqRows[1].exam_id,
-            examTitle:  sqRows[1].title ?? sqRows[1].exam_id,
-            progressPct: (sqRows[1].total_questions ?? 0) > 0
-              ? Math.round((sqRows[1].ready_questions / (sqRows[1].total_questions ?? 1)) * 100)
-              : 0,
+            examId:     queueEntries[1].job.examId,
+            examTitle:  queueEntries[1].examTitle ?? queueEntries[1].job.examId,
+            progressPct: queueEntries[1].readyPct,
           }
         : null,
     };
@@ -916,7 +922,7 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
         createdAt:  r.created_at?.toISOString(),
         payload:    (r.payload as Record<string, unknown>) ?? {},
       })),
-      healthStatus,
+       healthStatus,
       scheduler:     schedulerState,
     });
   } catch (err) {

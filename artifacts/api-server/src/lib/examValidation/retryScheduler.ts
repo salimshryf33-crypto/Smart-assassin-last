@@ -51,7 +51,35 @@ const MAX_EXAMS_PER_TICK    = 50;                 // safety cap — prevents inf
                                                   // many exams each have 0 eligible questions
 
 let schedulerHandle: ReturnType<typeof setInterval> | null = null;
+let quotaResumeHandle: ReturnType<typeof setTimeout> | null = null;
+let quotaPausedUntil = 0;
 let running                                                  = false;
+let schedulerStartedAt: Date | null = null;
+let lastTickStartedAt: Date | null = null;
+let lastTickCompletedAt: Date | null = null;
+let lastTickError: string | null = null;
+
+export interface RetrySchedulerHealth {
+  processRunning: boolean;
+  schedulerStartedAt: string | null;
+  lastTickStartedAt: string | null;
+  lastTickCompletedAt: string | null;
+  lastTickError: string | null;
+  quotaPausedUntil: string | null;
+}
+
+export function getRetrySchedulerHealth(): RetrySchedulerHealth {
+  return {
+    processRunning: schedulerHandle !== null,
+    schedulerStartedAt: schedulerStartedAt?.toISOString() ?? null,
+    lastTickStartedAt: lastTickStartedAt?.toISOString() ?? null,
+    lastTickCompletedAt: lastTickCompletedAt?.toISOString() ?? null,
+    lastTickError,
+    quotaPausedUntil: quotaPausedUntil > Date.now()
+      ? new Date(quotaPausedUntil).toISOString()
+      : null,
+  };
+}
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -62,6 +90,8 @@ let running                                                  = false;
 export function startRetryScheduler(): void {
   if (schedulerHandle !== null) return;
 
+  schedulerStartedAt = new Date();
+  lastTickError = null;
   logger.info(
     { intervalMs: SCHEDULER_INTERVAL_MS, strategy: 'sequential' },
     'retryScheduler: started (sequential mode)',
@@ -72,6 +102,10 @@ export function startRetryScheduler(): void {
       logger.error({ err }, 'retryScheduler: tick error'),
     );
   }, SCHEDULER_INTERVAL_MS);
+
+  restoreQuotaPauseStateAndKick().catch((err) =>
+    logger.error({ err }, 'retryScheduler: initial resume check failed'),
+  );
 }
 
 /**
@@ -84,6 +118,11 @@ export function stopRetryScheduler(): void {
     schedulerHandle = null;
     logger.info('retryScheduler: stopped');
   }
+  if (quotaResumeHandle !== null) {
+    clearTimeout(quotaResumeHandle);
+    quotaResumeHandle = null;
+  }
+  quotaPausedUntil = 0;
 }
 
 // ─── Internal tick ────────────────────────────────────────────────────────────
@@ -93,6 +132,19 @@ async function runRetryTick(): Promise<void> {
     logger.debug('retryScheduler: previous tick still running — skipping');
     return;
   }
+  if (quotaPausedUntil > Date.now()) {
+    logger.debug(
+      { resumeAt: new Date(quotaPausedUntil).toISOString() },
+      'retryScheduler: waiting for Gemini daily quota reset',
+    );
+    return;
+  }
+  if (quotaPausedUntil !== 0) {
+    quotaPausedUntil = 0;
+    quotaResumeHandle = null;
+  }
+  lastTickStartedAt = new Date();
+  lastTickError = null;
   running = true;
 
   try {
@@ -144,9 +196,13 @@ async function runRetryTick(): Promise<void> {
         await runValidationForExam(nextJob.examId);
       } catch (err) {
         if (err instanceof DailyQuotaExhaustedError) {
+          scheduleQuotaResume();
           logger.warn(
-            { examId: nextJob.examId },
-            'retryScheduler: AI quota exhausted — pausing scheduler until capacity resets',
+            {
+              examId: nextJob.examId,
+              resumeAt: new Date(quotaPausedUntil).toISOString(),
+            },
+            'retryScheduler: AI quota exhausted — scheduled automatic resume after UTC reset',
           );
           return;   // stop the entire tick; other exams would fail too
         }
@@ -191,7 +247,59 @@ async function runRetryTick(): Promise<void> {
     );
   } finally {
     running = false;
+    lastTickCompletedAt = new Date();
   }
+}
+
+function scheduleQuotaResume(): void {
+  const now = new Date();
+  const nextReset = new Date(now);
+  nextReset.setUTCHours(24, 0, 0, 0);
+  const resumeAt = nextReset.getTime() + QUOTA_RESUME_GRACE_MS;
+
+  quotaPausedUntil = resumeAt;
+  if (quotaResumeHandle !== null) clearTimeout(quotaResumeHandle);
+
+  quotaResumeHandle = setTimeout(() => {
+    quotaResumeHandle = null;
+    quotaPausedUntil = 0;
+    logger.info(
+      { resumeAt: new Date(resumeAt).toISOString() },
+      'retryScheduler: daily quota reset window reached — resuming preparation',
+    );
+    runRetryTick().catch((err) =>
+      logger.error({ err }, 'retryScheduler: automatic post-quota resume failed'),
+    );
+  }, Math.max(1_000, resumeAt - Date.now()));
+}
+
+async function restoreQuotaPauseStateAndKick(): Promise<void> {
+  const pool = getSharedPool();
+  const { rows } = await pool.query<{ last_quota_pause: Date | null }>(`
+    SELECT MAX(updated_at) AS last_quota_pause
+    FROM public.exam_preparation_jobs
+    WHERE status = 'paused'
+      AND last_error ILIKE '%quota%'
+  `);
+
+  const lastQuotaPause = rows[0]?.last_quota_pause;
+  const startOfUtcDay = new Date();
+  startOfUtcDay.setUTCHours(0, 0, 0, 0);
+
+  if (lastQuotaPause && new Date(lastQuotaPause).getTime() >= startOfUtcDay.getTime()) {
+    scheduleQuotaResume();
+    logger.info(
+      {
+        lastQuotaPause: new Date(lastQuotaPause).toISOString(),
+        resumeAt: new Date(quotaPausedUntil).toISOString(),
+      },
+      'retryScheduler: restored current-day quota pause',
+    );
+    return;
+  }
+
+  // A pause from a previous UTC day is eligible immediately after startup.
+  await runRetryTick();
 }
 
 // ─── Eligible exam query ──────────────────────────────────────────────────────
