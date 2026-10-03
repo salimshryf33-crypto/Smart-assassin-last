@@ -209,6 +209,7 @@ export default function LoginScreen() {
                       placeholder="الاسم الكامل"
                       value={name}
                       onChange={(e) => setName(e.target.value)}
+                      autoComplete="name"
                       className="w-full rounded-2xl py-3.5 pl-10 pr-4 text-sm text-white placeholder-slate-600 outline-none transition-all"
                       style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
                       dir="rtl"
@@ -225,6 +226,7 @@ export default function LoginScreen() {
                 placeholder="البريد الإلكتروني"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                autoComplete="email"
                 className="w-full rounded-2xl py-3.5 pl-10 pr-4 text-sm text-white placeholder-slate-600 outline-none"
                 style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
                 dir="rtl"
@@ -238,6 +240,7 @@ export default function LoginScreen() {
                 placeholder="كلمة المرور"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
                 className="w-full rounded-2xl py-3.5 pl-10 pr-12 text-sm text-white placeholder-slate-600 outline-none"
                 style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
                 dir="rtl"

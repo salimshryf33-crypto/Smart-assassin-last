@@ -1,3 +1,4 @@
+- [Managed Artifact Workflows](managed-artifact-workflows.md) — use generated artifact workflow names, not duplicate root workflows that bind the same ports.
 - [Live Preparation Progress](live-preparation-progress.md) — progress displays and scheduler ordering share persisted question states; job counters are operational snapshots only.
 - [Curriculum Ownership System](curriculum-ownership.md) — auth middleware (no firebase-admin), admin roles, visibility gating, bookTitle, dedup 409, Mode A/B search, Express5 string|string[] fix.
 - [Flashcard Pipeline Architecture](flashcard-pipeline.md) — AI-powered flashcard generation from chat; SM-2 SRS; Jaccard dedup; daily limit 10; understanding checks.

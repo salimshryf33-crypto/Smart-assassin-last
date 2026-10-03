@@ -210,6 +210,7 @@ function DeleteAccountModal({
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handlePasswordConfirm()}
+                  autoComplete="current-password"
                   className="w-full rounded-2xl py-3.5 pl-10 pr-4 text-sm text-white placeholder-slate-600 outline-none"
                   style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)' }}
                   dir="rtl"
