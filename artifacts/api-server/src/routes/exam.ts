@@ -26,7 +26,7 @@ import {
   enqueueExam,
   getQueueOverview,
   listPendingJobs,
-  getPreparationSummary,
+  getLivePreparationProgress,
   listDLQ,
   getDLQStats,
   resolveDLQ,
@@ -549,7 +549,7 @@ router.get('/admin/preparation/:examId', requireAuth, requireAdmin, async (req, 
   try {
     const examId = str(req.params.examId);
     const [summary, job] = await Promise.all([
-      getPreparationSummary(examId),
+      getLivePreparationProgress(examId),
       getJobByExamId(examId),
     ]);
     // The live summary is the only progress source. Keep the job payload

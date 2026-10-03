@@ -646,7 +646,6 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
       orphanRow,
       recentEventsRows,
       lastQuotaRow,
-      schedulerQueueRows,
     ] = await Promise.all([
       // 1. Global counts
       db.query<{ total_books: string; total_exams: string; total_questions: string }>(`
@@ -796,36 +795,37 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
         processing:        counts.PROCESSING ?? 0,
         invalid:           counts.INVALID ?? 0,
         completionPct:     progress.progressPct,
+        progressState:     progress.totalQuestions === 0 ? 'calculating' as const : 'ready' as const,
         preparationStatus: r.preparation_status ?? 'unknown',
         lastUpdated:       r.updated_at?.toISOString() ?? null,
       };
     }).sort((a, b) => a.completionPct - b.completionPct);
 
-    // ── Health status ─────────────────────────────────────────────────────────
-    const stalledJob    = runningJobRows.rows.some(j => j.heartbeat && (Date.now() - new Date(j.heartbeat).getTime()) > 30 * 60 * 1000);
-    const hasRetry      = (qMap['retry']      ?? 0) > 0;
-    const recentQuotaMs = lastQuotaRow.rows[0]?.created_at ? Date.now() - new Date(lastQuotaRow.rows[0].created_at).getTime() : Infinity;
-    const recentQuota   = recentQuotaMs < 24 * 60 * 60 * 1000;
-
-    let healthStatus: 'healthy' | 'quota_wait' | 'active_recovery' | 'stalled' = 'healthy';
-    if (stalledJob)         healthStatus = 'stalled';
-    else if (hasRetry)      healthStatus = 'active_recovery';
-    else if (recentQuota)   healthStatus = 'quota_wait';
-
     // ── Sequential Scheduler state ────────────────────────────────────────────
     const queueEntries = await getOrderedQueueSnapshot(20);
     const sqActive = queueEntries[0] ?? null;
     const schedulerHealth = getRetrySchedulerHealth();
-    const hasActiveJobs = (qMap['running'] ?? 0) + (qMap['pending'] ?? 0) + (qMap['paused'] ?? 0) > 0;
-    const sqIsQuotaPause = Boolean(sqActive && sqActive.job.status === 'paused' && recentQuota);
+    const hasActiveJobs =
+      (qMap['running'] ?? 0) +
+      (qMap['processing'] ?? 0) +
+      (qMap['pending'] ?? 0) +
+      (qMap['paused'] ?? 0) > 0;
+    const stalledJob = runningJobRows.rows.some(
+      (job) =>
+        ['running', 'processing'].includes(job.status) &&
+        job.heartbeat &&
+        Date.now() - new Date(job.heartbeat).getTime() > 30 * 60 * 1000,
+    );
+    const hasRetry = (qMap['retry'] ?? 0) > 0;
+    const sqIsQuotaPause = Boolean(schedulerHealth.quotaPausedUntil);
     const sqSchedulerStatus = !schedulerHealth.processRunning
       ? 'process_down'
-      : !hasActiveJobs
-        ? 'no_active_jobs'
-        : sqActive?.job.status === 'running'
-          ? 'running'
-          : sqIsQuotaPause
-            ? 'quota_paused'
+      : sqIsQuotaPause
+        ? 'quota_paused'
+        : !hasActiveJobs
+          ? 'no_active_jobs'
+          : sqActive?.job.status === 'running'
+            ? 'running'
             : 'idle';
     const healthStatus = !schedulerHealth.processRunning
       ? 'process_down'
@@ -835,7 +835,7 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
           ? 'quota_wait'
           : !hasActiveJobs
             ? 'no_active_jobs'
-            : hasRetry
+            : hasRetry || schedulerHealth.lastTickError
               ? 'active_recovery'
               : 'healthy';
 
@@ -843,12 +843,13 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
       mode:           'sequential' as const,
       status:         sqSchedulerStatus as 'running' | 'idle' | 'quota_paused' | 'process_down' | 'no_active_jobs',
       reason:         !schedulerHealth.processRunning
-        ? 'process not running'
+        ? 'المجدول غير مشغّل'
         : sqIsQuotaPause
-          ? 'paused — quota exhausted'
+          ? 'متوقف مؤقتاً حتى إعادة ضبط الحصة اليومية'
           : !hasActiveJobs
-            ? 'no active jobs'
+            ? 'لا توجد مهام تحضير نشطة'
             : undefined,
+      runtime:        schedulerHealth,
       activeExam:     sqActive ? {
         jobId:              sqActive.job.id,
         examId:             sqActive.job.examId,
@@ -881,6 +882,7 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
             examId:     queueEntries[1].job.examId,
             examTitle:  queueEntries[1].examTitle ?? queueEntries[1].job.examId,
             progressPct: queueEntries[1].readyPct,
+            totalQuestions: queueEntries[1].job.totalQuestions ?? 0,
           }
         : null,
     };
@@ -894,7 +896,7 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
       },
       preparationStatus: { counts: statusCounts, total: totalPrepared, percentages: statusPct },
       queueStatus: {
-        active:  qMap['running']    ?? 0,
+        active:  (qMap['running'] ?? 0) + (qMap['processing'] ?? 0),
         waiting: qMap['pending']    ?? 0,
         paused:  qMap['paused']     ?? 0,
         retry:   qMap['retry']      ?? 0,
@@ -922,7 +924,7 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
         createdAt:  r.created_at?.toISOString(),
         payload:    (r.payload as Record<string, unknown>) ?? {},
       })),
-       healthStatus,
+      healthStatus,
       scheduler:     schedulerState,
     });
   } catch (err) {

@@ -11,30 +11,36 @@ export interface ExamDisplayRecord {
   createdAt?: Date | string | null;
 }
 
-function shortDate(value: Date | string | null | undefined): string | null {
-  if (!value) return null;
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return date.toISOString().slice(0, 10);
-}
-
 export function disambiguateExamTitles<T extends ExamDisplayRecord>(records: T[]): Map<string, string> {
-  const counts = new Map<string, number>();
-  for (const record of records) {
+  // The same exam can appear in more than one dashboard section. Count unique
+  // exams, not repeated rows, or a single exam would be labeled as a duplicate.
+  const uniqueRecords = new Map<string, T>();
+  for (const record of records) uniqueRecords.set(record.examId, record);
+
+  const byTitle = new Map<string, T[]>();
+  for (const record of uniqueRecords.values()) {
     const title = record.title ?? record.examId;
-    counts.set(title, (counts.get(title) ?? 0) + 1);
+    const group = byTitle.get(title) ?? [];
+    group.push(record);
+    byTitle.set(title, group);
   }
 
   const result = new Map<string, string>();
-  for (const record of records) {
-    const title = record.title ?? record.examId;
-    if ((counts.get(title) ?? 0) < 2) {
-      result.set(record.examId, title);
-      continue;
+  for (const [title, group] of byTitle) {
+    if (group.length === 1) {
+      result.set(group[0].examId, title);
+    } else {
+      // Use IDs rather than dates: duplicate exams may have identical creation
+      // timestamps, but their IDs still identify the records.
+      let suffixLength = Math.min(6, ...group.map((record) => record.examId.length));
+      const suffixes = () => group.map((record) => record.examId.slice(-suffixLength));
+      while (new Set(suffixes()).size !== group.length && suffixLength < Math.max(...group.map((record) => record.examId.length))) {
+        suffixLength++;
+      }
+      for (const record of group) {
+        result.set(record.examId, `${title} · ${record.examId.slice(-suffixLength)}`);
+      }
     }
-
-    const suffix = shortDate(record.createdAt) ?? record.examId.slice(-6);
-    result.set(record.examId, `${title} · ${suffix}`);
   }
   return result;
 }

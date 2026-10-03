@@ -888,14 +888,18 @@ const PREP_STATUS_COLORS: Record<PrepOpsDashboard['healthStatus'], { bg: string;
   quota_wait:      { bg: 'rgba(251,191,36,0.07)',  border: 'rgba(251,191,36,0.22)',  color: '#fbbf24', icon: AlertCircle,  label: '🟡 انتظار حصة Gemini' },
   active_recovery: { bg: 'rgba(251,146,60,0.07)',  border: 'rgba(251,146,60,0.22)',  color: '#fb923c', icon: RotateCcw,    label: '🟠 استرداد نشط' },
   stalled:         { bg: 'rgba(248,113,113,0.07)', border: 'rgba(248,113,113,0.22)', color: '#f87171', icon: XCircle,      label: '🔴 التحضير متوقف' },
+  process_down:    { bg: 'rgba(248,113,113,0.07)', border: 'rgba(248,113,113,0.22)', color: '#f87171', icon: XCircle,      label: '🔴 المجدول غير مشغّل' },
+  no_active_jobs:  { bg: 'rgba(148,163,184,0.05)', border: 'rgba(148,163,184,0.12)', color: '#94a3b8', icon: CheckCircle,  label: 'لا توجد مهام نشطة' },
 };
 
 // ─── Scheduler State Panel ────────────────────────────────────────────────────
 
-const SCHED_STATUS_CFG = {
+const SCHED_STATUS_CFG: Record<PrepOpsSchedulerState['status'], { color: string; bg: string; border: string; label: string; dot: boolean }> = {
   running:      { color: '#34d399', bg: 'rgba(52,211,153,0.08)',  border: 'rgba(52,211,153,0.22)',  label: 'يُحضّر الآن', dot: true  },
   idle:         { color: '#94a3b8', bg: 'rgba(148,163,184,0.05)', border: 'rgba(148,163,184,0.12)', label: 'خامل',        dot: false },
   quota_paused: { color: '#fbbf24', bg: 'rgba(251,191,36,0.07)',  border: 'rgba(251,191,36,0.20)',  label: 'انتظار حصة', dot: false },
+  process_down: { color: '#f87171', bg: 'rgba(248,113,113,0.07)', border: 'rgba(248,113,113,0.22)', label: 'المجدول متوقف', dot: false },
+  no_active_jobs: { color: '#94a3b8', bg: 'rgba(148,163,184,0.05)', border: 'rgba(148,163,184,0.12)', label: 'لا توجد مهام نشطة', dot: false },
 };
 
 function SchedulerStatePanel({ scheduler }: { scheduler: PrepOpsSchedulerState }) {
@@ -924,6 +928,12 @@ function SchedulerStatePanel({ scheduler }: { scheduler: PrepOpsSchedulerState }
           {cfg.label}
         </span>
       </div>
+      {(scheduler.reason || scheduler.runtime.lastTickError) && (
+        <p className="text-[10px] text-slate-500 mb-3 text-right break-words" dir="rtl">
+          {scheduler.reason}
+          {scheduler.runtime.lastTickError && <span className="text-rose-400"> · آخر خطأ: {scheduler.runtime.lastTickError}</span>}
+        </p>
+      )}
 
       {/* Active exam */}
       {activeExam ? (
@@ -934,31 +944,39 @@ function SchedulerStatePanel({ scheduler }: { scheduler: PrepOpsSchedulerState }
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5 mb-0.5">
                 <ZapIcon size={11} className="text-emerald-400 flex-shrink-0" />
-                <p className="text-[11px] font-bold text-emerald-400">نشط الآن</p>
+                <p className="text-[11px] font-bold text-emerald-400">
+                  {activeExam.status === 'running' ? 'نشط الآن' : activeExam.status === 'paused' ? 'متوقف مؤقتاً' : 'في الانتظار'}
+                </p>
                 <span className="text-[9px] rounded-full px-1.5 py-px"
                   style={{ background: 'rgba(167,139,250,0.12)', color: '#a78bfa', border: '1px solid rgba(167,139,250,0.2)' }}
                 >
                   أولوية {activeExam.priority}
                 </span>
               </div>
-              <p className="text-xs font-semibold text-white truncate">{activeExam.examTitle}</p>
+              <p className="text-xs font-semibold text-white break-words">{activeExam.examTitle}</p>
             </div>
-            <span className="text-xl font-black flex-shrink-0" style={{ color: activeExam.progressPct >= 80 ? '#34d399' : '#f59e0b' }}>
-              {activeExam.progressPct}%
-            </span>
+            {activeExam.totalQuestions > 0 ? (
+              <span className="text-xl font-black flex-shrink-0" style={{ color: activeExam.progressPct >= 80 ? '#34d399' : '#f59e0b' }}>
+                {activeExam.progressPct}%
+              </span>
+            ) : (
+              <span className="text-[10px] text-slate-500 flex-shrink-0">جارٍ حساب الأسئلة</span>
+            )}
           </div>
 
           {/* Progress bar */}
-          <div className="h-2 w-full rounded-full bg-white/[0.06] overflow-hidden mb-2">
-            <motion.div className="h-full rounded-full"
-              style={{ background: activeExam.progressPct >= 80 ? '#34d399' : activeExam.progressPct >= 40 ? '#f59e0b' : '#f87171' }}
-              initial={{ width: 0 }}
-              animate={{ width: `${activeExam.progressPct}%` }}
-              transition={{ duration: 0.7, ease: 'easeOut' }}
-            />
-          </div>
+          {activeExam.totalQuestions > 0 && (
+            <div className="h-2 w-full rounded-full bg-white/[0.06] overflow-hidden mb-2">
+              <motion.div className="h-full rounded-full"
+                style={{ background: activeExam.progressPct >= 80 ? '#34d399' : activeExam.progressPct >= 40 ? '#f59e0b' : '#f87171' }}
+                initial={{ width: 0 }}
+                animate={{ width: `${activeExam.progressPct}%` }}
+                transition={{ duration: 0.7, ease: 'easeOut' }}
+              />
+            </div>
+          )}
 
-          <div className="grid grid-cols-3 gap-2 text-center" dir="rtl">
+          {activeExam.totalQuestions > 0 ? <div className="grid grid-cols-3 gap-2 text-center" dir="rtl">
             <div>
               <p className="text-xs font-black text-white">{activeExam.readyQuestions}</p>
               <p className="text-[9px] text-slate-500">مكتمل</p>
@@ -973,7 +991,7 @@ function SchedulerStatePanel({ scheduler }: { scheduler: PrepOpsSchedulerState }
               <p className="text-xs font-black text-white">{activeExam.totalQuestions}</p>
               <p className="text-[9px] text-slate-500">الإجمالي</p>
             </div>
-          </div>
+          </div> : null}
         </div>
       ) : (
         <div className="flex items-center justify-center gap-2 rounded-xl py-5 mb-3"
@@ -992,6 +1010,7 @@ function SchedulerStatePanel({ scheduler }: { scheduler: PrepOpsSchedulerState }
           {queueOrder.slice(0, 5).map((entry, idx) => {
             const isActive  = entry.status === 'running';
             const pctColor  = entry.progressPct >= 80 ? '#34d399' : entry.progressPct >= 40 ? '#f59e0b' : '#94a3b8';
+            const statusLabel = entry.status === 'running' ? 'يعمل' : entry.status === 'paused' ? 'موقوف' : 'انتظار';
             return (
               <div key={entry.jobId}
                 className="flex items-center gap-2 rounded-lg px-2.5 py-2"
@@ -1008,27 +1027,34 @@ function SchedulerStatePanel({ scheduler }: { scheduler: PrepOpsSchedulerState }
 
                 {/* Title + mini bar */}
                 <div className="flex-1 min-w-0" dir="rtl">
-                  <p className="text-[11px] font-medium truncate"
+                  <p className="text-[11px] font-medium break-words"
                     style={{ color: isActive ? '#fff' : '#94a3b8' }}>
                     {entry.examTitle}
                   </p>
-                  <div className="flex items-center gap-2 mt-0.5">
-                    <div className="flex-1 h-1 rounded-full bg-white/[0.06] overflow-hidden">
-                      <div className="h-full rounded-full" style={{ width: `${entry.progressPct}%`, background: pctColor }} />
+                  <span className="text-[8px] text-slate-500">{statusLabel}</span>
+                  {entry.totalQuestions > 0 ? (
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <div className="flex-1 h-1 rounded-full bg-white/[0.06] overflow-hidden">
+                        <div className="h-full rounded-full" style={{ width: `${entry.progressPct}%`, background: pctColor }} />
+                      </div>
+                      <span className="text-[9px] font-bold flex-shrink-0" style={{ color: pctColor }}>
+                        {entry.progressPct}%
+                      </span>
                     </div>
-                    <span className="text-[9px] font-bold flex-shrink-0" style={{ color: pctColor }}>
-                      {entry.progressPct}%
-                    </span>
-                  </div>
+                  ) : (
+                    <p className="text-[9px] text-slate-500 mt-0.5">جارٍ حساب الأسئلة</p>
+                  )}
                 </div>
 
                 {/* Remaining */}
-                <div className="text-right flex-shrink-0" dir="rtl">
-                  <p className="text-[10px] font-bold" style={{ color: entry.remainingQuestions > 0 ? '#f59e0b' : '#34d399' }}>
-                    {entry.remainingQuestions}
-                  </p>
-                  <p className="text-[8px] text-slate-600">متبقي</p>
-                </div>
+                {entry.totalQuestions > 0 && (
+                  <div className="text-right flex-shrink-0" dir="rtl">
+                    <p className="text-[10px] font-bold" style={{ color: entry.remainingQuestions > 0 ? '#f59e0b' : '#34d399' }}>
+                      {entry.remainingQuestions}
+                    </p>
+                    <p className="text-[8px] text-slate-600">متبقي</p>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -1044,9 +1070,11 @@ function SchedulerStatePanel({ scheduler }: { scheduler: PrepOpsSchedulerState }
           <ArrowRight size={12} className="text-blue-400 flex-shrink-0 rotate-180" />
           <div className="flex-1 min-w-0">
             <p className="text-[10px] text-slate-500">التالي في الانتظار</p>
-            <p className="text-[11px] font-semibold text-slate-300 truncate">{nextExamPreview.examTitle}</p>
+            <p className="text-[11px] font-semibold text-slate-300 break-words">{nextExamPreview.examTitle}</p>
           </div>
-          <span className="text-[10px] font-bold text-blue-400 flex-shrink-0">{nextExamPreview.progressPct}%</span>
+          <span className="text-[10px] font-bold text-blue-400 flex-shrink-0">
+            {nextExamPreview.totalQuestions > 0 ? `${nextExamPreview.progressPct}%` : 'جارٍ الحساب'}
+          </span>
         </div>
       )}
     </GlassPanel>
@@ -1189,11 +1217,11 @@ function PrepOpsSection({ data, lastRefresh }: { data: PrepOpsDashboard; lastRef
 
       {/* ── Running Jobs ──────────────────────────────────────────────── */}
       <GlassPanel>
-        <SectionTitle icon={CpuIcon} title={`المهام الجارية (${runningJobs.length})`} color="#f59e0b" />
+        <SectionTitle icon={CpuIcon} title={`مهام التحضير (${runningJobs.length})`} color="#f59e0b" />
         {runningJobs.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-6" dir="rtl">
             <CheckCircle size={20} className="text-emerald-400" />
-            <p className="text-xs text-slate-500">لا توجد مهام نشطة</p>
+            <p className="text-xs text-slate-500">لا توجد مهام تحضير نشطة أو منتظرة</p>
           </div>
         ) : (
           <div className="space-y-2.5">
@@ -1203,7 +1231,7 @@ function PrepOpsSection({ data, lastRefresh }: { data: PrepOpsDashboard; lastRef
               >
                 <div className="flex items-start justify-between gap-2 mb-2" dir="rtl">
                   <div className="min-w-0 flex-1">
-                    <p className="text-xs font-semibold text-white truncate">{job.examTitle}</p>
+                    <p className="text-xs font-semibold text-white break-words">{job.examTitle}</p>
                     <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                       <span className="text-[9px] rounded-full px-1.5 py-px font-medium"
                         style={{ background: 'rgba(245,158,11,0.12)', color: '#f59e0b' }}
@@ -1211,20 +1239,26 @@ function PrepOpsSection({ data, lastRefresh }: { data: PrepOpsDashboard; lastRef
                       {job.workerId && <span className="text-[9px] text-slate-600 font-mono truncate max-w-[80px]">{job.workerId.slice(0, 12)}…</span>}
                     </div>
                   </div>
-                  <span className="text-sm font-black flex-shrink-0" style={{ color: job.progressPct >= 80 ? '#34d399' : '#f59e0b' }}>
-                    {job.progressPct}%
-                  </span>
+                  {job.progressState === 'ready' ? (
+                    <span className="text-sm font-black flex-shrink-0" style={{ color: job.progressPct >= 80 ? '#34d399' : '#f59e0b' }}>
+                      {job.progressPct}%
+                    </span>
+                  ) : (
+                    <span className="text-[10px] text-slate-500 flex-shrink-0">جارٍ حساب الأسئلة</span>
+                  )}
                 </div>
                 {/* Progress bar */}
-                <div className="h-1.5 w-full rounded-full bg-white/[0.06] overflow-hidden mb-1.5">
-                  <motion.div className="h-full rounded-full"
-                    style={{ background: job.progressPct >= 80 ? '#34d399' : '#f59e0b' }}
-                    initial={{ width: 0 }} animate={{ width: `${job.progressPct}%` }}
-                    transition={{ duration: 0.6, ease: 'easeOut' }}
-                  />
-                </div>
+                {job.progressState === 'ready' && (
+                  <div className="h-1.5 w-full rounded-full bg-white/[0.06] overflow-hidden mb-1.5">
+                    <motion.div className="h-full rounded-full"
+                      style={{ background: job.progressPct >= 80 ? '#34d399' : '#f59e0b' }}
+                      initial={{ width: 0 }} animate={{ width: `${job.progressPct}%` }}
+                      transition={{ duration: 0.6, ease: 'easeOut' }}
+                    />
+                  </div>
+                )}
                 <div className="flex items-center justify-between text-[9px] text-slate-600" dir="rtl">
-                  <span>{job.readyQuestions} / {job.totalQuestions} سؤال</span>
+                  <span>{job.progressState === 'ready' ? `${job.readyQuestions} / ${job.totalQuestions} سؤال` : 'جارٍ حساب عدد الأسئلة'}</span>
                   {job.heartbeat && <span>نبضة: {timeAgo(job.heartbeat)}</span>}
                 </div>
               </div>
@@ -1281,7 +1315,7 @@ function PrepOpsSection({ data, lastRefresh }: { data: PrepOpsDashboard; lastRef
                 return (
                   <tr key={row.examId} className="border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors">
                     <td className="py-2 pr-1 text-right">
-                      <p className="text-white font-medium leading-tight truncate max-w-[110px]">{row.title}</p>
+                      <p className="text-white font-medium leading-tight break-words max-w-[170px]">{row.title}</p>
                       <p className="text-slate-600 text-[9px]">{row.totalQuestions} سؤال</p>
                     </td>
                     <td className="text-center py-2 px-1 text-slate-400">{row.mcqQuestions}</td>
@@ -1290,7 +1324,11 @@ function PrepOpsSection({ data, lastRefresh }: { data: PrepOpsDashboard; lastRef
                     <td className="text-center py-2 px-1 font-bold" style={{ color: '#fb923c' }}>{row.lowEvidence}</td>
                     <td className="text-center py-2 px-1 font-bold" style={{ color: '#f87171' }}>{row.permanentLow}</td>
                     <td className="text-center py-2 px-1">
-                      <span className="font-black text-sm" style={{ color: pctColor }}>{row.completionPct}%</span>
+                      {row.progressState === 'ready' ? (
+                        <span className="font-black text-sm" style={{ color: pctColor }}>{row.completionPct}%</span>
+                      ) : (
+                        <span className="text-[9px] text-slate-500">جارٍ الحساب</span>
+                      )}
                     </td>
                     <td className="text-center py-2 px-1">
                       <span className="rounded-full px-1.5 py-px text-[9px] font-medium"

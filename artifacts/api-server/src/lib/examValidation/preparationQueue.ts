@@ -348,7 +348,7 @@ export interface QueueOrderEntry {
  */
 export async function getOrderedQueueSnapshot(limit = 20): Promise<QueueOrderEntry[]> {
   const pool = getSharedPool();
-  const { rows } = await pool.query<DbRow & { exam_title: string | null }>(
+  const { rows } = await pool.query<DbRow & { exam_title: string | null; exam_created_at: Date | null }>(
     `SELECT j.*, r.title AS exam_title
             ,r.created_at AS exam_created_at
      FROM public.exam_preparation_jobs j

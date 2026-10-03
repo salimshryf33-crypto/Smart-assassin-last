@@ -200,6 +200,7 @@ export interface PrepOpsExamRow {
   processing:        number;
   invalid:           number;
   completionPct:     number;
+  progressState:     'ready' | 'calculating';
   preparationStatus: string;
   lastUpdated:       string | null;
 }
@@ -249,7 +250,15 @@ export interface PrepOpsSchedulerState {
   reason?:        string;
   activeExam:     PrepOpsSchedulerActiveExam | null;
   queueOrder:     PrepOpsQueueOrderEntry[];
-  nextExamPreview: { examId: string; examTitle: string; progressPct: number } | null;
+  nextExamPreview: { examId: string; examTitle: string; progressPct: number; totalQuestions: number } | null;
+  runtime: {
+    processRunning: boolean;
+    schedulerStartedAt: string | null;
+    lastTickStartedAt: string | null;
+    lastTickCompletedAt: string | null;
+    lastTickError: string | null;
+    quotaPausedUntil: string | null;
+  };
 }
 
 export interface PrepOpsDashboard {

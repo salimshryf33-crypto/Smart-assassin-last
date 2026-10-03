@@ -47,6 +47,7 @@ import {
 import { syncPreparationStatus }            from './examPreparationStatus';
 
 const SCHEDULER_INTERVAL_MS = 5 * 60 * 1_000;   // 5 minutes
+const QUOTA_RESUME_GRACE_MS = 5_000;             // allow the UTC quota reset to settle
 const MAX_EXAMS_PER_TICK    = 50;                 // safety cap — prevents infinite loop if
                                                   // many exams each have 0 eligible questions
 
@@ -245,6 +246,9 @@ async function runRetryTick(): Promise<void> {
       { examsProcessed },
       'retryScheduler: sequential tick complete',
     );
+  } catch (err) {
+    lastTickError = err instanceof Error ? err.message : String(err);
+    throw err;
   } finally {
     running = false;
     lastTickCompletedAt = new Date();
