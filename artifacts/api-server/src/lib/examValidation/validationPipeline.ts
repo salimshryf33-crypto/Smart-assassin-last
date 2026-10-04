@@ -47,6 +47,7 @@ import { withExamLock, updateHeartbeat } from './validationLock';
 import {
   shouldGiveUp,
   computeNextRetryAt,
+  isRetryableInferenceFailure,
 }                                 from './retryPolicy';
 import { logAuditEvent }          from '../observability/auditLogger';
 import { recordSample }           from '../observability/metricsCollector';
@@ -164,7 +165,11 @@ async function _runValidation(examId: string): Promise<void> {
   if (!job || !['pending','running','paused'].includes(job.status)) {
     job = await enqueueExam(examId, 5);
   }
-  await claimJob(job.id, `prep-${process.pid}`);
+  const claimed = await claimJob(job.id, `prep-${process.pid}`);
+  if (!claimed) {
+    logger.info({ examId, jobId: job.id }, 'validationPipeline: skipped — job is already claimed');
+    return;
+  }
   const jobId = job.id;
 
   // ── Heartbeat: update every HEARTBEAT_INTERVAL_MS while pipeline runs ─────
@@ -172,7 +177,14 @@ async function _runValidation(examId: string): Promise<void> {
     updateHeartbeat(jobId).catch(() => undefined);
   }, HEARTBEAT_INTERVAL_MS);
 
-  const questions = await loadQuestions(examId);
+  let questions: PipelineQuestion[];
+  try {
+    questions = await loadQuestions(examId);
+  } catch (err) {
+    clearInterval(heartbeatTimer);
+    await pauseJob(jobId, 'PipelineError').catch(() => undefined);
+    throw err;
+  }
   if (questions.length === 0) {
     logger.info({ examId }, 'validationPipeline: no questions found — skipping');
     clearInterval(heartbeatTimer);
@@ -345,6 +357,9 @@ async function _runValidation(examId: string): Promise<void> {
         await updateProgress(jobId, partialProgress.readyQuestions, partialProgress.totalQuestions).catch(() => undefined);
       }
       await pauseJob(jobId, 'DailyQuotaExhausted').catch(() => undefined);
+    } else {
+      logger.error({ err, examId, jobId }, 'validationPipeline: unexpected failure; job paused for safe retry');
+      await pauseJob(jobId, 'PipelineError').catch(() => undefined);
     }
     throw err;
   } finally {
@@ -425,15 +440,10 @@ async function processQuestion(
   const retrievalMs = Date.now() - retrievalStartedAt;
 
   if (evidence.retrievalStatus === 'NONE') {
-    const newAttemptCount = currentAttemptCount + 1;
-    const giveUp          = shouldGiveUp(newAttemptCount);
-    const nextRetryAt     = giveUp ? null : computeNextRetryAt(newAttemptCount);
-    const finalStatus: ValidationStatus = giveUp
-      ? 'PERMANENT_LOW_EVIDENCE'
-      : 'LOW_EVIDENCE';
+    const finalStatus: ValidationStatus = 'PERMANENT_LOW_EVIDENCE';
 
     logger.warn(
-      { questionId, subject: question.subject, grade: question.grade, newAttemptCount, giveUp },
+      { questionId, subject: question.subject, grade: question.grade },
       `validationPipeline: no evidence found → ${finalStatus}`,
     );
     await store.upsert({
@@ -445,16 +455,16 @@ async function processQuestion(
       evidencePages:    [],
       validationStatus: finalStatus,
       retrievalVersion: 1,
-      attemptCount:     newAttemptCount,
-      lastAttemptAt:    new Date(),
-      nextRetryAt,
+      attemptCount:     currentAttemptCount,
+      lastAttemptAt:    existing?.lastAttemptAt ?? null,
+      nextRetryAt:      null,
       verified:         false,
     });
-    recordSample({ validationMs: Date.now() - startedAt, retrievalMs, outcome: giveUp ? 'invalid' : 'retry' });
+    recordSample({ validationMs: Date.now() - startedAt, retrievalMs, outcome: 'invalid' });
     logAuditEvent({
       examId: question.examId, questionId, event: 'validation_no_evidence',
       severity: 'warn', durationMs: Date.now() - startedAt,
-      payload: { finalStatus, newAttemptCount, giveUp },
+      payload: { finalStatus, attemptCount: currentAttemptCount },
     });
     return;
   }
@@ -491,7 +501,32 @@ async function processQuestion(
     derivation = await deriveCanonicalAnswer(question, evidence.topChunks);
   } catch (err) {
     if (err instanceof DailyQuotaExhaustedError) throw err;  // propagate
-    logger.error({ err, questionId }, 'validationPipeline: derivation error');
+    if (!isRetryableInferenceFailure(err)) {
+      const failedAttemptCount = currentAttemptCount + 1;
+      logger.error({ err, questionId }, 'validationPipeline: permanent inference error; not retrying');
+      await store.upsert({
+        questionId,
+        correctOption:    null,
+        confidence:       null,
+        reasoningSummary: 'Permanent Gemini inference failure',
+        evidenceChunkIds: evidence.chunkIds,
+        evidencePages:    evidence.pages,
+        validationStatus: 'PERMANENT_LOW_EVIDENCE',
+        retrievalVersion: 1,
+        attemptCount:     failedAttemptCount,
+        lastAttemptAt:    new Date(),
+        nextRetryAt:      null,
+        verified:         false,
+      });
+      recordSample({ validationMs: Date.now() - startedAt, retrievalMs, outcome: 'invalid' });
+      logAuditEvent({
+        examId: question.examId, questionId, event: 'validation_inference_permanent_failure',
+        severity: 'error', durationMs: Date.now() - startedAt,
+        payload: { status: 'PERMANENT_LOW_EVIDENCE', attemptCount: failedAttemptCount },
+      });
+      return;
+    }
+    logger.warn({ err, questionId }, 'validationPipeline: transient inference error; retry scheduled');
     derivation = null;
   }
   const geminiMs = Date.now() - geminiStartedAt;
@@ -561,11 +596,7 @@ async function processQuestion(
       payload: { confidence: derivation.confidence },
     });
   } else {
-    const giveUp      = shouldGiveUp(newAttemptCount);
-    const nextRetryAt = giveUp ? null : computeNextRetryAt(newAttemptCount);
-    const finalStatus: ValidationStatus = giveUp
-      ? 'PERMANENT_LOW_EVIDENCE'
-      : 'LOW_EVIDENCE';
+    const finalStatus: ValidationStatus = 'PERMANENT_LOW_EVIDENCE';
 
     await store.upsert({
       questionId,
@@ -578,7 +609,7 @@ async function processQuestion(
       retrievalVersion: 1,
       attemptCount:     newAttemptCount,
       lastAttemptAt:    new Date(),
-      nextRetryAt,
+      nextRetryAt:      null,
       verified:         false,
     });
 
@@ -589,15 +620,14 @@ async function processQuestion(
         threshold:  CONFIDENCE_THRESHOLD,
         newAttemptCount,
         finalStatus,
-        nextRetryAt,
       },
       `validationPipeline: confidence below threshold → ${finalStatus}`,
     );
-    recordSample({ validationMs: Date.now() - startedAt, retrievalMs, geminiMs, outcome: giveUp ? 'invalid' : 'retry' });
+    recordSample({ validationMs: Date.now() - startedAt, retrievalMs, geminiMs, outcome: 'invalid' });
     logAuditEvent({
       examId: question.examId, questionId, event: 'validation_low_confidence',
       severity: 'warn', durationMs: Date.now() - startedAt,
-      payload: { confidence: derivation.confidence, finalStatus, newAttemptCount, giveUp },
+      payload: { confidence: derivation.confidence, finalStatus, newAttemptCount },
     });
   }
 }
@@ -616,13 +646,10 @@ async function processOpenQuestion(
   const evidence = retrieveEvidence(question);
 
   if (evidence.retrievalStatus === 'NONE') {
-    const newAttemptCount = currentAttemptCount + 1;
-    const giveUp          = shouldGiveUp(newAttemptCount);
-    const nextRetryAt     = giveUp ? null : computeNextRetryAt(newAttemptCount);
-    const finalStatus     = giveUp ? 'PERMANENT_LOW_EVIDENCE' : 'LOW_EVIDENCE';
+    const finalStatus = 'PERMANENT_LOW_EVIDENCE';
 
     logger.warn(
-      { questionId, questionType: question.questionType, newAttemptCount, giveUp },
+      { questionId, questionType: question.questionType },
       `validationPipeline(open): no evidence → ${finalStatus}`,
     );
 
@@ -636,9 +663,9 @@ async function processOpenQuestion(
       evidenceChunkIds:  [],
       evidencePages:     [],
       reasoningSummary:  'No curriculum evidence found',
-      attemptCount:      newAttemptCount,
-      lastAttemptAt:     new Date(),
-      nextRetryAt,
+      attemptCount:      currentAttemptCount,
+      lastAttemptAt:     existing?.lastAttemptAt ?? null,
+      nextRetryAt:       null,
       retrievalVersion:  1,
     });
     return;
@@ -667,7 +694,27 @@ async function processOpenQuestion(
     derivation = await deriveOpenPreparation(question, evidence.topChunks);
   } catch (err) {
     if (err instanceof DailyQuotaExhaustedError) throw err;  // propagate
-    logger.error({ err, questionId }, 'validationPipeline(open): derivation error');
+    if (!isRetryableInferenceFailure(err)) {
+      const failedAttemptCount = currentAttemptCount + 1;
+      logger.error({ err, questionId }, 'validationPipeline(open): permanent inference error; not retrying');
+      await openStore.upsert({
+        questionId,
+        examId:            question.examId,
+        questionType:      question.questionType,
+        preparationStatus: 'PERMANENT_LOW_EVIDENCE',
+        package:           null,
+        confidence:        null,
+        evidenceChunkIds:  evidence.chunkIds,
+        evidencePages:     evidence.pages,
+        reasoningSummary:  'Permanent Gemini inference failure',
+        attemptCount:      failedAttemptCount,
+        lastAttemptAt:     new Date(),
+        nextRetryAt:       null,
+        retrievalVersion:  1,
+      });
+      return;
+    }
+    logger.warn({ err, questionId }, 'validationPipeline(open): transient inference error; retry scheduled');
     derivation = null;
   }
 
@@ -720,9 +767,7 @@ async function processOpenQuestion(
       'validationPipeline(open): question READY — package stored',
     );
   } else {
-    const giveUp      = shouldGiveUp(newAttemptCount);
-    const nextRetryAt = giveUp ? null : computeNextRetryAt(newAttemptCount);
-    const finalStatus = giveUp ? 'PERMANENT_LOW_EVIDENCE' : 'LOW_EVIDENCE';
+    const finalStatus = 'PERMANENT_LOW_EVIDENCE';
 
     await openStore.upsert({
       questionId,
@@ -736,7 +781,7 @@ async function processOpenQuestion(
       reasoningSummary:  derivation.reasoning,
       attemptCount:      newAttemptCount,
       lastAttemptAt:     new Date(),
-      nextRetryAt,
+      nextRetryAt:       null,
       retrievalVersion:  1,
     });
     logger.warn(

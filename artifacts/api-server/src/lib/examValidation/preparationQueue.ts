@@ -18,8 +18,12 @@
 import { getSharedPool } from '../dbPool';
 import { logger }        from '../logger';
 import { v4 as uuidv4 } from 'uuid';
-import { getLivePreparationProgress } from './livePreparationProgress';
+import {
+  getLivePreparationProgressForExams,
+  type LivePreparationProgress,
+} from './livePreparationProgress';
 import { disambiguateExamTitles } from './examDisplay';
+import { PREPARATION_REQUIRED_TYPES } from '../questionTypeRegistry';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -51,7 +55,8 @@ export interface PreparationJob {
 /**
  * Enqueue an exam for preparation.
  * Idempotent: if an active job already exists for this exam, returns it unchanged.
- * If a completed/failed job exists, inserts a fresh one.
+ * Reuses the newest terminal job when work becomes eligible again, preserving
+ * its progress snapshot and history rather than adding duplicate rows.
  */
 export async function enqueueExam(
   examId:   string,
@@ -69,6 +74,36 @@ export async function enqueueExam(
   if (existing[0]) {
     logger.debug({ examId, status: existing[0].status }, 'preparationQueue: job already active');
     return rowToJob(existing[0]);
+  }
+
+  const { rows: reopened } = await pool.query<DbRow>(
+    `UPDATE public.exam_preparation_jobs
+     SET status = 'pending',
+         priority = $2,
+         worker_id = NULL,
+         heartbeat = NULL,
+         updated_at = NOW()
+     WHERE id = (
+       SELECT id
+       FROM public.exam_preparation_jobs
+       WHERE exam_id = $1 AND status IN ('completed','failed')
+       ORDER BY created_at DESC
+       LIMIT 1
+       FOR UPDATE
+     )
+       AND NOT EXISTS (
+         SELECT 1 FROM public.exam_preparation_jobs
+         WHERE exam_id = $1 AND status IN ('pending','running','paused')
+       )
+     RETURNING *`,
+    [examId, priority],
+  );
+  if (reopened[0]) {
+    logger.info(
+      { examId, priority, jobId: reopened[0].id },
+      'preparationQueue: reused terminal job for newly eligible work',
+    );
+    return rowToJob(reopened[0]);
   }
 
   const id = uuidv4();
@@ -205,7 +240,11 @@ export async function pauseJob(jobId: string, reason?: string): Promise<void> {
   const pool = getSharedPool();
   await pool.query(
     `UPDATE public.exam_preparation_jobs
-     SET status = 'paused', last_error = $2, updated_at = NOW()
+     SET status = 'paused',
+         last_error = $2,
+         worker_id = NULL,
+         heartbeat = NULL,
+         updated_at = NOW()
      WHERE id = $1`,
     [jobId, reason ?? null],
   );
@@ -224,7 +263,7 @@ export async function recoverStaleJobs(): Promise<number> {
 
   const { rows } = await pool.query<{ id: string; exam_id: string }>(
     `UPDATE public.exam_preparation_jobs
-     SET status = 'paused', worker_id = NULL, updated_at = NOW()
+     SET status = 'paused', worker_id = NULL, heartbeat = NULL, updated_at = NOW()
      WHERE status = 'running'
        AND (heartbeat IS NULL OR heartbeat < $1)
      RETURNING id, exam_id`,
@@ -247,7 +286,9 @@ export async function getJobByExamId(examId: string): Promise<PreparationJob | n
   const { rows } = await pool.query<DbRow>(
     `SELECT * FROM public.exam_preparation_jobs
      WHERE exam_id = $1
-     ORDER BY created_at DESC LIMIT 1`,
+     ORDER BY CASE WHEN status IN ('pending','running','paused') THEN 0 ELSE 1 END,
+              created_at DESC
+     LIMIT 1`,
     [examId],
   );
   return rows[0] ? rowToJob(rows[0]) : null;
@@ -260,6 +301,24 @@ export interface QueueOverview {
   completed: number;
   failed:    number;
   total:     number;
+}
+
+export interface PreparationQueueSortCandidate {
+  status: string;
+  priority: number;
+  progressPct: number;
+  createdAt: Date | string;
+}
+
+export function comparePreparationQueueCandidates(
+  a: PreparationQueueSortCandidate,
+  b: PreparationQueueSortCandidate,
+): number {
+  const runningDiff = Number(b.status === 'running') - Number(a.status === 'running');
+  if (runningDiff !== 0) return runningDiff;
+  if (a.priority !== b.priority) return a.priority - b.priority;
+  if (a.progressPct !== b.progressPct) return b.progressPct - a.progressPct;
+  return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
 }
 
 export async function getQueueOverview(): Promise<QueueOverview> {
@@ -302,7 +361,9 @@ export async function listPendingJobs(limit = 50): Promise<PreparationJob[]> {
  *   3. Ready % DESC        — most-complete exam first (finish it fastest)
  *   4. Created-at ASC      — oldest first as tiebreaker
  */
-export async function getNextExamForSequentialScheduler(): Promise<PreparationJob | null> {
+export async function getNextExamForSequentialScheduler(
+  sharedProgress?: ReadonlyMap<string, LivePreparationProgress>,
+): Promise<PreparationJob | null> {
   const pool = getSharedPool();
   const { rows } = await pool.query<DbRow>(
     `SELECT * FROM public.exam_preparation_jobs
@@ -311,19 +372,25 @@ export async function getNextExamForSequentialScheduler(): Promise<PreparationJo
   );
   if (!rows[0]) return null;
 
-  const candidates = await Promise.all(rows.map(async (row) => ({
-    row,
-    progress: await getLivePreparationProgress(row.exam_id),
-  })));
-  candidates.sort((a, b) => {
-    const runningDiff = Number(b.row.status === 'running') - Number(a.row.status === 'running');
-    if (runningDiff !== 0) return runningDiff;
-    if (a.row.priority !== b.row.priority) return a.row.priority - b.row.priority;
-    if (a.progress.progressPct !== b.progress.progressPct) {
-      return b.progress.progressPct - a.progress.progressPct;
-    }
-    return new Date(a.row.created_at).getTime() - new Date(b.row.created_at).getTime();
-  });
+  const progressByExam = await withProgressForRows(rows, sharedProgress);
+  const candidates = rows
+    .map((row) => ({ row, progress: progressByExam.get(row.exam_id)! }))
+    .filter(({ row, progress }) => row.status === 'running' || progress.retryableQuestions > 0);
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => comparePreparationQueueCandidates(
+    {
+      status: a.row.status,
+      priority: a.row.priority,
+      progressPct: a.progress.progressPct,
+      createdAt: a.row.created_at,
+    },
+    {
+      status: b.row.status,
+      priority: b.row.priority,
+      progressPct: b.progress.progressPct,
+      createdAt: b.row.created_at,
+    },
+  ));
 
   const selected = candidates[0];
   const job = rowToJob(selected.row);
@@ -339,6 +406,10 @@ export interface QueueOrderEntry {
   examTitle: string | null;
   readyPct: number;
   remainingQuestions: number;
+  retryableQuestions: number;
+  waitingRetryQuestions: number;
+  terminalFailedQuestions: number;
+  nextEligibleAt: string | null;
   position: number;
 }
 
@@ -346,7 +417,10 @@ export interface QueueOrderEntry {
  * Returns the full ordered queue for dashboard display.
  * Same ordering as getNextExamForSequentialScheduler.
  */
-export async function getOrderedQueueSnapshot(limit = 20): Promise<QueueOrderEntry[]> {
+export async function getOrderedQueueSnapshot(
+  limit = 20,
+  sharedProgress?: ReadonlyMap<string, LivePreparationProgress>,
+): Promise<QueueOrderEntry[]> {
   const pool = getSharedPool();
   const { rows } = await pool.query<DbRow & { exam_title: string | null; exam_created_at: Date | null }>(
     `SELECT j.*, r.title AS exam_title
@@ -362,9 +436,10 @@ export async function getOrderedQueueSnapshot(limit = 20): Promise<QueueOrderEnt
     title: row.exam_title,
     createdAt: row.exam_created_at,
   })));
-  const entries = await Promise.all(rows.map(async (row) => {
+  const progressByExam = await withProgressForRows(rows, sharedProgress);
+  const entries = rows.map((row) => {
     const job       = rowToJob(row);
-    const progress  = await getLivePreparationProgress(row.exam_id);
+    const progress  = progressByExam.get(row.exam_id)!;
     job.totalQuestions = progress.totalQuestions;
     job.readyQuestions = progress.readyQuestions;
     return {
@@ -372,23 +447,38 @@ export async function getOrderedQueueSnapshot(limit = 20): Promise<QueueOrderEnt
       examTitle:          titles.get(row.exam_id) ?? row.exam_title,
       readyPct:           progress.progressPct,
       remainingQuestions: progress.remainingQuestions,
+      retryableQuestions: progress.retryableQuestions,
+      waitingRetryQuestions: progress.waitingRetryQuestions,
+      terminalFailedQuestions: progress.terminalFailedQuestions,
+      nextEligibleAt: progress.nextEligibleAt,
       createdAt:          new Date(row.created_at).getTime(),
     };
-  }));
-
-  entries.sort((a, b) => {
-    const runningDiff = Number(b.job.status === 'running') - Number(a.job.status === 'running');
-    if (runningDiff !== 0) return runningDiff;
-    if (a.job.priority !== b.job.priority) return a.job.priority - b.job.priority;
-    if (a.readyPct !== b.readyPct) return b.readyPct - a.readyPct;
-    return a.createdAt - b.createdAt;
   });
+
+  entries.sort((a, b) => comparePreparationQueueCandidates(
+    {
+      status: a.job.status,
+      priority: a.job.priority,
+      progressPct: a.readyPct,
+      createdAt: a.createdAt,
+    },
+    {
+      status: b.job.status,
+      priority: b.job.priority,
+      progressPct: b.readyPct,
+      createdAt: b.createdAt,
+    },
+  ));
 
   return entries.slice(0, limit).map((entry, index) => ({
     job: entry.job,
     examTitle: entry.examTitle,
     readyPct: entry.readyPct,
     remainingQuestions: entry.remainingQuestions,
+    retryableQuestions: entry.retryableQuestions,
+    waitingRetryQuestions: entry.waitingRetryQuestions,
+    terminalFailedQuestions: entry.terminalFailedQuestions,
+    nextEligibleAt: entry.nextEligibleAt,
     position: index + 1,
   }));
 }
@@ -396,58 +486,54 @@ export async function getOrderedQueueSnapshot(limit = 20): Promise<QueueOrderEnt
 // ─── Initialise queue from existing exams ────────────────────────────────────
 
 /**
- * On startup, ensure every exam that still has unready questions has an
- * active preparation job. Old unfinished exams get priority=1 (highest).
+ * Reconcile eligible work from the same live per-question snapshot used for
+ * progress and ordering. Future retry windows and terminal failures are not
+ * enqueued.
  */
-export async function initPreparationQueue(): Promise<void> {
+export async function reconcilePreparationQueue(): Promise<number> {
   const pool = getSharedPool();
-
-  // Find all exams that still have unready questions in EITHER preparation table:
-  //   - exam_canonical_answers: MCQ, true_false, fill_in_blank
-  //   - exam_open_preparations: short_answer, calculation, essay
-  const { rows } = await pool.query<{ exam_id: string; has_active_job: boolean }>(
-    `SELECT er.exam_id,
-            EXISTS (
-              SELECT 1 FROM public.exam_preparation_jobs epj
-              WHERE epj.exam_id = er.exam_id AND epj.status IN ('pending','running','paused')
-            ) AS has_active_job
-     FROM public.exam_records er
-     WHERE er.extraction_status = 'done'
-       AND er.question_count > 0
-       AND (
-         -- MCQ/TF still unready in canonical answers
-         EXISTS (
-           SELECT 1 FROM public.exam_questions eq
-           LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = eq.id
-           WHERE eq.exam_id = er.exam_id
-             AND eq.question_type IN ('mcq','true_false','fill_in_blank')
-             AND (ca.validation_status IS NULL OR ca.validation_status NOT IN ('READY','INVALID','PERMANENT_LOW_EVIDENCE'))
-         )
-         OR
-         -- Open-ended types still unready in open preparations
-         EXISTS (
-           SELECT 1 FROM public.exam_questions eq
-           LEFT JOIN public.exam_open_preparations op ON op.question_id = eq.id
-           WHERE eq.exam_id = er.exam_id
-             AND eq.question_type IN ('short_answer','essay','calculation')
-             AND (op.preparation_status IS NULL OR op.preparation_status NOT IN ('READY','INVALID','PERMANENT_LOW_EVIDENCE'))
-         )
-       )`,
+  const { rows } = await pool.query<{ exam_id: string }>(
+    `SELECT DISTINCT q.exam_id
+     FROM public.exam_questions q
+     JOIN public.exam_records r ON r.exam_id = q.exam_id
+     WHERE r.extraction_status = 'done'
+       AND r.question_count > 0
+       AND q.question_type = ANY($1::text[])
+     ORDER BY q.exam_id`,
+    [[...PREPARATION_REQUIRED_TYPES]],
   );
-
+  const progressByExam = await getLivePreparationProgressForExams(rows.map((row) => row.exam_id));
   let enqueued = 0;
-  for (const row of rows) {
-    if (!row.has_active_job) {
-      await enqueueExam(row.exam_id, 1); // priority 1 = backlog (highest)
+  for (const { exam_id } of rows) {
+    if ((progressByExam.get(exam_id)?.retryableQuestions ?? 0) > 0) {
+      await enqueueExam(exam_id, 1);
       enqueued++;
     }
   }
 
+  return enqueued;
+}
+
+export async function initPreparationQueue(): Promise<void> {
+  const enqueued = await reconcilePreparationQueue();
   if (enqueued > 0) {
-    logger.info({ enqueued }, 'preparationQueue: init — enqueued backlog exams');
+    logger.info({ enqueued }, 'preparationQueue: init — reconciled eligible backlog exams');
   } else {
-    logger.info('preparationQueue: init — no backlog exams');
+    logger.info('preparationQueue: init — no eligible backlog exams');
   }
+}
+
+async function withProgressForRows(
+  rows: Array<{ exam_id: string }>,
+  sharedProgress?: ReadonlyMap<string, LivePreparationProgress>,
+): Promise<Map<string, LivePreparationProgress>> {
+  const missingIds = [...new Set(rows
+    .map((row) => row.exam_id)
+    .filter((examId) => !sharedProgress?.has(examId)))];
+  const missingProgress = await getLivePreparationProgressForExams(missingIds);
+  const progressByExam = new Map(sharedProgress ?? []);
+  for (const [examId, progress] of missingProgress) progressByExam.set(examId, progress);
+  return progressByExam;
 }
 
 // ─── DB row → domain ──────────────────────────────────────────────────────────
@@ -479,7 +565,9 @@ function rowToJob(row: DbRow): PreparationJob {
     workerId:       row.worker_id,
     heartbeat:      row.heartbeat,
     startedAt:      row.started_at,
-    completedAt:    row.completed_at,
+    // Preserve the historic DB timestamp, but don't expose it as the current
+    // completion when the same job row is reactivated.
+    completedAt:    row.status === 'completed' ? row.completed_at : null,
     lastError:      row.last_error,
     createdAt:      row.created_at,
     updatedAt:      row.updated_at,

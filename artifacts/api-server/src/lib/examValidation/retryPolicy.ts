@@ -55,3 +55,67 @@ export function computeNextRetryAt(attemptCount: number): Date | null {
     RETRY_DELAYS_MS[RETRY_DELAYS_MS.length - 1]!;
   return new Date(Date.now() + delayMs);
 }
+
+/**
+ * Provider/transport failures that can plausibly succeed without changing the
+ * question or curriculum. Other HTTP 4xx/configuration failures are terminal;
+ * retrying those would spend calls without changing the outcome.
+ */
+export function isRetryableInferenceFailure(error: unknown): boolean {
+  const chain = errorChain(error);
+  for (const item of chain) {
+    const candidate = item as {
+      status?: unknown;
+      statusCode?: unknown;
+      code?: unknown;
+      name?: unknown;
+      message?: unknown;
+    };
+    const message = typeof candidate.message === 'string' ? candidate.message : '';
+    const statusValue = Number(candidate.status ?? candidate.statusCode);
+    const messageStatus = message.match(/Gemini(?: error)?\s+(\d{3})/i);
+    const status = Number.isInteger(statusValue) && statusValue > 0
+      ? statusValue
+      : messageStatus ? Number(messageStatus[1]) : null;
+
+    if (status !== null) {
+      return status === 408 || status === 425 || status === 429 || status >= 500;
+    }
+
+    const code = typeof candidate.code === 'string' ? candidate.code.toUpperCase() : '';
+    if ([
+      'ECONNRESET',
+      'ETIMEDOUT',
+      'EAI_AGAIN',
+      'ECONNREFUSED',
+      'ENETUNREACH',
+      'EHOSTUNREACH',
+      'EPIPE',
+      'UND_ERR_CONNECT_TIMEOUT',
+      'UND_ERR_SOCKET',
+    ].includes(code)) {
+      return true;
+    }
+
+    if (
+      candidate.name === 'AbortError' ||
+      candidate.name === 'SyntaxError' ||
+      /fetch failed|network error|gemini returned empty response/i.test(message)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function errorChain(error: unknown): unknown[] {
+  const chain: unknown[] = [];
+  let current = error;
+  for (let depth = 0; current && depth < 5; depth++) {
+    chain.push(current);
+    const cause = (current as { cause?: unknown }).cause;
+    if (!cause || cause === current) break;
+    current = cause;
+  }
+  return chain;
+}
