@@ -14,6 +14,24 @@
 
 /** After this many failed attempts the question is permanently abandoned. */
 export const MAX_VALIDATION_ATTEMPTS = 4;
+export const QUOTA_RESUME_GRACE_MS = 5_000;
+
+export function getQuotaResumeAt(lastQuotaPause: Date | string): Date {
+  const resumeAt = new Date(lastQuotaPause);
+  resumeAt.setUTCHours(24, 0, 0, 0);
+  resumeAt.setTime(resumeAt.getTime() + QUOTA_RESUME_GRACE_MS);
+  return resumeAt;
+}
+
+export function isQuotaPauseActive(
+  lastQuotaPause: Date | string | null | undefined,
+  now: Date = new Date(),
+): boolean {
+  if (!lastQuotaPause) return false;
+  const pauseTime = new Date(lastQuotaPause).getTime();
+  if (!Number.isFinite(pauseTime)) return false;
+  return now.getTime() < getQuotaResumeAt(new Date(pauseTime)).getTime();
+}
 
 /**
  * Retry delays indexed by the attempt_count value that was just written.

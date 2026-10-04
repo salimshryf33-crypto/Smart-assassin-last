@@ -292,6 +292,7 @@ export interface PrepOpsDashboard {
   };
   runningJobs:  PrepOpsRunningJob[];
   examTable:    PrepOpsExamRow[];
+  incompleteExams: PrepOpsExamRow[];
   orphanCount:  number;
   recentEvents: PrepOpsEvent[];
   healthStatus: 'healthy' | 'quota_wait' | 'active_recovery' | 'stalled' | 'process_down' | 'no_active_jobs';

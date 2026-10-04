@@ -35,6 +35,7 @@ import {
 } from '../lib/examValidation';
 import { syncPreparationStatus } from '../lib/examValidation/examPreparationStatus';
 import { getJobByExamId } from '../lib/examValidation/preparationQueue';
+import { getIncompletePreparationProgress } from '../lib/examValidation/livePreparationProgress';
 import { generateIntegrityReport } from '../lib/integrity/integrityChecker';
 import { evaluatePublishGate } from '../lib/integrity/publishGate';
 import { listVersions } from '../lib/integrity/canonicalVersionStore';
@@ -532,12 +533,13 @@ router.get('/observability/health', async (_req, res) => {
 // Queue depth, worker status, DLQ stats — the admin monitoring dashboard.
 router.get('/admin/preparation/overview', requireAuth, requireAdmin, async (_req, res) => {
   try {
-    const [queue, dlq, pending] = await Promise.all([
+    const [queue, dlq, pending, incompleteExams] = await Promise.all([
       getQueueOverview(),
       getDLQStats(),
       listPendingJobs(10),
+      getIncompletePreparationProgress(),
     ]);
-    res.json(ok({ queue, dlq, pending }));
+    res.json(ok({ queue, dlq, pending, incompleteExams }));
   } catch (err) {
     res.status(500).json(fail('PREP_OVERVIEW_FAILED', err instanceof Error ? err.message : String(err)));
   }

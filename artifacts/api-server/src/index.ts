@@ -9,7 +9,7 @@ import { startBackupScheduler } from "./lib/backupScheduler";
 import { restoreCurriculumFromDB } from "./lib/curriculumPersistence";
 import { scanUnlinkedExams } from "./lib/curriculumLinker";
 import { hasQuestionsSnapshot, loadQuestionsFromFile } from "./lib/questionStorage";
-import { runStartupValidation, startRetryScheduler, initPreparationQueue, syncAllPreparationStatuses, healOrphanQuestions } from "./lib/examValidation";
+import { startRetryScheduler, initPreparationQueue, syncAllPreparationStatuses, healOrphanQuestions } from "./lib/examValidation";
 import { startMetricsFlushTimer } from "./lib/observability/metricsCollector";
 
 const rawPort = process.env["PORT"];
@@ -105,9 +105,8 @@ app.listen(port, (err) => {
       await healOrphanQuestions().catch((err: unknown) =>
         logger.error({ err }, 'startup: healOrphanQuestions failed'),
       );
-      await runStartupValidation();
-      // Start the periodic retry/preparation scheduler after the initial scan.
-      // Scheduler fires every 5 min, throttled to MAX_CONCURRENT_EXAMS per tick.
+      // The persistent scheduler owns all recovery and startup validation.
+      // It restores any persisted UTC quota pause before its first pipeline run.
       startRetryScheduler();
     })
     .catch((err) =>

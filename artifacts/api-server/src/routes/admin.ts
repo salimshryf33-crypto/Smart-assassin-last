@@ -30,7 +30,6 @@ import {
   getGradingAuditSummary,
 } from '../lib/observability/metricsQueries';
 import {
-  getLivePreparationProgress,
   getLivePreparationProgressForExams,
   getOrderedQueueSnapshot,
   getRetrySchedulerHealth,
@@ -646,6 +645,7 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
       orphanRow,
       recentEventsRows,
       lastQuotaRow,
+      activeQueueExamRows,
     ] = await Promise.all([
       // 1. Global counts
       db.query<{ total_books: string; total_exams: string; total_questions: string }>(`
@@ -689,7 +689,7 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
         ORDER BY j.updated_at DESC LIMIT 30
       `),
       // 7. Per-exam metadata. The live question breakdown is calculated by
-      // getLivePreparationProgress below so every displayed percentage shares
+      // getLivePreparationProgressForExams below so every displayed percentage shares
       // one implementation.
       db.query<{
         exam_id: string; title: string; question_count: number | null;
@@ -727,6 +727,13 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
            OR payload::text ILIKE '%RESOURCE_EXHAUSTED%'
         ORDER BY created_at DESC LIMIT 1
       `),
+      // 11. Every queued exam id, so the queue snapshot can share the same
+      // batched live-progress map as the dashboard's other preparation views.
+      db.query<{ exam_id: string }>(`
+        SELECT DISTINCT exam_id
+        FROM public.exam_preparation_jobs
+        WHERE status IN ('running','processing','pending','retry','paused')
+      `),
     ]);
 
     // ── Merge status counts (MCQ + open questions) ────────────────────────────
@@ -742,9 +749,11 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
     const qMap: Record<string, number> = {};
     for (const row of jobStatusRows.rows) qMap[row.status] = Number(row.count);
 
-    const liveProgress = await getLivePreparationProgressForExams(
-      examTableRows.rows.map((row) => row.exam_id),
-    );
+    const liveProgress = await getLivePreparationProgressForExams([
+      ...examTableRows.rows.map((row) => row.exam_id),
+      ...runningJobRows.rows.map((row) => row.exam_id),
+      ...activeQueueExamRows.rows.map((row) => row.exam_id),
+    ]);
     const displayTitles = disambiguateExamTitles([
       ...examTableRows.rows.map((row) => ({
         examId: row.exam_id,
@@ -760,7 +769,7 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
 
     // ── Running jobs ──────────────────────────────────────────────────────────
     const runningJobs = await Promise.all(runningJobRows.rows.map(async (j) => {
-      const progress = liveProgress.get(j.exam_id) ?? await getLivePreparationProgress(j.exam_id);
+      const progress = liveProgress.get(j.exam_id)!;
       return {
         jobId:          j.id,
         examId:         j.exam_id,
@@ -800,9 +809,12 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
         lastUpdated:       r.updated_at?.toISOString() ?? null,
       };
     }).sort((a, b) => a.completionPct - b.completionPct);
+    const incompleteExams = examTable.filter(
+      (exam) => exam.totalQuestions > 0 && exam.completionPct < 100,
+    );
 
     // ── Sequential Scheduler state ────────────────────────────────────────────
-    const queueEntries = await getOrderedQueueSnapshot(20);
+    const queueEntries = await getOrderedQueueSnapshot(20, liveProgress);
     const sqActive = queueEntries[0] ?? null;
     const schedulerHealth = getRetrySchedulerHealth();
     const hasActiveJobs =
@@ -914,6 +926,7 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
       },
       runningJobs,
       examTable,
+      incompleteExams,
       orphanCount:   orphanRow.rows[0]?.count ?? 0,
       recentEvents:  recentEventsRows.rows.map(r => ({
         id:         r.id,

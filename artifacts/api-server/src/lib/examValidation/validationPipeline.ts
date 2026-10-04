@@ -84,6 +84,13 @@ const INTER_QUESTION_DELAY_MS = 2_000;
  * the caller (startup loop / scheduler) can stop processing further exams.
  */
 export async function runValidationForExam(examId: string): Promise<void> {
+  if (await hasCurrentUtcQuotaPause()) {
+    logger.info(
+      { examId },
+      'validationPipeline: skipped — persisted daily quota pause is still active',
+    );
+    return;
+  }
   const { acquired } = await withExamLock(examId, () => _runValidation(examId));
   if (!acquired) {
     logger.info(
@@ -91,6 +98,22 @@ export async function runValidationForExam(examId: string): Promise<void> {
       'validationPipeline: skipped — another worker already holds the lock',
     );
   }
+}
+
+async function hasCurrentUtcQuotaPause(): Promise<boolean> {
+  const pool = getSharedPool();
+  const { rows } = await pool.query<{ last_quota_pause: Date | string | null }>(`
+    SELECT MAX(updated_at) AS last_quota_pause
+    FROM public.exam_preparation_jobs
+    WHERE status = 'paused'
+      AND last_error ILIKE '%quota%'
+  `);
+  const lastQuotaPause = rows[0]?.last_quota_pause;
+  if (!lastQuotaPause) return false;
+
+  const startOfUtcDay = new Date();
+  startOfUtcDay.setUTCHours(0, 0, 0, 0);
+  return new Date(lastQuotaPause).getTime() >= startOfUtcDay.getTime();
 }
 
 /**
@@ -120,17 +143,15 @@ export async function runStartupValidation(): Promise<void> {
   logger.info({ count: candidates.length }, 'validationPipeline: startup — checking exams');
 
   for (const record of candidates) {
-    // countUnready respects retry windows and excludes terminal statuses
-    // Check both canonical-answer types (MCQ/TF) and open preparation types
-    const [unreadyCanon, unreadyOpen] = await Promise.all([
-      store.countUnready(record.examId),
-      openStore.countUnreadyOpen(record.examId),
-    ]);
-    const unready = unreadyCanon + unreadyOpen;
-    if (unready === 0) continue;
+    const progress = await getLivePreparationProgress(record.examId);
+    if (progress.retryableQuestions === 0) continue;
 
     logger.info(
-      { examId: record.examId, title: record.title, unreadyQuestions: unready },
+      {
+        examId: record.examId,
+        title: record.title,
+        retryableQuestions: progress.retryableQuestions,
+      },
       'validationPipeline: startup — validating exam',
     );
 

@@ -39,7 +39,7 @@ import { runValidationForExam }             from './validationPipeline';
 import { DailyQuotaExhaustedError }         from './canonicalAnswerDeriver';
 import {
   recoverStaleJobs,
-  enqueueExam,
+  reconcilePreparationQueue,
   getQueueOverview,
   getJobByExamId,
   getNextExamForSequentialScheduler,
@@ -59,6 +59,8 @@ let schedulerStartedAt: Date | null = null;
 let lastTickStartedAt: Date | null = null;
 let lastTickCompletedAt: Date | null = null;
 let lastTickError: string | null = null;
+let schedulerInitialized = false;
+let startupRestoreInProgress = false;
 
 export interface RetrySchedulerHealth {
   processRunning: boolean;
@@ -91,6 +93,7 @@ export function getRetrySchedulerHealth(): RetrySchedulerHealth {
 export function startRetryScheduler(): void {
   if (schedulerHandle !== null) return;
 
+  schedulerInitialized = false;
   schedulerStartedAt = new Date();
   lastTickError = null;
   logger.info(
@@ -99,12 +102,18 @@ export function startRetryScheduler(): void {
   );
 
   schedulerHandle = setInterval(() => {
+    if (!schedulerInitialized) {
+      initializeSchedulerAfterRestore().catch((err) =>
+        logger.error({ err }, 'retryScheduler: quota restore retry failed'),
+      );
+      return;
+    }
     runRetryTick().catch((err) =>
       logger.error({ err }, 'retryScheduler: tick error'),
     );
   }, SCHEDULER_INTERVAL_MS);
 
-  restoreQuotaPauseStateAndKick().catch((err) =>
+  initializeSchedulerAfterRestore().catch((err) =>
     logger.error({ err }, 'retryScheduler: initial resume check failed'),
   );
 }
@@ -124,6 +133,7 @@ export function stopRetryScheduler(): void {
     quotaResumeHandle = null;
   }
   quotaPausedUntil = 0;
+  schedulerInitialized = false;
 }
 
 // ─── Internal tick ────────────────────────────────────────────────────────────
@@ -155,8 +165,8 @@ async function runRetryTick(): Promise<void> {
       logger.info({ recovered }, 'retryScheduler: recovered stale preparation jobs');
     }
 
-    // ── 2. Ensure every eligible exam has a preparation job ──────────────────
-    await ensureQueuedForEligibleExams();
+    // ── 2. Reconcile only exams with due work from live per-question state ────
+    await reconcilePreparationQueue();
 
     const overview = await getQueueOverview();
     if (overview.pending === 0 && overview.running === 0 && overview.paused === 0) {
@@ -306,44 +316,13 @@ async function restoreQuotaPauseStateAndKick(): Promise<void> {
   await runRetryTick();
 }
 
-// ─── Eligible exam query ──────────────────────────────────────────────────────
-
-/**
- * For every exam with unready questions that has no active preparation job,
- * enqueue it.  Covers all six known question types (deterministic + open).
- */
-async function ensureQueuedForEligibleExams(): Promise<void> {
-  const pool = getSharedPool();
-  const { rows } = await pool.query<{ exam_id: string }>(
-    `SELECT DISTINCT unready.exam_id
-     FROM (
-       -- Deterministic types: mcq / true_false / fill_in_blank without terminal status
-       SELECT q.exam_id
-       FROM public.exam_questions q
-       LEFT JOIN public.exam_canonical_answers ca ON ca.question_id = q.id
-       WHERE q.question_type IN ('mcq', 'true_false', 'fill_in_blank')
-         AND (ca.validation_status IS NULL
-              OR ca.validation_status IN ('PENDING', 'VALIDATED', 'LOW_EVIDENCE'))
-       UNION
-       -- Open types: orphans (no record) or non-terminal
-       SELECT q.exam_id
-       FROM public.exam_questions q
-       LEFT JOIN public.exam_open_preparations op ON op.question_id = q.id
-       WHERE q.question_type IN ('short_answer', 'essay', 'calculation')
-         AND (op.question_id IS NULL
-              OR op.preparation_status IN ('PENDING', 'VALIDATED', 'LOW_EVIDENCE'))
-     ) AS unready
-     WHERE NOT EXISTS (
-       SELECT 1 FROM public.exam_preparation_jobs epj
-       WHERE epj.exam_id = unready.exam_id
-         AND epj.status IN ('pending', 'running', 'paused')
-     )
-     LIMIT 50`,
-  );
-
-  for (const { exam_id } of rows) {
-    await enqueueExam(exam_id, 1).catch((err: unknown) =>
-      logger.error({ err, examId: exam_id }, 'retryScheduler: enqueue failed'),
-    );
+async function initializeSchedulerAfterRestore(): Promise<void> {
+  if (schedulerInitialized || startupRestoreInProgress) return;
+  startupRestoreInProgress = true;
+  try {
+    await restoreQuotaPauseStateAndKick();
+    schedulerInitialized = true;
+  } finally {
+    startupRestoreInProgress = false;
   }
 }

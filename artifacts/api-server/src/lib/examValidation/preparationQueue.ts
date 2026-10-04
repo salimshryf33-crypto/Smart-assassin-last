@@ -451,7 +451,7 @@ export async function getOrderedQueueSnapshot(
       waitingRetryQuestions: progress.waitingRetryQuestions,
       terminalFailedQuestions: progress.terminalFailedQuestions,
       nextEligibleAt: progress.nextEligibleAt,
-      createdAt:          new Date(row.created_at).getTime(),
+      createdAt:          row.created_at,
     };
   });
 

@@ -20,6 +20,14 @@ description: Quota limits per model, which models work on this API key, isDailyQ
 - Chemistry (~5 calls) + Biology 2022 failures from 503 spikes (~10 calls) can exhaust today's budget.
 - When quota exhausted mid-batch, remaining exams stay `pending` and are retried on next startup.
 
+## Quota pause restart gate
+
+A persisted daily quota pause is authoritative across restarts and all validation entry points. Restore it before the scheduler's first tick, and block direct/manual validation calls until the next UTC midnight reset plus the existing grace period.
+
+**Why:** Restarting the API does not reset Gemini's daily quota; validating before restoring the pause can spend another doomed request.
+
+**How to apply:** Keep startup recovery and manual validation behind the persisted pause check. Queue reconciliation and progress reads remain safe during the pause because they do not call Gemini.
+
 ## isDailyQuota detection rule
 
 The function checks the 429 body for daily-quota indicators:
