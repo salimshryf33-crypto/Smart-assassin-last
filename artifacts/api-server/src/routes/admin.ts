@@ -683,7 +683,12 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
         SELECT j.id, j.exam_id, r.title, j.status,
                r.created_at,
                j.started_at, j.heartbeat, j.worker_id
-        FROM public.exam_preparation_jobs j
+        FROM (
+          SELECT DISTINCT ON (exam_id) *
+          FROM public.exam_preparation_jobs
+          WHERE status = 'running'
+          ORDER BY exam_id, updated_at DESC
+        ) j
         LEFT JOIN public.exam_records r ON r.exam_id = j.exam_id
         WHERE j.status IN ('running','processing','pending','retry','paused')
         ORDER BY j.updated_at DESC LIMIT 30
@@ -693,12 +698,20 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
       // one implementation.
       db.query<{
         exam_id: string; title: string; question_count: number | null;
-        preparation_status: string | null; updated_at: Date | null; created_at: Date | null;
+        preparation_status: string | null; queue_status: string | null; updated_at: Date | null; created_at: Date | null;
       }>(`
         SELECT
-          r.exam_id, r.title, r.question_count, r.preparation_status,
+          r.exam_id, r.title, r.question_count, r.preparation_status, qj.status AS queue_status,
           r.updated_at, r.created_at
         FROM public.exam_records r
+        LEFT JOIN LATERAL (
+          SELECT status
+          FROM public.exam_preparation_jobs
+          WHERE exam_id = r.exam_id
+            AND status IN ('running','pending','paused')
+          ORDER BY updated_at DESC
+          LIMIT 1
+        ) qj ON TRUE
         ORDER BY r.created_at ASC
       `),
       // 8. MCQ questions with no canonical answer (orphans)
@@ -721,11 +734,18 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
       `),
       // 10. Last quota-related event
       db.query<{ created_at: Date }>(`
-        SELECT created_at FROM public.validation_audit_log
-        WHERE event ILIKE '%quota%'
-           OR payload::text ILIKE '%QuotaExhausted%'
-           OR payload::text ILIKE '%RESOURCE_EXHAUSTED%'
-        ORDER BY created_at DESC LIMIT 1
+        SELECT MAX(created_at) AS created_at
+        FROM (
+          SELECT created_at
+          FROM public.validation_audit_log
+          WHERE event ILIKE '%quota%'
+             OR payload::text ILIKE '%QuotaExhausted%'
+             OR payload::text ILIKE '%RESOURCE_EXHAUSTED%'
+          UNION ALL
+          SELECT updated_at AS created_at
+          FROM public.exam_preparation_jobs
+          WHERE last_error ILIKE '%quota%'
+        ) quota_events
       `),
       // 11. Every queued exam id, so the queue snapshot can share the same
       // batched live-progress map as the dashboard's other preparation views.
@@ -739,8 +759,20 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
     // ── Merge status counts (MCQ + open questions) ────────────────────────────
     const STATUS_KEYS = ['READY','VALIDATED','PENDING','PROCESSING','LOW_EVIDENCE','PERMANENT_LOW_EVIDENCE','INVALID'] as const;
     const statusCounts: Record<string, number> = Object.fromEntries(STATUS_KEYS.map(k => [k, 0]));
-    for (const row of mcqStatusRows.rows)  statusCounts[row.status]             = (statusCounts[row.status]  ?? 0) + Number(row.count);
-    for (const row of openStatusRows.rows) statusCounts[row.status?.toUpperCase() ?? 'PENDING'] = (statusCounts[row.status?.toUpperCase() ?? 'PENDING'] ?? 0) + Number(row.count);
+    const normalizePreparationStatus = (status: string | null | undefined): string => {
+      const normalized = status?.toUpperCase();
+      if (!normalized || normalized === 'PENDING') return 'PENDING';
+      if (normalized === 'GENERATING') return 'PROCESSING';
+      return STATUS_KEYS.includes(normalized as typeof STATUS_KEYS[number]) ? normalized : 'PENDING';
+    };
+    for (const row of mcqStatusRows.rows) {
+      const status = normalizePreparationStatus(row.status);
+      statusCounts[status] += Number(row.count);
+    }
+    for (const row of openStatusRows.rows) {
+      const status = normalizePreparationStatus(row.status);
+      statusCounts[status] += Number(row.count);
+    }
     const totalPrepared = Object.values(statusCounts).reduce((s, n) => s + n, 0);
     const statusPct: Record<string, number> = {};
     for (const [k, v] of Object.entries(statusCounts)) statusPct[k] = totalPrepared === 0 ? 0 : Math.round((v / totalPrepared) * 100);
@@ -806,6 +838,7 @@ router.get('/prep-ops', requireAuth, requireAdmin, async (_req, res) => {
         completionPct:     progress.progressPct,
         progressState:     progress.totalQuestions === 0 ? 'calculating' as const : 'ready' as const,
         preparationStatus: r.preparation_status ?? 'unknown',
+        queueStatus:       r.queue_status,
         lastUpdated:       r.updated_at?.toISOString() ?? null,
       };
     }).sort((a, b) => a.completionPct - b.completionPct);

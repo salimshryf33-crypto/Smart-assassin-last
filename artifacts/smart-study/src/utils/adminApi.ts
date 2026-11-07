@@ -202,6 +202,7 @@ export interface PrepOpsExamRow {
   completionPct:     number;
   progressState:     'ready' | 'calculating';
   preparationStatus: string;
+  queueStatus:       string | null;
   lastUpdated:       string | null;
 }
 

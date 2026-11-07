@@ -17,13 +17,13 @@
  * Capacity behaviour:
  *   - Provider-agnostic: no hardcoded quota values
  *   - If AI capacity is available → chains to the next exam automatically
- *   - If quota is exhausted → pauses cleanly; resumes on next tick
+ *   - If quota is exhausted → pauses cleanly; schedules a post-reset resume
  *   - If an exam's remaining questions are all in retry windows → advances to
  *     the next eligible exam without wasting a tick waiting
  *
  * Resume safety:
  *   - `runValidationForExam` is idempotent: it skips READY/terminal questions
- *   - Job rows persist progress (ready_questions / total_questions)
+ *   - Question status rows are the source of truth for resume ordering
  *   - Stale-job recovery resets crashed workers so they can be claimed again
  *
  * Original behaviour preserved:
@@ -50,7 +50,6 @@ const SCHEDULER_INTERVAL_MS = 5 * 60 * 1_000;   // 5 minutes
 const QUOTA_RESUME_GRACE_MS = 5_000;             // allow the UTC quota reset to settle
 const MAX_EXAMS_PER_TICK    = 50;                 // safety cap — prevents infinite loop if
                                                   // many exams each have 0 eligible questions
-
 let schedulerHandle: ReturnType<typeof setInterval> | null = null;
 let quotaResumeHandle: ReturnType<typeof setTimeout> | null = null;
 let quotaPausedUntil = 0;
@@ -265,6 +264,12 @@ async function runRetryTick(): Promise<void> {
   }
 }
 
+/**
+ * Gemini's daily free-tier quota resets at the next UTC midnight. A timer
+ * makes resumption deterministic instead of relying only on the five-minute
+ * polling interval or a process restart. The interval remains as a safety
+ * net if the process is sleeping at the exact reset time.
+ */
 function scheduleQuotaResume(): void {
   const now = new Date();
   const nextReset = new Date(now);
